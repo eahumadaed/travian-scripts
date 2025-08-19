@@ -9,8 +9,8 @@
 // @match        *://googleads.g.doubleclick.net/*
 // @run-at       document-idle
 // @grant        none
-// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/AutoPlay%20OADTS%20%2B%20Cross-Frame%20AutoSkip.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/AutoPlay%20OADTS%20%2B%20Cross-Frame%20AutoSkip.user.js
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/AutoPlay%20OADTS%20%2B%20Cross-Frame%20AutoSkip.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/AutoPlay%20OADTS%20%2B%20Cross-Frame%20AutoSkip.user.js
 // ==/UserScript==
 
 (function () {

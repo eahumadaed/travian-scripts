@@ -14,8 +14,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      *
-// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20DemolitionMan%202.1.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20DemolitionMan%202.1.user.js
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20DemolitionMan%202.1.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20DemolitionMan%202.1.user.js
 // ==/UserScript==
 
 (function () {

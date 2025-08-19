@@ -11,8 +11,8 @@
 // @exclude     *.css
 // @exclude     *.js
 // @grant        none
-// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20UI%20Cleaner%20Modo%20Oscuro.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20UI%20Cleaner%20Modo%20Oscuro.user.js
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20UI%20Cleaner%20Modo%20Oscuro.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20UI%20Cleaner%20Modo%20Oscuro.user.js
 // ==/UserScript==
 
 (function() {

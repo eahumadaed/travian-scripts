@@ -9,8 +9,8 @@
 // @exclude     *://blog.travian.*
 // @exclude     *.css
 // @exclude     *.js
-// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Farmlist%20Tools.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Farmlist%20Tools.user.js
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Farmlist%20Tools.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Farmlist%20Tools.user.js
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=travian.com
 // @run-at       document-idle
 // @license      MIT

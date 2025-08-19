@@ -10,8 +10,8 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
-// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Attack%20Detector.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Attack%20Detector.user.js
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Attack%20Detector.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Attack%20Detector.user.js
 // ==/UserScript==
 
 (function () {

@@ -12,8 +12,8 @@
 // @exclude     *.js
 // @run-at       document-idle
 // @grant        none
-// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Hero%20Helper.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Hero%20Helper.user.js
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
 // ==/UserScript==
 
 
