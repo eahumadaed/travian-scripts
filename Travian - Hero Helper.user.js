@@ -6,6 +6,7 @@
 // @author       Edi
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
+// @exclude     *://*.travian.*/report*
 // @exclude     *://support.travian.*
 // @exclude     *://blog.travian.*
 // @exclude     *.css

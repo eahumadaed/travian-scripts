@@ -5,6 +5,7 @@
 // @description  Detecta ataques entrantes (sidebar + infobox) → consolida olas por atacante, modal persistente y avisos Telegram (nuevos + T-10). Sin polling agresivo: reacciona a render/DOM.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
+// @exclude     *://*.travian.*/report*
 // @exclude     *://support.travian.*
 // @exclude     *://blog.travian.*
 // @exclude     *.css

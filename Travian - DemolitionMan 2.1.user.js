@@ -8,6 +8,7 @@
 // @include        *://*/*.travian.*
 // @exclude     *://support.travian.*
 // @exclude     *://blog.travian.*
+// @exclude     *://*.travian.*/report*
 // @exclude     *.css
 // @exclude     *.js
 // @run-at       document-idle

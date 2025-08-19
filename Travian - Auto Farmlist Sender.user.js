@@ -8,6 +8,7 @@
 // @include      *://*/*.travian.*
 // @exclude      *://support.travian.*
 // @exclude      *://blog.travian.*
+// @exclude     *://*.travian.*/report*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      *travian.com
