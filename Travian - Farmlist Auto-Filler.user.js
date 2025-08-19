@@ -8,6 +8,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      *.travian.com
+// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Farmlist%20Auto-Filler.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Farmlist%20Auto-Filler.user.js
 // ==/UserScript==
 
 (function () {

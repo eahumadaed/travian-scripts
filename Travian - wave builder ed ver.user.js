@@ -6,6 +6,8 @@
 // @license        GPL version 3 or any later version; http://www.gnu.org/copyleft/gpl.html
 // @match          https://*.travian.com/build.php*gid=16&tt=2
 // @version        2.11
+// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20wave%20builder%20ed%20ver.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20wave%20builder%20ed%20ver.user.js
 // ==/UserScript==
 
 function allInOneOpera () {

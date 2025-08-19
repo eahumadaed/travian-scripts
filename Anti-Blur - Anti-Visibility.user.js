@@ -6,6 +6,11 @@
 // @author       Edi el Oscuro
 // @match        https://*.travian.*/*
 // @grant        none
+
+// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Anti-Blur%20-%20Anti-Visibility.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Anti-Blur%20-%20Anti-Visibility.user.js
+
+
 // ==/UserScript==
 
 (function() {

@@ -11,6 +11,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      *travian.com
+// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
 // ==/UserScript==
 
 (function () {

@@ -11,7 +11,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      botphader.com
 // @connect         api.telegram.org
-
+// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Attack%20Detector.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Attack%20Detector.user.js
 // ==/UserScript==
 // Función que devuelve true si es pestaña principal
 function isMainTab() {

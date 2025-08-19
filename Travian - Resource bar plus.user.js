@@ -11,7 +11,8 @@
 // @exclude     *://blog.travian.*
 // @exclude     *.css
 // @exclude     *.js
-
+// @updateURL   https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Resource%20bar%20plus.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/blob/main/Travian%20-%20Resource%20bar%20plus.user.js
 // @version        2.25.20
 // ==/UserScript==
 
