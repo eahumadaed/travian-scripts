@@ -138,8 +138,8 @@
         action: "demolishBuilding",
       }),
       onload: (response) => {
-        if (response.status === 200) {
-          log(`✅ 200 OK → Demolition accepted (did=${villageId}, slot=${slotId})`);
+        if (response.status === 200 || response.status === 204) {
+          log(`✅ ${response.status} OK → Demolition accepted (did=${villageId}, slot=${slotId})`);
           onDone && onDone({ status: 200 });
           return;
         }
@@ -148,7 +148,9 @@
           onDone && onDone({ status: 400, inProgress: true });
           return;
         }
+        
         log(`⚠️ ${response.status} unexpected → short retry (did=${villageId}, slot=${slotId})`);
+        //console.log(response.status);
         onDone && onDone({ status: response.status, error: true });
       },
       onerror: (err) => {
