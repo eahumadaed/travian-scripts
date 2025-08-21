@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.4.2
+// @version      1.4.3
 // @description  Balanceo de producción con histeresis (evita ping-pong), auto-navegación a aldea del héroe si lectura de stock está vieja, persistencia multi-pestaña, minimizado, observer, health 1 decimal, countdown h:mm:ss.
 // @author       Edi
 // @include        *://*.travian.*
@@ -784,7 +784,7 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
    * DAYLYQUEST
    ******************************************************************/
   const DQ_LOCK_KEY = "HH_DQ_LOCK";
-  const DQ_LOCK_TTL = 45 * 1000; // evitar doble reclamo multi-pestaña
+  const DQ_LOCK_TTL = 45 * 1000;
 
   function tryAcquireLock(key = DQ_LOCK_KEY, ttl = DQ_LOCK_TTL) {
     try {
@@ -794,7 +794,7 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
       localStorage.setItem(key, String(t));
       return true;
     } catch {
-      return true; // si localStorage falla, seguimos (mejor no bloquear)
+      return true;
     }
   }
 
@@ -809,23 +809,12 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     return h;
   }
 
-  async function fetchDailyQuestsSummary() {
+  // 1) Obtener lastSeenAt (toca la API y te da el valor)
+  async function fetchDQLastSeenAt() {
     const headers = makeStdHeaders();
-    const nowSec = Math.floor(Date.now() / 1000);
+    const body = { query: "query{ownPlayer{dailyQuests{lastSeenAt}}}" };
 
-    const body = {
-      query: `query($lastSeenAt:Int){
-        ownPlayer{
-          dailyQuests{
-            achievedPoints
-            rewards{ id awardRedeemed points }
-          }
-        }
-      }`,
-      variables: { lastSeenAt: nowSec }
-    };
-
-    logI("📥 DQ: consultando resumen (puntos + rewards)...");
+    logI("📥 DQ: consultando lastSeenAt...");
     const res = await fetch("/api/v1/graphql", {
       method: "POST",
       credentials: "include",
@@ -835,9 +824,80 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
 
     if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`);
     const j = await res.json();
-    return j?.data?.ownPlayer?.dailyQuests || null;
+    const v = j?.data?.ownPlayer?.dailyQuests?.lastSeenAt;
+    logI(`📥 DQ: lastSeenAt=${v || "null"}`);
+    return Number.isFinite(v) ? v : null;
   }
 
+  // 2) Resumen (puntos + rewards), usando $lastSeenAt para evitar el error
+  async function fetchDailyQuestsSummary() {
+    const headers = makeStdHeaders();
+    let lastSeenAt = null;
+
+    try {
+      lastSeenAt = await fetchDQLastSeenAt();
+    } catch (e) {
+      logI("⚠️ DQ: no se pudo leer lastSeenAt, intentaré sin variable.", e);
+    }
+
+    const qWithVar = `
+      query($lastSeenAt:Int){
+        ownPlayer{
+          dailyQuests{
+            achievedPoints
+            rewards{ id awardRedeemed points }
+          }
+          prevState: dailyQuests(until:$lastSeenAt){ achievedPoints }
+        }
+      }`;
+
+    const qNoVar = `
+      query{
+        ownPlayer{
+          dailyQuests{
+            achievedPoints
+            rewards{ id awardRedeemed points }
+          }
+        }
+      }`;
+
+    // Construimos body según tengamos lastSeenAt o no
+    let body = lastSeenAt != null
+      ? { query: qWithVar, variables: { lastSeenAt } }
+      : { query: qNoVar };
+
+    logI("📥 DQ: consultando resumen (con variable si disponible)...");
+    let res = await fetch("/api/v1/graphql", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    // Si el servidor se queja de la variable, reintenta sin variable
+    if (!res.ok) {
+      const txt = await res.text();
+      if (txt.includes('Variable "$lastSeenAt" is never used')) {
+        logI("↩️ DQ: variable no usada; reintentando sin variable.");
+        res = await fetch("/api/v1/graphql", {
+          method: "POST",
+          credentials: "include",
+          headers,
+          body: JSON.stringify({ query: qNoVar }),
+        });
+      } else {
+        throw new Error(`GraphQL HTTP ${res.status} ${txt.slice(0,120)}`);
+      }
+    }
+
+    const j = await res.json();
+    const dq = j?.data?.ownPlayer?.dailyQuests || null;
+    if (!dq) throw new Error("DQ: respuesta vacía.");
+    return dq;
+  }
+
+
+  // 3) Reclamar un reward
   async function claimDailyQuestReward(rewardId) {
     const headers = makeStdHeaders();
     const payload = { action: "dailyQuest", questId: rewardId };
@@ -859,50 +919,50 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
 
 
 
+
+  // 4) Flujo principal (detectar "!" y reclamar lo pendiente)
   async function checkDailyQuestsIndicator() {
     try {
       const a = document.querySelector("a.dailyQuests");
       if (!a) { logI("🪄 DQ: enlace no encontrado."); return; }
 
       const ind = a.querySelector(".indicator");
-      const bang = (ind?.textContent || "").trim();
-      const hasBang = /!/.test(bang);
+      const hasBang = /!/.test((ind?.textContent || "").trim());
 
       if (!hasBang) {
         logI("ℹ️ DQ: presente pero sin '!'. Nada que hacer.");
         return;
       }
 
-      // Evitar ejecuciones simultáneas multi-pestaña
       if (!tryAcquireLock()) {
         logI("🔒 DQ: lock activo; omito para evitar duplicados.");
         return;
       }
 
-      // 1) Ver puntos y rewards pendientes
+      // 👉 Primero tocamos lastSeenAt (internamente fetchDailyQuestsSummary también lo usa)
       const dq = await fetchDailyQuestsSummary();
-      if (!dq) { logI("⚠️ DQ: sin datos."); return; }
-
       const pts = dq.achievedPoints | 0;
       const rewards = dq.rewards || [];
-      const pending = rewards.filter(r => !r.awardRedeemed && (r.points | 0) <= pts);
+      const pending = rewards
+        .filter(r => !r.awardRedeemed && (r.points | 0) <= pts)
+        .sort((a,b) => (a.points|0) - (b.points|0)); // 25 → 50 → 75 → 100
 
       if (!pending.length) {
         logI(`ℹ️ DQ: nada pendiente (tienes ${pts} pts).`);
         return;
       }
 
-      // 2) Reclamar todos los pendientes (25, 50, 75, 100…)
       for (const r of pending) {
         await claimDailyQuestReward(r.id);
-        await sleep(400 + Math.random() * 400); // pequeño delay
+        await sleep(400 + Math.random() * 400);
       }
 
-      logI(`✅ DQ: proceso terminado. Puntos=${pts}, reclamados=${pending.map(p=>p.id).join(", ")}`);
+      logI(`✅ DQ: terminado. Puntos=${pts}, reclamados=${pending.map(p=>p.id).join(", ")}`);
     } catch (e) {
       logI("⚠️ Error en checkDailyQuestsIndicator:", e);
     }
   }
+
 
   /******************************************************************
    * Init
