@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.4.0
+// @version      1.4.1
 // @description  Balanceo de producción con histeresis (evita ping-pong), auto-navegación a aldea del héroe si lectura de stock está vieja, persistencia multi-pestaña, minimizado, observer, health 1 decimal, countdown h:mm:ss.
 // @author       Edi
 // @include        *://*.travian.*
