@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.4.1
+// @version      1.4.2
 // @description  Balanceo de producción con histeresis (evita ping-pong), auto-navegación a aldea del héroe si lectura de stock está vieja, persistencia multi-pestaña, minimizado, observer, health 1 decimal, countdown h:mm:ss.
 // @author       Edi
 // @include        *://*.travian.*
@@ -88,19 +88,30 @@
     }
 
   const saveState = (s)=>{ try{ localStorage.setItem(LS_STATE_KEY, JSON.stringify(s)); }catch(e){logI("⚠️ Error guardando HH_STATE:",e);} };
-  function loadState(){
-    try{
+  function loadState() {
+    try {
       const raw = localStorage.getItem(LS_STATE_KEY);
-      if(!raw) return baseState();
+      if (!raw) {
+        // 👉 Primera vez: auto ON
+        const o = baseState();
+        o.autoMode = true;          // 🚀 solo la PRIMERA vez
+        o._firstRunDone = true;     // marca interna (por si la quieres usar luego)
+        saveState(o);
+        return o;
+      }
+
       const o = JSON.parse(raw);
-      o.position ||= {x:10,y:10};
+      o.position ||= { x: 10, y: 10 };
       o.cooldowns ||= {};
       o.cooldowns.lastAutoChange ||= 0;
-      o.minimized = typeof o.minimized==="boolean" ? o.minimized : false;
+      o.minimized = typeof o.minimized === "boolean" ? o.minimized : false;
       o.villages ||= {}; // { [did]: { lastStockTs } }
       return o;
-    }catch{ return baseState(); }
+    } catch {
+      return baseState();
+    }
   }
+
   function baseState(){
     return {
       position:{x:10,y:10},
@@ -768,6 +779,131 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     }
   }
 
+
+  /******************************************************************
+   * DAYLYQUEST
+   ******************************************************************/
+  const DQ_LOCK_KEY = "HH_DQ_LOCK";
+  const DQ_LOCK_TTL = 45 * 1000; // evitar doble reclamo multi-pestaña
+
+  function tryAcquireLock(key = DQ_LOCK_KEY, ttl = DQ_LOCK_TTL) {
+    try {
+      const last = parseInt(localStorage.getItem(key) || "0", 10) || 0;
+      const t = Date.now();
+      if (t - last < ttl) return false;
+      localStorage.setItem(key, String(t));
+      return true;
+    } catch {
+      return true; // si localStorage falla, seguimos (mejor no bloquear)
+    }
+  }
+
+  function makeStdHeaders() {
+    const h = {
+      "accept": "application/json, text/javascript, */*; q=0.01",
+      "content-type": "application/json; charset=UTF-8",
+      "x-requested-with": "XMLHttpRequest",
+    };
+    const xv = guessXVersion();
+    if (xv) h["x-version"] = xv;
+    return h;
+  }
+
+  async function fetchDailyQuestsSummary() {
+    const headers = makeStdHeaders();
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const body = {
+      query: `query($lastSeenAt:Int){
+        ownPlayer{
+          dailyQuests{
+            achievedPoints
+            rewards{ id awardRedeemed points }
+          }
+        }
+      }`,
+      variables: { lastSeenAt: nowSec }
+    };
+
+    logI("📥 DQ: consultando resumen (puntos + rewards)...");
+    const res = await fetch("/api/v1/graphql", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`);
+    const j = await res.json();
+    return j?.data?.ownPlayer?.dailyQuests || null;
+  }
+
+  async function claimDailyQuestReward(rewardId) {
+    const headers = makeStdHeaders();
+    const payload = { action: "dailyQuest", questId: rewardId };
+
+    logI(`🏅 DQ: reclamando ${rewardId}...`);
+    const res = await fetch("/api/v1/daily-quest/award", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      referrer: location.origin + "/dorf1.php",
+      body: JSON.stringify(payload),
+    });
+
+    const text = await res.text();
+    const ok = res.ok;
+    logI(`🧾 DQ: ${rewardId} → ${ok ? "OK" : "FAIL"} [${res.status}] ${text.slice(0,120)}`);
+    return { ok, status: res.status, body: text };
+  }
+
+
+
+  async function checkDailyQuestsIndicator() {
+    try {
+      const a = document.querySelector("a.dailyQuests");
+      if (!a) { logI("🪄 DQ: enlace no encontrado."); return; }
+
+      const ind = a.querySelector(".indicator");
+      const bang = (ind?.textContent || "").trim();
+      const hasBang = /!/.test(bang);
+
+      if (!hasBang) {
+        logI("ℹ️ DQ: presente pero sin '!'. Nada que hacer.");
+        return;
+      }
+
+      // Evitar ejecuciones simultáneas multi-pestaña
+      if (!tryAcquireLock()) {
+        logI("🔒 DQ: lock activo; omito para evitar duplicados.");
+        return;
+      }
+
+      // 1) Ver puntos y rewards pendientes
+      const dq = await fetchDailyQuestsSummary();
+      if (!dq) { logI("⚠️ DQ: sin datos."); return; }
+
+      const pts = dq.achievedPoints | 0;
+      const rewards = dq.rewards || [];
+      const pending = rewards.filter(r => !r.awardRedeemed && (r.points | 0) <= pts);
+
+      if (!pending.length) {
+        logI(`ℹ️ DQ: nada pendiente (tienes ${pts} pts).`);
+        return;
+      }
+
+      // 2) Reclamar todos los pendientes (25, 50, 75, 100…)
+      for (const r of pending) {
+        await claimDailyQuestReward(r.id);
+        await sleep(400 + Math.random() * 400); // pequeño delay
+      }
+
+      logI(`✅ DQ: proceso terminado. Puntos=${pts}, reclamados=${pending.map(p=>p.id).join(", ")}`);
+    } catch (e) {
+      logI("⚠️ Error en checkDailyQuestsIndicator:", e);
+    }
+  }
+
   /******************************************************************
    * Init
    ******************************************************************/
@@ -780,6 +916,8 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
 
     const st=loadState();
     if(!st.lastJson){ await fetchHeroJson(true,"initial"); await repaint(); }
+    
+    setTimeout(checkDailyQuestsIndicator, 1200);
 
     await autoBalanceIfNeeded("init");
   }
