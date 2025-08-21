@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.4.4
+// @version      1.4.5
 // @description  Balanceo de producción con histeresis (evita ping-pong), auto-navegación a aldea del héroe si lectura de stock está vieja, persistencia multi-pestaña, minimizado, observer, health 1 decimal, countdown h:mm:ss.
 // @author       Edi
 // @include        *://*.travian.*
@@ -1033,6 +1033,8 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     if(!st.lastJson){ await fetchHeroJson(true,"initial"); await repaint(); }
     
     setTimeout(checkDailyQuestsIndicator, 1200);
+    setTimeout(onAssignPointsApply, 1200);
+
 
     await autoBalanceIfNeeded("init");
   }
