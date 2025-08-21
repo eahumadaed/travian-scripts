@@ -13,6 +13,8 @@
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      loverman.net
+// @updateURL  https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Test%20Headless.user.js
+// @downloadURL https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Test%20Headless.user.js
 // ==/UserScript==
 
 (function () {
