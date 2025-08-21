@@ -14,7 +14,13 @@
 
 (function () {
   "use strict";
-
+  function esacosaexiste() {
+    return !!document.querySelector('#stockBar .warehouse .capacity');
+  }
+  if (!esacosaexiste()) {
+    //console.log('🛑 stockBar no encontrado → abort.');
+    return; // no carga nada más
+  }
   const VILLAGE_TABLE_SELECTOR = "table.villages.borderGap tbody tr";
   const GRAPHQL_URL = "/api/v1/graphql";
   const ADD_SLOT_URL = "/api/v1/farm-list/slot";

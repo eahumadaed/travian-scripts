@@ -21,7 +21,13 @@
 
 (function () {
   "use strict";
-
+  function esacosaexiste() {
+    return !!document.querySelector('#stockBar .warehouse .capacity');
+  }
+  if (!esacosaexiste()) {
+    //console.log('🛑 stockBar no encontrado → abort.');
+    return; // no carga nada más
+  }
   /******************************************************************
    * Constantes / helpers
    ******************************************************************/

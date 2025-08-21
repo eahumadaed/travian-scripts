@@ -19,7 +19,13 @@
 
 (function () {
   'use strict';
-
+  function esacosaexiste() {
+    return !!document.querySelector('#stockBar .warehouse .capacity');
+  }
+  if (!esacosaexiste()) {
+    //console.log('🛑 stockBar no encontrado → abort.');
+    return; // no carga nada más
+  }
   /* ------------------------ Config ------------------------ */
   const BATCH_SIZE = 60; // DELETE slots per batch
   const TOAST_MS = 3500;

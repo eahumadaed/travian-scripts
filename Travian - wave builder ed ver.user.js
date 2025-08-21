@@ -11,7 +11,13 @@
 // ==/UserScript==
 
 function allInOneOpera () {
-
+  function esacosaexiste() {
+    return !!document.querySelector('#stockBar .warehouse .capacity');
+  }
+  if (!esacosaexiste()) {
+    //console.log('🛑 stockBar no encontrado → abort.');
+    return; // no carga nada más
+  }
 var version = '2.12';
 var defInterval = 200;
 
