@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ▶️ AutoPlay OADTS + Cross-Frame AutoSkip (IMA)
 // @namespace    https://edi-autoclick
-// @version      1.3
-// @description  Autoplay en media.oadts.com y Skip Ad en iframe IMA (35s + 1 reintento a 5s) via postMessage
+// @version      1.4
+// @description  Autoplay en media.oadts.com y Skip Ad en iframe IMA (35s + 1 reintento a 5s) via postMessage + Reload si Chrome quita el anuncio (<20s).
 // @match        *://media.oadts.com/*
 // @match        *://imasdk.googleapis.com/*
 // @match        *://*.googlesyndication.com/*
@@ -44,6 +44,8 @@
     }
   };
 
+  const qs = (sel) => document.querySelector(sel);
+
   // ========= Selectors =========
   const PLAY_SELECTORS = [
     '.atg-gima-big-play-button',
@@ -58,6 +60,88 @@
     '.ytp-ad-skip-button',
   ];
 
+  // ========= Detección de Heavy Ad (mensaje "Se quitó el anuncio") =========
+  const HEAVY_PATTERNS = [
+    /Se quitó el anuncio/i,
+    /Chrome quitó este anuncio porque usó demasiados recursos/i
+  ];
+
+  function hasHeavyAdMessage() {
+    try {
+      const nodes = document.querySelectorAll('#main-message span, #details p, h1 span, p');
+      for (const n of nodes) {
+        const t = (n.textContent || '').trim();
+        if (t && HEAVY_PATTERNS.some(rx => rx.test(t))) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function bumpReloadCount() {
+    try {
+      const key = 'OADTS_RELOAD_COUNT';
+      const obj = JSON.parse(sessionStorage.getItem(key) || '{}');
+      const vrid = (new URLSearchParams(location.search)).get('vrid') || 'default';
+      const now = Date.now();
+      const entry = obj[vrid] || { count: 0, ts: now };
+      // Ventana de 60s para acotar loops
+      if (now - entry.ts > 60_000) { entry.count = 0; entry.ts = now; }
+      entry.count++;
+      obj[vrid] = entry;
+      sessionStorage.setItem(key, JSON.stringify(obj));
+      return entry.count;
+    } catch (_) {
+      return 1;
+    }
+  }
+
+  function startHeavyAdGuard() {
+    const WINDOW_MS = 20_000; // solo los primeros 20s después del Play
+    const deadline = Date.now() + WINDOW_MS;
+    let active = true;
+
+    const tryReloadIfNeeded = (reason = 'observer') => {
+      if (!active) return;
+      if (Date.now() > deadline) {
+        cleanup();
+        return;
+      }
+      if (hasHeavyAdMessage()) {
+        const n = bumpReloadCount();
+        if (n <= 3) {
+          log(`♻️ [HeavyAd] Detectado (<20s, ${reason}). Recargando iframe... (attempt ${n})`);
+          try { location.reload(); } catch (_) { location.href = location.href; }
+        } else {
+          log('🛑 [HeavyAd] Límite de recargas alcanzado (60s). No recargo de nuevo.');
+          cleanup();
+        }
+      }
+    };
+
+    // Observer + chequeos periódicos (por si el DOM no muta)
+    let intervalId = null;
+    let timeoutId = null;
+    let mo = null;
+    try {
+      mo = new MutationObserver(() => tryReloadIfNeeded('mutation'));
+      mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    } catch (_) {}
+
+    intervalId = setInterval(() => tryReloadIfNeeded('poll'), 500);
+    timeoutId = setTimeout(() => { active = false; cleanup(); }, WINDOW_MS + 2000);
+
+    // chequeo inmediato
+    tryReloadIfNeeded('immediate');
+
+    function cleanup() {
+      try { mo?.disconnect(); } catch (_) {}
+      if (intervalId) clearInterval(intervalId);
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+
+    return cleanup;
+  }
+
   // ========= BLOQUE AUTOPLAY (cualquier frame en media.oadts.com) =========
   if (/media\.oadts\.com$/i.test(location.hostname)) {
     log('🎯 [AutoPlay] Waiting for play button...');
@@ -66,11 +150,17 @@
 
     const tryPlay = () => {
       if (playClicked) return true;
-      const btn = PLAY_SELECTORS.map(s => document.querySelector(s)).find(isVisible);
+      const btn = PLAY_SELECTORS.map(s => qs(s)).find(isVisible);
       if (btn) {
         log('▶️ [AutoPlay] Play button detected. Clicking...');
         clickHard(btn);
         playClicked = true;
+
+        // ⛑️ Activar guardia Heavy Ad (20s tras el Play)
+        startHeavyAdGuard();
+
+        // Programar intentos de skip
+        scheduleSkipBroadcasts();
         return true;
       }
       return false;
@@ -80,7 +170,6 @@
     const poll = setInterval(() => {
       if (tryPlay()) {
         clearInterval(poll);
-        scheduleSkipBroadcasts(); // programar los intentos de skip
       }
     }, 400);
 
@@ -90,7 +179,6 @@
         if (tryPlay()) {
           mo.disconnect();
           clearInterval(poll);
-          scheduleSkipBroadcasts();
         }
       });
       mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
@@ -112,7 +200,7 @@
           // “deep” ping por si hay frames anidados
           window.postMessage({ edi_autoskip: true, cmd: 'try-skip', attempt, deep: true }, '*');
         } catch (e) {}
-      }
+      };
 
       setTimeout(() => broadcastTrySkip(1), FIRST_CHECK_MS);
       setTimeout(() => broadcastTrySkip(2), FIRST_CHECK_MS + RETRY_DELAY_MS);
