@@ -36,6 +36,9 @@
   const JITTER_INITIAL_MAX = 30000;
   const BACKUP_WINDOW_MS = 2 * 60 * 1000;
   const BACKUP_JITTER_MAX = 20000;
+  let IS_STORAGE_REPAINT = false;
+  let STORAGE_DEBOUNCE_AT = 0;
+  const STORAGE_DEBOUNCE_MS = 400; // evita tormentas de eventos
 
   // 🔸 Histeresis:
   const NEAR_SPREAD_THRESHOLD = 200;           // si max-min ≤ 200 → r0
@@ -453,7 +456,25 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     ui.icoLabel  = $("#hh-ico-label", wrap);
 
     // cross-tab repaint
-    window.addEventListener("storage",(ev)=>{ if(ev.key===LS_STATE_KEY){ logI("🔔 storage → repaint"); repaint(); const s=loadState(); applyMinimized(s.minimized,true); }});
+    window.addEventListener("storage", (ev) => {
+      if (ev.key !== LS_STATE_KEY) return;
+
+      const t = now();
+      if (t - STORAGE_DEBOUNCE_AT < STORAGE_DEBOUNCE_MS) return;
+      STORAGE_DEBOUNCE_AT = t;
+
+      logI("🔔 storage → repaint (read-only)");
+      IS_STORAGE_REPAINT = true;
+      repaint()
+        .catch(() => {})
+        .finally(() => {
+          IS_STORAGE_REPAINT = false;
+        });
+
+      const s = loadState();
+      applyMinimized(s.minimized, true);
+    });
+
 
     repaint();
   }
@@ -594,14 +615,20 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     const st=loadState(); updateAutoButton(st.autoMode); startOrUpdateCountdown();
     const data=st.lastJson?.data||null; const didDom=getCurrentDidFromDom(); let didHero=null;
 
-    // Registrar última lectura de stock de la aldea actual
-    if (didDom) {
+    // Registrar última lectura de stock de la aldea actual (solo pestaña visible y repaint "normal")
+    if (!IS_STORAGE_REPAINT && document.visibilityState === "visible" && didDom) {
       const s = loadState();
       s.villages ||= {};
       s.villages[didDom] ||= {};
-      s.villages[didDom].lastStockTs = now();
-      saveState(s);
+
+      const prev = s.villages[didDom].lastStockTs || 0;
+      // evita escrituras constantes: como máx 1 vez por minuto
+      if (now() - prev > 60 * 1000) {
+        s.villages[didDom].lastStockTs = now();
+        saveState(s);
+      }
     }
+
 
     if(data){
       didHero=heroAssignedDid(data);
