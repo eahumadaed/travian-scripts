@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.4.5
+// @version      1.4.6
 // @description  Balanceo de producción con histeresis (evita ping-pong), auto-navegación a aldea del héroe si lectura de stock está vieja, persistencia multi-pestaña, minimizado, observer, health 1 decimal, countdown h:mm:ss.
 // @author       Edi
 // @include        *://*.travian.*
@@ -110,7 +110,7 @@
       o.position ||= { x: 10, y: 10 };
       o.cooldowns ||= {};
       o.cooldowns.lastAutoChange ||= 0;
-      o.minimized = typeof o.minimized === "boolean" ? o.minimized : false;
+      o.minimized = true;
       o.villages ||= {}; // { [did]: { lastStockTs } }
       return o;
     } catch {
@@ -123,7 +123,7 @@
       position:{x:10,y:10},
       autoMode:false,
       manualResource:0,
-      minimized:false,
+      minimized:true,
       lastJson:null,
       lastApplied:null,
       cooldowns:{ attributesPost:0, lastAutoChange:0 },
