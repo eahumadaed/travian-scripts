@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.4.3
+// @version      1.4.4
 // @description  Balanceo de producción con histeresis (evita ping-pong), auto-navegación a aldea del héroe si lectura de stock está vieja, persistencia multi-pestaña, minimizado, observer, health 1 decimal, countdown h:mm:ss.
 // @author       Edi
 // @include        *://*.travian.*
@@ -963,6 +963,55 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     }
   }
 
+    /******************************************************************
+   * TOOLS
+   ******************************************************************/
+  async function ensureStockBar({ timeoutMs = 5000, probeMs = 120 } = {}) {
+    const sel = "#stockBar .warehouse .capacity";
+    if (document.querySelector(sel)) return true;
+
+    return await new Promise((resolve) => {
+      const start = Date.now();
+      let timer = null;
+      const done = (ok) => {
+        try { obs.disconnect(); } catch {}
+        if (timer) clearInterval(timer);
+        resolve(ok);
+      };
+
+      const obs = new MutationObserver(() => {
+        if (document.querySelector(sel)) {
+          logI("✅ stockBar detectado vía MutationObserver.");
+          done(true);
+        }
+      });
+      try {
+        obs.observe(document.documentElement, { childList: true, subtree: true });
+      } catch {}
+
+      // sonda periódica + timeout
+      timer = setInterval(() => {
+        if (document.querySelector(sel)) {
+          logI("✅ stockBar detectado vía sonda periódica.");
+          done(true);
+        } else if (Date.now() - start > timeoutMs) {
+          logI("⛔ stockBar no encontrado dentro del timeout.");
+          done(false);
+        }
+      }, probeMs);
+    });
+  }
+
+  async function bootGuarded() {
+    logI("⏳ Verificando presencia de stockBar…");
+    const ok = await ensureStockBar({ timeoutMs: 5000, probeMs: 120 }); // o hasStockBarNow()
+    if (!ok) {
+      logI("🛑 Abort: stockBar ausente. No inicializo Hero Helper.");
+      return; // ← no seguimos
+    }
+    logI("🚀 stockBar OK. Inicializando Hero Helper…");
+    await init();
+  }
 
   /******************************************************************
    * Init
@@ -982,7 +1031,10 @@ ui.btnAssign.addEventListener("click", onAssignPointsApply);
     await autoBalanceIfNeeded("init");
   }
 
-  if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded", init); }
-  else { init(); }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootGuarded);
+  } else {
+    bootGuarded();
+  }
 
 })();
