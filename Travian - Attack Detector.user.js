@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart (dbg-heavy)
 // @namespace    https://edi.travian
-// @version      2.2.2
+// @version      2.2.3
 // @description  Detecta ataques, consolida olas y ejecuta auto-evasión (vacío/umbral/natar). Incluye LOGS de depuración detallados y botón "Evadir ahora" (sin reintentos) para pruebas.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
@@ -711,34 +711,51 @@ async function confirmSendFromPreview(villageId, previewHtml) {
   return text;
 }
 
-  async function sendAllTroopsRaid(villageId, target) {
-    L.group("sendAllTroopsRaid");
-    L.info("Sending troops (RAID) →", { villageId, target });
-    const {x,y} = target;
-
-    // 1) Abrir RP con destino
+async function sendAllTroopsRaid(villageId, target) {
+  console.group("[AA] sendAllTroopsRaid");
+  try {
+    const { x, y } = target;
     const rp = await openRallyFor(villageId, x, y);
-
-    // 2) Parsear disponibilidad héroe + máximos
-    const heroOk = parseHeroAvailable(rp);
     const maxMap = parseMaxForAllTypes(rp);
 
     const troops = {};
-    Object.keys(maxMap).forEach(k => { if (maxMap[k]>0) troops[k]=maxMap[k]; });
+    for (const [k, v] of Object.entries(maxMap)) {
+      if (k === "t11") continue;
+      const vv = Number.isFinite(v) ? v : 0;
+      if (vv > 0) troops[k] = vv;
+    }
+    const heroAvailable = (maxMap.t11 || 0) > 0;
+    if (heroAvailable) troops["t11"] = 1;
+
     const sum = Object.values(troops).reduce((a,b)=>a+b,0);
-    L.dbg("Troops to send:", troops, "sum=", sum, "hero=", heroOk);
+    console.log("[AA][DBG] troops to send:", { target, heroAvailable, troops, sum });
 
-    if (sum===0 && !heroOk) { L.warn("No troops and no hero available."); L.groupEnd(); return false; }
+    // ← Caso terminal: NO HAY NADA QUE ENVIAR
+    if (sum === 0) {
+      console.warn("[AA][WARN] NO_TROOPS (no hay unidades disponibles para evadir)");
+      console.groupEnd();
+      return { ok: false, terminal: true, reason: "NO_TROOPS" };
+    }
 
-    // 3) Preview
-    const preview = await postPreviewRaid(villageId, x, y, troops, heroOk);
+    // preview + confirm
+    const preview = await postPreviewRaid(villageId, x, y, troops, /* hero flag ya no se usa */ false);
+    await confirmSendFromPreview(villageId, preview);
 
-    // 4) Confirm
-    const result = await confirmSendFromPreview(villageId, preview);
-    L.info("Send result HTML len:", result.length);
-    L.groupEnd();
-    return true;
+    // restaurar aldea
+    try { restoreActiveVillageAfterSend(villageId, 2000); } catch {}
+
+    console.groupEnd();
+    return { ok: true, terminal: true, reason: "SENT" }; // terminal: ya no hace falta reintentar
+  } catch (e) {
+    console.warn("[AA][WARN] sendAllTroopsRaid error", e);
+    console.groupEnd();
+    // Errores “recuperables”: puedes reintentar en la otra ventana
+    const msg = String(e?.message || "");
+    const recoverable = !/NO_TROOPS/i.test(msg);
+    return { ok: false, terminal: !recoverable, reason: recoverable ? "RECOVERABLE" : "FATAL" };
   }
+}
+
 
   // ────────────────────────────────────────────────────────────────────────────
   // UI (modal + settings + "Evadir ahora")
@@ -1165,7 +1182,16 @@ async function confirmSendFromPreview(villageId, previewHtml) {
           atText: w.atText,
           notified_initial: false,
           notified_T10: false,
-          evade: { target: null, plannedAt: 0, firstSent: false, secondSent: false, lastErrorAt: 0, kind: null }
+          evade: {
+              target: null,
+              plannedAt: 0,
+              firstSent: false,
+              secondSent: false,
+              sendingLock: false,        // ← evita reentradas mientras hay un envío en curso
+              lastErrorAt: 0,
+              terminal: false,           // ← marca que esta ola ya no debe intentar más
+              kind: null
+          }
         }))
       };
     }
@@ -1242,94 +1268,118 @@ async function confirmSendFromPreview(villageId, previewHtml) {
   // ────────────────────────────────────────────────────────────────────────────
   // Auto-evade: planificación y ejecución
   // ────────────────────────────────────────────────────────────────────────────
-  async function planAndRunEvade(state) {
-    if (!state.settings.autoEvade) return;
+    async function planAndRunEvade(state) {
+        if (!state.settings.autoEvade) return;
+        const tNow = now();
 
-    const tNow = now();
+        for (const vid of Object.keys(state.villages)) {
+            const village = state.villages[vid];
 
-    for (const vid of Object.keys(state.villages)) {
-      const village = state.villages[vid];
+            for (const akey of Object.keys(village.attackers || {})) {
+                const atk = village.attackers[akey];
 
-      for (const akey of Object.keys(village.attackers || {})) {
-        const atk = village.attackers[akey];
+                for (const w of atk.waves || []) {
+                    const eta = w.arrivalEpoch - tNow;
+                    const ev = (w.evade ||= { target:null, plannedAt:0, firstSent:false, secondSent:false, sendingLock:false, lastErrorAt:0, terminal:false, kind:null });
 
-        for (const w of atk.waves || []) {
-          const eta = w.arrivalEpoch - tNow;
+                    if (ev.terminal) continue; // ← nada más que hacer en esta ola
 
-          // 1) T-10m: reservar objetivo (usa tropas reales para calcular umbral)
-          if (eta > 0 && eta <= T10_WINDOW_MS) {
-            if (!w.evade?.target && (!w.evade?.lastErrorAt || (tNow - w.evade.lastErrorAt) > 30_000)) {
-              try {
-                const rpHtml = await openRallyFor(vid, 0, 0).catch(()=>null);
-                let totalTroops = 0;
-                if (rpHtml) {
-                  const maxMap = parseMaxForAllTypes(rpHtml);
-                  totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
+                    // 1) T-10m plan
+                    if (eta > 0 && eta <= T10_WINDOW_MS) {
+                        if (!ev.target && (!ev.lastErrorAt || (tNow - ev.lastErrorAt) > 30_000)) {
+                            try {
+                                const rpHtml = await openRallyFor(vid, 0, 0).catch(()=>null);
+                                let totalTroops = 0;
+                                if (rpHtml) {
+                                    const maxMap = parseMaxForAllTypes(rpHtml);
+                                    totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
+                                }
+                                const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
+                                const target = await findTargetForEvade(village, maxAnimals);
+                                if (target) {
+                                    ev.target = { x: target.x, y: target.y, link: target.link };
+                                    ev.plannedAt = tNow;
+                                    ev.kind = target.kind || 'oasis';
+                                    saveState(state, "evade:planned");
+                                    ensureModal(); renderModal(loadState());
+                                    L.info("Evade planned", { vid, target: ev.target, kind: ev.kind, maxAnimals });
+                                } else {
+                                    ev.lastErrorAt = tNow;
+                                    saveState(state, "evade:no-target");
+                                }
+                            } catch (e) {
+                                ev.lastErrorAt = tNow;
+                                saveState(state, "evade:plan-error");
+                                L.warn("plan target error", e);
+                            }
+                        }
+                    }
+
+                    // 2) T-60s: primer intento
+                    if (!ev.firstSent && !ev.sendingLock && eta > 0 && eta <= T60_WINDOW_MS && ev.target) {
+                        ev.sendingLock = true;
+                        try {
+                            const res = await sendAllTroopsRaid(vid, ev.target);
+                            if (res.ok) {
+                                ev.firstSent = true;
+                                ev.terminal = false; // cambiar en caso que se necesite el segundo
+                                saveState(state, "evade:first:ok");
+                                L.info("Evade first send (T-60) OK", { vid, res });
+                            } else {
+                                // si es terminal (p.ej. NO_TROOPS) no reintentes
+                                if (res.terminal) {
+                                    ev.terminal = true;
+                                    saveState(state, "evade:first:terminal");
+                                    L.warn("Evade first send terminal, no retry", res);
+                                } else {
+                                    // recuperable → deja que pase a T-10s
+                                    saveState(state, "evade:first:recoverable");
+                                    L.warn("Evade first send recoverable, will try at T-10s", res);
+                                }
+                            }
+                        } catch (e) {
+                            L.warn("Evade first send threw", e);
+                        } finally {
+                            ev.sendingLock = false;
+                        }
+                    }
+
+                    // 3) T-10s: segundo intento SOLO si no fue terminal ni enviado
+                    if (!ev.terminal && !ev.secondSent && !ev.firstSent && !ev.sendingLock && eta > 0 && eta <= T10s_WINDOW_MS && ev.target) {
+                        ev.sendingLock = true;
+                        try {
+                            const res2 = await sendAllTroopsRaid(vid, ev.target);
+                            if (res2.ok) {
+                                ev.secondSent = true;
+                                ev.terminal = true;
+                                saveState(state, "evade:second:ok");
+                                L.info("Evade second send (T-10s) OK", { vid, res2 });
+                            } else {
+                                ev.secondSent = true; // ya intentamos el segundo
+                                if (res2.terminal) {
+                                    ev.terminal = true;
+                                    saveState(state, "evade:second:terminal");
+                                    L.warn("Evade second send terminal", res2);
+                                } else {
+                                    // falló de forma recuperable pero ya no hay más ventanas → terminal igual
+                                    ev.terminal = true;
+                                    saveState(state, "evade:second:recoverable-but-done");
+                                    L.warn("Evade second send recoverable but no more retries", res2);
+                                }
+                            }
+                        } catch (e) {
+                            ev.secondSent = true;
+                            ev.terminal = true; // ya no hay más ventanas
+                            saveState(state, "evade:second:threw");
+                            L.warn("Evade second send threw", e);
+                        } finally {
+                            ev.sendingLock = false;
+                        }
+                    }
                 }
-                const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
-                const target = await findTargetForEvade(village, maxAnimals);
-                if (target) {
-                  w.evade.target = { x: target.x, y: target.y, link: target.link };
-                  w.evade.plannedAt = tNow;
-                  w.evade.kind = target.kind || 'oasis';
-                  saveState(state, "evade:planned");
-                  ensureModal(); renderModal(loadState());
-                  L.info("Evade planned", { vid, target: w.evade.target, kind: w.evade.kind, maxAnimals });
-                } else {
-                  w.evade.lastErrorAt = tNow;
-                  saveState(state, "evade:no-target");
-                }
-              } catch (e) {
-                w.evade.lastErrorAt = tNow;
-                saveState(state, "evade:plan-error");
-                L.warn("plan target error", e);
-              }
             }
-          }
-
-          // 2) T-60s: envío total
-          if (eta > 0 && eta <= T60_WINDOW_MS && !(w.evade?.firstSent)) {
-            if (w.evade?.target) {
-              try {
-                const ok = await sendAllTroopsRaid(vid, w.evade.target);
-                if (ok) {
-                  w.evade.firstSent = true;
-                  saveState(state, "evade:first");
-                  L.info("Evade first send (T-60) OK", { vid });
-                  restoreActiveVillageAfterSend(vid, 2000);
-
-                }
-              } catch (e) {
-                w.evade.lastErrorAt = tNow;
-                saveState(state, "evade:first-error");
-                L.warn("Evade first send failed:", e);
-              }
-            }
-          }
-
-          // 3) T-10s: reintento
-          if (eta > 0 && eta <= T10s_WINDOW_MS && !(w.evade?.secondSent)) {
-            if (w.evade?.target) {
-              try {
-                const ok2 = await sendAllTroopsRaid(vid, w.evade.target);
-                if (ok2) {
-                  w.evade.secondSent = true;
-                  saveState(state, "evade:second");
-                  L.info("Evade second send (T-10s) OK", { vid });
-                  restoreActiveVillageAfterSend(vid, 2000);
-
-                }
-              } catch (e) {
-                w.evade.lastErrorAt = tNow;
-                saveState(state, "evade:second-error");
-                L.warn("Evade second send failed:", e);
-              }
-            }
-          }
         }
-      }
     }
-  }
 
   // "Evadir ahora": una sola ejecución (sin reintentos) para debug
   async function onEvadirAhoraClicked() {
