@@ -770,8 +770,14 @@
         <div class="meta">Se guarda localmente en este navegador.</div>
       </div>
       <div class="row">
-        <label><input id="aa-auto-evade" type="checkbox" ${st.settings.autoEvade ? "checked":""}> Activar auto-evasión (T-10/T-60/T-10s)</label>
+        <label for="aa-auto-evade">Auto-evasión</label>
+        <select id="aa-auto-evade">
+          <option value="on" ${st.settings.autoEvade ? "selected" : ""}>Activado</option>
+          <option value="off" ${!st.settings.autoEvade ? "selected" : ""}>Desactivado</option>
+        </select>
+        <div class="meta">Planifica y envía tropas T-10m / T-60s / T-10s</div>
       </div>
+
       <div class="row">
         <div style="font-weight:700;">Telegram</div>
       </div>
@@ -794,10 +800,10 @@
     dlg.querySelector("#aa-save")?.addEventListener("click", () => {
       const token = (document.getElementById("aa-token")?.value || "").trim();
       const chatId = (document.getElementById("aa-chatid")?.value || "").trim();
-      const autoEvade = !!document.getElementById("aa-auto-evade")?.checked;
+      const autoEvade = (document.getElementById("aa-auto-evade")?.value === "on");
+      st.settings.autoEvade = autoEvade;
       st.settings.telegramToken = token;
       st.settings.chatId = chatId;
-      st.settings.autoEvade = autoEvade;
       saveState(st, "settings");
       dlg.remove();
       console.log(`[${nowTs()}] [AA] Settings saved (autoEvade=${autoEvade}).`);

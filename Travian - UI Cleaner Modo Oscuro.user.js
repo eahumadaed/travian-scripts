@@ -21,31 +21,37 @@
     const runModificaciones = () => {
         // 🌓 Forzar modo nocturno
         document.body.setAttribute("data-theme", "night");
-        //console.log("🌙 Modo nocturno activado");
 
-        // 🧹 Ocultar botones molestos por texto, clase o value
+        // 🧹 Ocultar botones molestos
         document.querySelectorAll('button.textButtonV1.gold').forEach(btn => {
             const texto = btn.innerText.trim();
             const valor = btn.value?.trim();
             if (texto === "Wave Builder" || valor === "Wave Builder") {
                 btn.style.display = "none";
-                //console.log("🚫 Botón Wave Builder ocultado");
             }
         });
 
         document.querySelectorAll('button.textButtonV1.gold.productionBoostButton').forEach(btn => {
-            const textoPlano = btn.innerText.replace(/\u202C|\u202D/g, '').trim(); // eliminar caracteres invisibles
+            const textoPlano = btn.innerText.replace(/\u202C|\u202D/g, '').trim();
             if (textoPlano.includes("25%")) {
                 btn.style.display = "none";
-                //console.log("🚫 Botón +25% de oro ocultado");
             }
         });
 
-
-        // 🔕 Puedes agregar más reglas visuales aquí si lo deseas
+        // 🚫 Ocultar banner CMP (cookies/consent)
+        const css = `
+            #cmpwrapper {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+            }
+        `;
+        const style = document.createElement("style");
+        style.innerHTML = css;
+        document.head.appendChild(style);
     };
 
-    // Esperar a que el DOM esté listo, y reintentar si es necesario
+    // Esperar a que el DOM esté listo
     const interval = setInterval(() => {
         if (document.readyState === "complete") {
             runModificaciones();
