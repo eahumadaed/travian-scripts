@@ -132,18 +132,27 @@
     }
   }
 
-  function saveState(state, reason = "") {
-    compactState(state);
-    state.meta.updatedAt = now();
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
-    //if (reason) L.dbg("state saved:", reason, { villages: Object.keys(state.villages).length });
-  }
+    function saveState(state, reason = "") {
+        compactState(state);
+        state.meta.updatedAt = now();
+        localStorage.setItem(LS_KEY, JSON.stringify(state));
+        //if (reason) console.log(`[${nowTs()}] [AA] state saved: ${reason}`);
+
+        // auto-limpieza del modal
+        if (!shouldShowModal(state)) {
+            document.getElementById(MODAL_ID)?.remove();
+        }
+    }
+
 
   // ────────────────────────────────────────────────────────────────────────────
   // DOM helpers
   // ────────────────────────────────────────────────────────────────────────────
   const $  = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+    function shouldShowModal(state) {
+        return getTotalAttacks(state) > 0;
+    }
 
   function getActiveVillageIdFromSidebar() {
     const active = $("#sidebarBoxVillageList .listEntry.village.active");
@@ -868,36 +877,36 @@ async function sendAllTroopsRaid(villageId, target) {
     if (badge) badge.textContent = String(total);
   }
 
-  function ensureModal() {
-    if (document.getElementById(MODAL_ID)) return;
-    const m = document.createElement("div");
-    m.id = MODAL_ID;
-    m.innerHTML = `
-      <div class="hdr" title="Arrastra para mover. Click para minimizar/maximizar.">
-        <div class="dot"></div>
-        <div class="title">Ataques detectados</div>
-        <div class="total">0</div>
-        <button class="btn debug" id="aa-evadir-ahora" title="Ejecución única sin reintentos">Evadir ahora</button>
-        <div class="gear" title="Configurar / Auto-evadir">⚙️</div>
-      </div>
-      <div class="body"></div>
-    `;
-    document.body.appendChild(m);
+    function ensureModal() {
+        const st = loadState();
+        if (!shouldShowModal(st)) { document.getElementById(MODAL_ID)?.remove(); return; }
+        if (document.getElementById(MODAL_ID)) return;
 
-    applyModalPosition();
-    updateHeaderTotalBadge();
+        const m = document.createElement("div");
+        m.id = MODAL_ID;
+        m.innerHTML = `
+    <div class="hdr" title="Arrastra para mover. Click para minimizar/maximizar.">
+      <div class="dot"></div>
+      <div class="title">Ataques detectados</div>
+      <div class="total">0</div>
+      <div class="gear" title="Configurar / Auto-evadir">⚙️</div>
+    </div>
+    <div class="body"></div>
+  `;
+        document.body.appendChild(m);
 
-    m.querySelector(".gear")?.addEventListener("click", (e) => { e.stopPropagation(); toggleSettings(); });
-    m.querySelector("#aa-evadir-ahora")?.addEventListener("click", onEvadirAhoraClicked);
+        applyModalPosition();
+        updateHeaderTotalBadge();
 
-    m.querySelector(".hdr")?.addEventListener("click", (e) => {
-      if (e.target && (e.target.closest('.gear') || e.target.closest('#aa-evadir-ahora'))) return;
-      const ui = getUi();
-      ui.modal.minimized = !ui.modal.minimized;
-      saveUi(ui, "modal:minToggle");
-      if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
-      updateModalMaxHeight();
-    });
+        m.querySelector(".gear")?.addEventListener("click", (e) => { e.stopPropagation(); toggleSettings(); });
+        m.querySelector(".hdr")?.addEventListener("click", (e) => {
+            if (e.target && (e.target.closest('.gear'))) return;
+            const ui = getUi();
+            ui.modal.minimized = !ui.modal.minimized;
+            saveUi(ui, "modal:minToggle");
+            if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
+            updateModalMaxHeight();
+        });
 
     // Drag
     let dragging = false, ox = 0, oy = 0;
@@ -1452,21 +1461,26 @@ async function sendAllTroopsRaid(villageId, target) {
     });
   }
 
-  function startTickUI() {
-    setInterval(() => {
-      const st = loadState();
-      if (Object.keys(st.villages).length === 0) return;
+    function startTickUI() {
+        setInterval(() => {
+            const st = loadState();
+            if (!shouldShowModal(st)) {
+                // no hay ataques: no UI
+                document.getElementById(MODAL_ID)?.remove();
+                // igual seguimos con lógica de evasión y T-10 avisos si quisieras (pero no hay olas)
+                saveState(st, "tick");
+                return;
+            }
 
-      // 1) Auto-evade plan/execute
-      planAndRunEvade(st).catch(e => L.warn("planAndRunEvade error", e));
+            // hay ataques → asegura y renderiza
+            planAndRunEvade(st).catch(e => console.warn(`[${nowTs()}] [AA] planAndRunEvade error`, e));
+            saveState(st, "tick");
+            ensureModal();
+            renderModal(st);
+            evalT10Triggers(st);
+        }, TICK_MS);
+    }
 
-      // 2) UI + T-10 avisos
-      saveState(st, "tick");
-      ensureModal();
-      renderModal(st);
-      evalT10Triggers(st);
-    }, TICK_MS);
-  }
 
   function evalT10Triggers(state) {
     if (!canSendTelegram(state)) return;
