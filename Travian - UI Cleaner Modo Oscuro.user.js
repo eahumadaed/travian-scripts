@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🌙 Travian UI Cleaner + Modo Oscuro
 // @namespace    https://edinson-darkmode
-// @version      1.3.1
+// @version      1.3.2
 // @description  Oculta botones molestos y activa modo nocturno permanente en Travian
 // @author       Edi
 // @include        *://*.travian.*
@@ -22,32 +22,18 @@
         // 🌓 Forzar modo nocturno
         document.body.setAttribute("data-theme", "night");
 
-        // 🧹 Ocultar botones molestos
-        document.querySelectorAll('button.textButtonV1.gold').forEach(btn => {
-            const texto = btn.innerText.trim();
-            const valor = btn.value?.trim();
-            if (texto === "Wave Builder" || valor === "Wave Builder") {
-                btn.style.display = "none";
-            }
-        });
+        // 🧹 Selectores a ocultar
+        const toHide = [
+            "#sidebarBoxLinklist",
+            "#cmpwrapper",                       // banner cookies
+            "button.textButtonV1.gold[value='Wave Builder']",
+            "button.textButtonV1.gold:contains('Wave Builder')", // alternativa
+            "button.textButtonV1.gold.productionBoostButton"     // +25%
+        ];
 
-        document.querySelectorAll('button.textButtonV1.gold.productionBoostButton').forEach(btn => {
-            const textoPlano = btn.innerText.replace(/\u202C|\u202D/g, '').trim();
-            if (textoPlano.includes("25%")) {
-                btn.style.display = "none";
-            }
-        });
-
-        // 🚫 Ocultar banner CMP (cookies/consent)
-        const css = `
-            #cmpwrapper {
-                display: none !important;
-                visibility: hidden !important;
-                opacity: 0 !important;
-            }
-        `;
+        // Crear estilo global
         const style = document.createElement("style");
-        style.innerHTML = css;
+        style.innerHTML = toHide.map(sel => `${sel}{display:none !important;}`).join("\n");
         document.head.appendChild(style);
     };
 
@@ -57,5 +43,5 @@
             runModificaciones();
             clearInterval(interval);
         }
-    }, 50);
+    }, 1);
 })();
