@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper (by Edi)
 // @namespace    https://edi.hh
-// @version      1.5.0
+// @version      1.5.1
 // @description  Balanceo con histeresis 20m, doble fuente (HTML/GraphQL) para stock, auto-claim de free points + daily quests, minimizado ultracompacto, z-index normal, anclado arriba-derecha, auto ON por defecto, multi-pestaña.
 // @author       Edi
 // @include        *://*.travian.*

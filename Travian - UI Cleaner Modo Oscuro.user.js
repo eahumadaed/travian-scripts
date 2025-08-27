@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🌙 Travian UI Cleaner + Modo Oscuro
 // @namespace    https://edinson-darkmode
-// @version      1.2
+// @version      1.3.1
 // @description  Oculta botones molestos y activa modo nocturno permanente en Travian
 // @author       Edi
 // @include        *://*.travian.*

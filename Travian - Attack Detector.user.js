@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart
 // @namespace    https://edi.travian
-// @version      2.1.0
+// @version      2.1.1
 // @description  Detecta ataques, consolida olas y ejecuta auto-evasión: reserva oasis (vacío o bajo umbral), envía TODO a T-60s y reintenta a T-10s. Modal persistente + Telegram. Reacciona a DOM (sin polling agresivo).
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
