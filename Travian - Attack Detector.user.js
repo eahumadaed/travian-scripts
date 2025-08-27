@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚔️ Travian Attack Detector (Pro)
+// @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart
 // @namespace    https://edi.travian
-// @version      2.0.0
-// @description  Detecta ataques entrantes (sidebar + infobox) → consolida olas por atacante, modal persistente y avisos Telegram (nuevos + T-10). Sin polling agresivo: reacciona a render/DOM.
+// @version      2.1.0
+// @description  Detecta ataques, consolida olas y ejecuta auto-evasión: reserva oasis (vacío o bajo umbral), envía TODO a T-60s y reintenta a T-10s. Modal persistente + Telegram. Reacciona a DOM (sin polling agresivo).
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
 // @exclude     *://*.travian.*/report*
@@ -20,30 +20,62 @@
 
 (function () {
   "use strict";
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Early exit si no hay UI base
+  // ────────────────────────────────────────────────────────────────────────────
   function esacosaexiste() {
     return !!document.querySelector('#stockBar .warehouse .capacity');
   }
-  if (!esacosaexiste()) {
-    //console.log('🛑 stockBar no encontrado → abort.');
-    return; // no carga nada más
-  }
-  /******************************************************************
-   * 🧩 Config & Constantes
-   ******************************************************************/
+  if (!esacosaexiste()) return;
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Config & Constantes
+  // ────────────────────────────────────────────────────────────────────────────
   const SUFFIX = location.host.replace(/\./g, "-");
-  const LS_KEY = `AA_ATTACK_STATE__${SUFFIX}`; // clave única por mundo
+  const LS_KEY = `AA_ATTACK_STATE__${SUFFIX}`;
   const MODAL_ID = "aa-attack-modal";
   const SETTINGS_ID = "aa-attack-settings";
-  const TICK_MS = 1000;        // tick visual para countdowns (solo UI)
-  const GRACE_MS = 60 * 1000;  // gracia para purga post-arribo
+  const TICK_MS = 1000;
+  const GRACE_MS = 60 * 1000;
   const JITTER_MIN = 400, JITTER_MAX = 1200;
 
-  /******************************************************************
-   * 🧠 State helpers
-   ******************************************************************/
+  // Auto-evade
+  const AUTO_EVADE_DEFAULT = true;
+  const EVADE_SEARCH_RADIUS = 3;                  // zoomLevel para /map/position
+  const EVADE_RETRY_MS = 20 * 60 * 1000;         // backoff si algo falla
+  const T10_WINDOW_MS = 10 * 60 * 1000;          // T-10m plan
+  const T60_WINDOW_MS = 60 * 1000;               // T-60s envío total
+  const T10s_WINDOW_MS = 10 * 1000;              // T-10s reintento
+  const API_VERSION = "228.2";                   // vers. API ajax travian
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // State helpers
+  // ────────────────────────────────────────────────────────────────────────────
   const now = () => Date.now();
   const nowTs = () => new Date().toISOString().replace("T", " ").replace("Z", "");
   const jitter = (min = JITTER_MIN, max = JITTER_MAX) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+  function makeEmpty() {
+    return {
+      version: "2.1.0",
+      suffix: SUFFIX,
+      meta: {
+        createdAt: now(),
+        updatedAt: now(),
+        serverOffsetMs: 0,
+        lastCompactionAt: 0,
+        ui: { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } }
+      },
+      settings: {
+        telegramToken: "",
+        chatId: "",
+        quietHours: null,
+        autoEvade: AUTO_EVADE_DEFAULT
+      },
+      villages: {}
+    };
+  }
 
   function loadState() {
     try {
@@ -51,9 +83,10 @@
       if (!raw) return makeEmpty();
       const s = JSON.parse(raw);
       if (!s.version) s.version = "1.0";
-      if (!s.meta) s.meta = {};
-      if (!s.settings) s.settings = {};
-      if (!s.villages) s.villages = {};
+      s.meta ||= {};
+      s.meta.ui ||= { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } };
+      s.settings ||= { telegramToken:"", chatId:"", quietHours:null, autoEvade: AUTO_EVADE_DEFAULT };
+      s.villages ||= {};
       return s;
     } catch (e) {
       console.warn(`[${nowTs()}] [AA] Bad state JSON, resetting.`, e);
@@ -61,36 +94,7 @@
     }
   }
 
-  function makeEmpty() {
-    return {
-      version: "1.0",
-      suffix: SUFFIX,
-      meta: {
-        createdAt: now(),
-        updatedAt: now(),
-        serverOffsetMs: 0,
-        lastCompactionAt: 0,
-        ui: {
-          modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false }
-        }
-      },
-      settings: {
-        telegramToken: "",
-        chatId: "",
-        quietHours: null // {start:"00:30", end:"07:30"} (opcional)
-      },
-      villages: {}
-    };
-  }
-
-  function saveState(state, reason = "") {
-    compactState(state);
-    state.meta.updatedAt = now();
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
-  }
-
   function compactState(state) {
-    // Purga waves vencidas y aldeas sin olas
     const t = now();
     for (const vid of Object.keys(state.villages)) {
       const v = state.villages[vid];
@@ -100,22 +104,27 @@
         atk.waves = (atk.waves || []).filter(w => (w.arrivalEpoch + GRACE_MS) > t);
         total += atk.waves.length;
         if (!atk.type) atk.type = "attack";
-        if (atk.waves.length === 0) {
-          delete v.attackers[akey];
-        }
+        if (atk.waves.length === 0) delete v.attackers[akey];
       }
       v.totalCount = total;
-      if (v.totalCount <= 0) {
-        delete state.villages[vid];
-      }
+      if (v.totalCount <= 0) delete state.villages[vid];
     }
   }
 
-  /******************************************************************
-   * 🧷 DOM helpers
-   ******************************************************************/
+  function saveState(state, reason = "") {
+    compactState(state);
+    state.meta.updatedAt = now();
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    // Log (timestamp) — seguimiento de razones de guardado
+    if (reason) console.log(`[${nowTs()}] [AA] state saved: ${reason}`);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // DOM helpers
+  // ────────────────────────────────────────────────────────────────────────────
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
 
   function getActiveVillageIdFromSidebar() {
     const active = $("#sidebarBoxVillageList .listEntry.village.active");
@@ -126,9 +135,6 @@
     return did;
   }
 
-  // === Sidebar late scan only ===
-  const ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
-
   function extractDidFrom(el) {
     const a = el.querySelector('a[href*="newdid="], a[href*="did="]');
     if (!a) return null;
@@ -136,12 +142,10 @@
     return u.searchParams.get('newdid') || u.searchParams.get('did');
   }
 
-  // Lectura síncrona pura
   function getSidebarAttackVillages() {
     const root = document.getElementById('sidebarBoxVillageList');
     if (!root) return [];
     const entries = Array.from(root.querySelectorAll('.listEntry.village.attack'));
-
     const out = [];
     for (const el of entries) {
       const did = el.getAttribute('data-did')
@@ -156,7 +160,6 @@
     return out;
   }
 
-  // Debounce / batch + restore de aldea activa
   let lateScanTimer = null;
   function scheduleLateSidebarScan(reason = 'generic') {
     if (lateScanTimer) clearTimeout(lateScanTimer);
@@ -195,9 +198,9 @@
     return m ? parseInt(m[1], 10) : null;
   }
 
-  /******************************************************************
-   * 🧭 Rally Point scraping (detalle)
-   ******************************************************************/
+  // ────────────────────────────────────────────────────────────────────────────
+  // Rally Point (detalle)
+  // ────────────────────────────────────────────────────────────────────────────
   async function fetchRallyDetails(villageId) {
     const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=1&filter=1&subfilters=1`;
     const res = await fetch(url, { credentials: "include" });
@@ -211,7 +214,6 @@
       const isRaid = tbl.classList.contains("inRaid");
       const type = isRaid ? "raid" : "attack";
 
-      // Attacker name
       let attackerName = "";
       let attackerHref = "";
       const headLink = tbl.querySelector("thead .troopHeadline a[href*='karte.php']");
@@ -226,7 +228,6 @@
         }
       }
 
-      // Coords del origen
       const coordsTh = tbl.querySelector("tbody.units th.coords .coordinatesWrapper") || tbl.querySelector("th.coords .coordinatesWrapper");
       let coordsTxt = "";
       if (coordsTh) {
@@ -235,27 +236,17 @@
         coordsTxt = x && y ? `(${x}|${y})` : coordsTh.textContent.trim().replace(/\s+/g, " ");
       }
 
-      // Arrival
       const timerSpan = tbl.querySelector("tbody.infos .in .timer[value]");
       const atSpan = tbl.querySelector("tbody.infos .at");
       const sec = timerSpan ? parseInt(timerSpan.getAttribute("value"), 10) : null;
       let atText = "";
-      if (atSpan) {
-        atText = atSpan.textContent.replace(/\s+/g, " ").trim().replace(/^at\s*/i, "");
-      }
+      if (atSpan) atText = atSpan.textContent.replace(/\s+/g, " ").trim().replace(/^at\s*/i, "");
       if (sec == null) return;
 
       const arrivalEpoch = now() + (sec * 1000);
-
       const aKey = `${attackerName}|${coordsTxt}`;
       if (!wavesByAttacker[aKey]) {
-        wavesByAttacker[aKey] = {
-          type,
-          attackerName,
-          attackerHref,
-          coords: coordsTxt,
-          waves: []
-        };
+        wavesByAttacker[aKey] = { type, attackerName, attackerHref, coords: coordsTxt, waves: [] };
       }
       if (!wavesByAttacker[aKey].waves.some(w => Math.abs(w.arrivalEpoch - arrivalEpoch) < 1000)) {
         wavesByAttacker[aKey].waves.push({
@@ -270,22 +261,232 @@
     for (const k of Object.keys(wavesByAttacker)) {
       wavesByAttacker[k].waves.sort((a, b) => a.arrivalEpoch - b.arrivalEpoch);
     }
-
     return wavesByAttacker;
   }
 
-  /******************************************************************
-   * 🧊 UI: Modal ataques + Modal settings
-   ******************************************************************/
-  GM_addStyle(`
-    #${MODAL_ID} {
-      position: fixed; top: 60px; right: 24px;
-      background: rgba(24,24,24,.95); color: #fff;
-      font-family: system-ui, sans-serif; font-size: 13px;
-      z-index: 99999; border-radius: 12px; padding: 10px 10px 8px;
-      box-shadow: 0 10px 24px rgba(0,0,0,.35); min-width: 260px; max-width: 360px;
-      user-select: none;
+  // ────────────────────────────────────────────────────────────────────────────
+  // API Mapa: encontrar oasis y natars (vacío / bajo umbral / fallback)
+  // ────────────────────────────────────────────────────────────────────────────
+  async function fetchMapTiles(centerX, centerY, zoomLevel = 3) {
+    const body = JSON.stringify({ data: { x: centerX, y: centerY, zoomLevel, ignorePositions: [] } });
+    const res = await fetch("/api/v1/map/position", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "accept": "application/json, text/javascript, */*; q=0.01",
+        "content-type": "application/json; charset=UTF-8",
+        "x-requested-with": "XMLHttpRequest",
+        "x-version": API_VERSION
+      },
+      body
+    });
+    if (!res.ok) throw new Error(`map/position HTTP ${res.status}`);
+    return res.json();
+  }
+
+  function looksOasis(t) {
+    const title = (t.title || "").trim();
+    const looksOasisish = /{k\.(vt|f\d+|fo)}/i.test(title) || /oasis/i.test(title);
+    return looksOasisish;
+  }
+
+  function isUnoccupied(t) {
+    return (t.did === -1 || t.did === undefined || t.did === null);
+  }
+
+  function parseAnimalsFromMapText(text) {
+    if (!text) return 0;
+    let total = 0;
+    const re = /class="unit u3\d+"[\s\S]*?<span class="value[^>]*>\s*(\d+)\s*<\/span>/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) total += parseInt(m[1], 10) || 0;
+    return total;
+  }
+
+  function isEmptyOasis(t) {
+    if (!looksOasis(t)) return false;
+    if (!isUnoccupied(t)) return false;
+    const text = t.text || "";
+    const hasAnimals = /{k\.animals}|inlineIcon\s+tooltipUnit|class="unit u3\d+"/i.test(text);
+    return !hasAnimals;
+  }
+
+  function isLowAnimalOasis(t, maxAnimals) {
+    if (!looksOasis(t)) return false;
+    if (!isUnoccupied(t)) return false;
+    const text = t.text || "";
+    const count = parseAnimalsFromMapText(text);
+    return Number.isFinite(count) && count > 0 && count <= maxAnimals;
+  }
+
+  function isNatarNonWW(t) {
+    const title = (t.title || "").toLowerCase();
+    const text = (t.text || "").toLowerCase();
+    const isNat = /natar/i.test(title) || /natar/i.test(text);
+    const isWW = /wonder of the world|maravilla del mundo|weltwunder/i.test(title) || /k\.ww/i.test(text);
+    return isNat && !isWW;
+  }
+
+  function coordsFromVillageText(txt) {
+    const m = String(txt||"").match(/(-?\d+)\s*\|\s*(-?\d+)/);
+    if (!m) return null;
+    return { x: parseInt(m[1],10), y: parseInt(m[2],10) };
+  }
+
+  async function findTargetForEvade(village, maxAnimals) {
+    const c = coordsFromVillageText(village.coords || "");
+    if (!c) { console.warn(`[${nowTs()}] [AA] No village coords found for evade.`); return null; }
+
+    const mp = await fetchMapTiles(c.x, c.y, EVADE_SEARCH_RADIUS);
+    const tiles = mp.tiles || [];
+
+    // 1) Oasis vacío sin animales
+    const empties = tiles.filter(isEmptyOasis).map(t => {
+      const { x, y } = t.position || {};
+      return (typeof x==="number" && typeof y==="number") ? { x,y, dist: Math.hypot(c.x-x, c.y-y), type:'oasis0' } : null;
+    }).filter(Boolean);
+    empties.sort((a,b)=>a.dist-b.dist);
+    if (empties[0]) {
+      const best = empties[0];
+      console.log(`[${nowTs()}] [AA] Evade target: empty oasis (${best.x}|${best.y}) d=${best.dist.toFixed(1)}`);
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_empty' };
     }
+
+    // 2) Oasis con pocos animales (<= maxAnimals)
+    const lows = tiles.filter(t => isLowAnimalOasis(t, maxAnimals)).map(t => {
+      const { x, y } = t.position || {};
+      return (typeof x==="number" && typeof y==="number") ? { x,y, dist: Math.hypot(c.x-x, c.y-y), type:'oasisLow' } : null;
+    }).filter(Boolean);
+    lows.sort((a,b)=>a.dist-b.dist);
+    if (lows[0]) {
+      const best = lows[0];
+      console.log(`[${nowTs()}] [AA] Evade target: low-animal oasis (${best.x}|${best.y}) ≤ ${maxAnimals} d=${best.dist.toFixed(1)}`);
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_low' };
+    }
+
+    // 3) Natar no-WW (último recurso)
+    const natars = tiles.filter(isNatarNonWW).map(t => {
+      const { x, y } = t.position || {};
+      return (typeof x==="number" && typeof y==="number") ? { x,y, dist: Math.hypot(c.x-x, c.y-y), type:'natar' } : null;
+    }).filter(Boolean);
+    natars.sort((a,b)=>a.dist-b.dist);
+    if (natars[0]) {
+      const best = natars[0];
+      console.log(`[${nowTs()}] [AA] Evade target: Natar non-WW (${best.x}|${best.y}) d=${best.dist.toFixed(1)} [fallback]`);
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'natar' };
+    }
+
+    console.warn(`[${nowTs()}] [AA] No evade target found (empty/low/natar).`);
+    return null;
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Rally Point send all (raid)
+  // ────────────────────────────────────────────────────────────────────────────
+  async function openRallyFor(villageId, x, y) {
+    const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2&x=${x}&y=${y}`;
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) throw new Error(`RP form HTTP ${res.status}`);
+    return res.text();
+  }
+
+  function parseHeroAvailable(html) {
+    const has = /name="troop\[t11\]"/i.test(html);
+    const dis = /name="troop\[t11\]"[^>]*disabled/i.test(html);
+    return has && !dis;
+  }
+
+  function parseMaxForAllTypes(html) {
+    const out = {};
+    for (let i=1;i<=12;i++){
+      const t = `t${i}`;
+      // referencia de "max" al lado del input (X / MAX)
+      const re = new RegExp(`name=['"]troop\\[${t}\\]['"][\\s\\S]*?\\/(?:&nbsp;)?(?:<span[^>]*>\\s*([0-9]+)\\s*<\\/span>|([0-9]+))`,"i");
+      const m = html.match(re);
+      if (m) {
+        const raw = (m[1]||m[2]||"").replace(/[^\d]/g,"");
+        out[t] = parseInt(raw||"0",10) || 0;
+      } else {
+        if (new RegExp(`name=['"]troop\\[${t}\\]`,"i").test(html)) out[t]=0;
+      }
+    }
+    return out;
+  }
+
+  async function postPreviewRaid(villageId, x, y, troops, hero) {
+    const params = new URLSearchParams();
+    Object.entries(troops).forEach(([k,v]) => { if (v>0) params.set(`troop[${k}]`, String(v)); });
+    if (hero) params.set("troop[t11]","1");
+    params.set("x", String(x));
+    params.set("y", String(y));
+    params.set("eventType","4");
+    params.set("ok","ok");
+    const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2`;
+    const res = await fetch(url, {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString()
+    });
+    if (!res.ok) throw new Error(`Preview HTTP ${res.status}`);
+    return res.text();
+  }
+
+  function parseChecksumFromPreview(html) {
+    const m = html.match(/checksum'\]\)\.value\s*=\s*'([^']+)'/i);
+    if (m) return m[1];
+    const m2 = html.match(/value\s*=\s*'([0-9a-f]{4,})'/i);
+    return m2 ? m[1] : null;
+  }
+
+  async function confirmSendFromPreview(villageId, previewHtml) {
+    const div = document.createElement("div");
+    div.innerHTML = previewHtml;
+    const form = div.querySelector("#troopSendForm");
+    if (!form) throw new Error("No troopSendForm en preview.");
+
+    const params = new URLSearchParams();
+    form.querySelectorAll("input[type=hidden]").forEach(inp => {
+      params.set(inp.name, inp.value || "");
+    });
+    if (!params.get("checksum")) {
+      const cs = parseChecksumFromPreview(previewHtml);
+      if (!cs) throw new Error("Sin checksum.");
+      params.set("checksum", cs);
+    }
+    const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2`;
+    const res = await fetch(url, {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString()
+    });
+    if (!(res.status===200 || res.status===304)) throw new Error(`Confirm HTTP ${res.status}`);
+    return res.text();
+  }
+
+  async function sendAllTroopsRaid(villageId, target) {
+    const {x,y} = target;
+    const rp = await openRallyFor(villageId, x, y);
+    const heroOk = parseHeroAvailable(rp);
+    const maxMap = parseMaxForAllTypes(rp);
+
+    const troops = {};
+    Object.keys(maxMap).forEach(k => { if (maxMap[k]>0) troops[k]=maxMap[k]; });
+
+    const sum = Object.values(troops).reduce((a,b)=>a+b,0);
+    if (sum===0 && !heroOk) return false;
+
+    const preview = await postPreviewRaid(villageId, x, y, troops, heroOk);
+    await confirmSendFromPreview(villageId, preview);
+    return true;
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // UI (modal + settings)
+  // ────────────────────────────────────────────────────────────────────────────
+  GM_addStyle(`
+    #${MODAL_ID} { position: fixed; top: 60px; right: 24px; background: rgba(24,24,24,.95); color: #fff;
+      font-family: system-ui, sans-serif; font-size: 13px; z-index: 99999; border-radius: 12px; padding: 10px 10px 8px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.35); min-width: 260px; max-width: 360px; user-select: none; }
     #${MODAL_ID}.hidden { display: none; }
     #${MODAL_ID} .hdr { display:flex; align-items:center; gap:8px; margin-bottom:8px; cursor:grab; }
     #${MODAL_ID} .hdr .title { font-weight:700; letter-spacing:.2px; }
@@ -296,49 +497,26 @@
     #${MODAL_ID} .body { overflow-y:auto; max-height: calc(100vh - 120px); }
     #${MODAL_ID}.minimized .body { display:none; }
     #${MODAL_ID}.minimized { padding-bottom:8px; }
-
     #${MODAL_ID} .vbox { background:#111; border:1px solid #2a2a2a; border-radius:10px; padding:8px; margin-bottom:8px; }
     #${MODAL_ID} .vrow { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
     #${MODAL_ID} .badge { background:#2d7; color:#000; font-weight:700; padding:2px 8px; border-radius:999px; }
     #${MODAL_ID} .alist { margin:0; padding-left:16px; }
     #${MODAL_ID} .alist li { margin:4px 0; }
     #${MODAL_ID} .atk { font-weight:600; }
-    #${MODAL_ID} .meta { opacity:.8; }
-
-    #${SETTINGS_ID} {
-      position: fixed; top: 100px; right: 24px;
-      background: #1b1b1b; color: #fff; z-index: 100000;
-      border-radius: 12px; padding: 12px; width: 320px;
-      box-shadow: 0 10px 24px rgba(0,0,0,.4);
-    }
-    #${SETTINGS_ID} .row { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
-    #${SETTINGS_ID} input {
-      background:#0f0f0f; color:#ddd; border:1px solid #2b2b2b; border-radius:8px; padding:8px 10px;
-      width:100%; outline:none;
-    }
-    #${SETTINGS_ID} .btns { display:flex; gap:8px; justify-content:flex-end; }
-    #${SETTINGS_ID} button {
-      background:#2d7; color:#000; font-weight:700; border:none; border-radius:8px; padding:8px 12px; cursor:pointer;
-    }
-    #${SETTINGS_ID} button.secondary { background:#333; color:#fff; }
-
-    /* campanazo al detectar nuevos ataques */
+    #${MODAL_ID} .meta { opacity:.85; }
+    #${MODAL_ID} a { color:#7db9ff; text-decoration:none; }
+    #${MODAL_ID} a:hover { text-decoration:underline; }
     #${MODAL_ID} .dot.ring { animation: aa-ring 1.2s ease-in-out; transform-origin: 50% 0%; }
-    @keyframes aa-ring {
-      0% { transform: rotate(0); }
-      15% { transform: rotate(14deg); }
-      30% { transform: rotate(-12deg); }
-      45% { transform: rotate(10deg); }
-      60% { transform: rotate(-8deg); }
-      75% { transform: rotate(6deg); }
-      100% { transform: rotate(0); }
-    }
-    /* flash en aldea */
+    @keyframes aa-ring { 0%{transform:rotate(0)}15%{rotate:14deg}30%{-webkit-transform:rotate(-12deg);transform:rotate(-12deg)}45%{transform:rotate(10deg)}60%{transform:rotate(-8deg)}75%{transform:rotate(6deg)}100%{transform:rotate(0)}}
     #${MODAL_ID} .vbox.flash { animation: aa-flash 950ms ease-in-out; }
-    @keyframes aa-flash {
-      0%,100% { box-shadow: 0 0 0 rgba(255,215,0,0); }
-      40% { box-shadow: 0 0 18px rgba(255,215,0,0.65); }
-    }
+    @keyframes aa-flash { 0%,100%{ box-shadow: 0 0 0 rgba(255,215,0,0);} 40%{ box-shadow: 0 0 18px rgba(255,215,0,0.65);} }
+    #${SETTINGS_ID} { position: fixed; top: 100px; right: 24px; background: #1b1b1b; color: #fff; z-index: 100000;
+      border-radius: 12px; padding: 12px; width: 340px; box-shadow: 0 10px 24px rgba(0,0,0,.4); }
+    #${SETTINGS_ID} .row { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
+    #${SETTINGS_ID} input { background:#0f0f0f; color:#ddd; border:1px solid #2b2b2b; border-radius:8px; padding:8px 10px; width:100%; outline:none; }
+    #${SETTINGS_ID} .btns { display:flex; gap:8px; justify-content:flex-end; }
+    #${SETTINGS_ID} button { background:#2d7; color:#000; font-weight:700; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    #${SETTINGS_ID} button.secondary { background:#333; color:#fff; }
   `);
 
   function getUi() {
@@ -378,16 +556,16 @@
     const m = document.getElementById(MODAL_ID);
     const body = m?.querySelector(".body");
     if (!m || !body) return;
-    if (m.classList.contains('minimized')) return; // no importa el alto
+    if (m.classList.contains('minimized')) return;
     const ui = getUi();
     const margin = 24;
     let maxH;
     if (ui.modal.anchor === "bottom") {
       const b = parseInt(m.style.bottom || "24", 10);
-      maxH = window.innerHeight - b - margin; // crece hacia arriba
+      maxH = window.innerHeight - b - margin;
     } else {
       const rect = m.getBoundingClientRect();
-      maxH = window.innerHeight - rect.top - margin; // crece hacia abajo
+      maxH = window.innerHeight - rect.top - margin;
     }
     body.style.maxHeight = `${Math.max(120, Math.floor(maxH))}px`;
   }
@@ -418,19 +596,17 @@
         <div class="dot"></div>
         <div class="title">Ataques detectados</div>
         <div class="total">0</div>
-        <div class="gear" title="Configurar Telegram">⚙️</div>
+        <div class="gear" title="Configurar / Auto-evadir">⚙️</div>
       </div>
       <div class="body"></div>
     `;
     document.body.appendChild(m);
 
-    // aplicar última posición guardada
     applyModalPosition();
     updateHeaderTotalBadge();
 
     m.querySelector(".gear")?.addEventListener("click", (e) => { e.stopPropagation(); toggleSettings(); });
 
-    // Toggle minimize al clickear header (excepto gear)
     m.querySelector(".hdr")?.addEventListener("click", (e) => {
       if (e.target && (e.target.closest('.gear'))) return;
       const ui = getUi();
@@ -440,7 +616,6 @@
       updateModalMaxHeight();
     });
 
-    // Drag con anclaje inteligente
     let dragging = false, ox = 0, oy = 0;
     const onDown = (e) => {
       if (e.target && (e.target.closest('.gear'))) return;
@@ -494,13 +669,26 @@
     }
   }
 
+  function escapeHtml(s) { return String(s || "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])); }
+  function escapeAttr(s) { return escapeHtml(s).replace(/"/g, "&quot;"); }
+
+  function fmtEta(ms) {
+    if (ms <= 0) return "00:00";
+    const s = Math.floor(ms / 1000);
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    return hh > 0
+      ? `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+      : `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  }
+
   function renderModal(state) {
     const modal = document.getElementById(MODAL_ID);
     if (!modal) return;
     const body = modal.querySelector(".body");
     if (!body) return;
 
-    // actualizar total en cabecera
     updateHeaderTotalBadge();
 
     const entries = [];
@@ -510,24 +698,19 @@
       const v = state.villages[vid];
       if (!v.totalCount || v.totalCount <= 0) continue;
 
-      // calcular siguiente llegada de la aldea
       let vNext = Infinity;
       for (const akey of Object.keys(v.attackers || {})) {
         const atk = v.attackers[akey];
         const future = (atk.waves || []).filter(w => (w.arrivalEpoch + GRACE_MS) > tNow);
         if (future.length && future[0].arrivalEpoch < vNext) vNext = future[0].arrivalEpoch;
       }
-      if (vNext !== Infinity) {
-        entries.push({ vid, v, next: vNext });
-      }
+      if (vNext !== Infinity) entries.push({ vid, v, next: vNext });
     }
 
-    // ordenar aldeas por llegada más próxima
     entries.sort((a,b) => a.next - b.next);
 
     const parts = [];
     for (const { vid, v } of entries) {
-      // ordenar atacantes por su próxima wave
       const attackers = Object.keys(v.attackers || {}).map(akey => {
         const atk = v.attackers[akey];
         const waves = (atk.waves || []).filter(w => (w.arrivalEpoch + GRACE_MS) > tNow)
@@ -543,10 +726,19 @@
         const etaMs = next.arrivalEpoch - tNow;
         const etaTxt = fmtEta(etaMs);
         const atTxt = next.atText || "";
+
+        const ev = next.evade || {};
+        const tgtLine = ev.target
+          ? `🎯 <a href="${escapeAttr(ev.target.link)}" target="_blank">(${ev.target.x}|${ev.target.y})</a> <span class="meta">[${ev.kind||'oasis'}]</span>`
+          : "🎯 (pendiente)";
+        const t60 = Math.max(0, (next.arrivalEpoch - tNow) - T60_WINDOW_MS);
+        const t10s = Math.max(0, (next.arrivalEpoch - tNow) - T10s_WINDOW_MS);
+
         return `<li>
           <span class="atk">${escapeHtml(atk.attackerName || "")}</span>
           — ${atk.type === "raid" ? "Raid" : "Attack"} × ${waves.length}
           <div class="meta">⏳ ${etaTxt} — 🕒 ${escapeHtml(atTxt)}</div>
+          <div class="meta">${tgtLine} — T-60: ${fmtEta(t60)} — T-10s: ${fmtEta(t10s)}</div>
         </li>`;
       });
 
@@ -574,8 +766,14 @@
     dlg.id = SETTINGS_ID;
     dlg.innerHTML = `
       <div class="row">
-        <div style="font-weight:700;">Configuración Telegram</div>
+        <div style="font-weight:700;">Configuración</div>
         <div class="meta">Se guarda localmente en este navegador.</div>
+      </div>
+      <div class="row">
+        <label><input id="aa-auto-evade" type="checkbox" ${st.settings.autoEvade ? "checked":""}> Activar auto-evasión (T-10/T-60/T-10s)</label>
+      </div>
+      <div class="row">
+        <div style="font-weight:700;">Telegram</div>
       </div>
       <div class="row">
         <label>Bot Token</label>
@@ -596,31 +794,34 @@
     dlg.querySelector("#aa-save")?.addEventListener("click", () => {
       const token = (document.getElementById("aa-token")?.value || "").trim();
       const chatId = (document.getElementById("aa-chatid")?.value || "").trim();
+      const autoEvade = !!document.getElementById("aa-auto-evade")?.checked;
       st.settings.telegramToken = token;
       st.settings.chatId = chatId;
+      st.settings.autoEvade = autoEvade;
       saveState(st, "settings");
       dlg.remove();
-      console.log(`[${nowTs()}] [AA] Settings saved.`);
+      console.log(`[${nowTs()}] [AA] Settings saved (autoEvade=${autoEvade}).`);
     });
   }
 
-  /******************************************************************
-   * ⏱️ Countdown formatter
-   ******************************************************************/
-  function fmtEta(ms) {
-    if (ms <= 0) return "00:00";
-    const s = Math.floor(ms / 1000);
-    const hh = Math.floor(s / 3600);
-    const mm = Math.floor((s % 3600) / 60);
-    const ss = s % 60;
-    return hh > 0
-      ? `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
-      : `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  function pingUIForVillage(vid) {
+    const m = document.getElementById(MODAL_ID);
+    if (!m) return;
+    const dot = m.querySelector('.dot');
+    dot?.classList.add('ring');
+    setTimeout(() => dot?.classList.remove('ring'), 1200);
+
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(String(vid)) : String(vid).replace(/[^a-zA-Z0-9_\-]/g,'');
+    const box = m.querySelector(`.vbox[data-vid="${esc}"]`);
+    if (box) {
+      box.classList.add('flash');
+      setTimeout(()=> box.classList.remove('flash'), 950);
+    }
   }
 
-  /******************************************************************
-   * 📬 Telegram
-   ******************************************************************/
+  // ────────────────────────────────────────────────────────────────────────────
+  // Telegram
+  // ────────────────────────────────────────────────────────────────────────────
   function canSendTelegram(state) {
     return !!(state.settings.telegramToken && state.settings.chatId);
   }
@@ -634,12 +835,7 @@
       method: "POST",
       url: `https://api.telegram.org/bot${token}/sendMessage`,
       headers: { "Content-Type": "application/json" },
-      data: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: true
-      }),
+      data: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
       onload: () => console.log(`[${nowTs()}] [AA] Telegram sent.`),
       onerror: (e) => console.warn(`[${nowTs()}] [AA] Telegram error`, e)
     });
@@ -666,17 +862,9 @@
     ].join("\n");
   }
 
-  /******************************************************************
-   * 🔒 HTML helpers
-   ******************************************************************/
-  function escapeHtml(s) {
-    return String(s || "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
-  }
-  function escapeAttr(s) { return escapeHtml(s).replace(/"/g, "&quot;"); }
-
-  /******************************************************************
-   * 🧠 Core: consolidación y notificaciones
-   ******************************************************************/
+  // ────────────────────────────────────────────────────────────────────────────
+  // Core: consolidación + notificaciones + auto-evade
+  // ────────────────────────────────────────────────────────────────────────────
   async function refreshVillageDetailsIfNeeded(village) {
     console.log(`[${nowTs()}] [AA] refreshVillageDetailsIfNeeded did=${village?.did} name=${village?.name||''}`);
     const state = loadState();
@@ -689,9 +877,8 @@
     const vObj = state.villages[vid] || { name: village.name, coords: village.coords, attackers: {}, totalCount: 0, lastChangeAt: 0 };
     vObj.name = village.name || vObj.name;
     vObj.coords = village.coords || vObj.coords;
-    vObj.attackers = vObj.attackers || {};
-
     vObj.attackers = {};
+
     for (const akey of Object.keys(detail)) {
       const d = detail[akey];
       vObj.attackers[akey] = {
@@ -703,7 +890,8 @@
           arrivalEpoch: w.arrivalEpoch,
           atText: w.atText,
           notified_initial: false,
-          notified_T10: false
+          notified_T10: false,
+          evade: { target: null, plannedAt: 0, firstSent: false, secondSent: false, lastErrorAt: 0, kind: null }
         }))
       };
     }
@@ -715,15 +903,10 @@
     for (const akey of Object.keys(vObj.attackers)) {
       const atk = vObj.attackers[akey];
       atk.waves.sort((a, b) => a.arrivalEpoch - b.arrivalEpoch);
-      attackerSummary.push({
-        name: atk.attackerName || akey.split("|")[0],
-        count: atk.waves.length
-      });
+      attackerSummary.push({ name: atk.attackerName || akey.split("|")[0], count: atk.waves.length });
       newTotal += atk.waves.length;
       if (atk.waves[0]) {
-        if (!nextWave || atk.waves[0].arrivalEpoch < nextWave.arrivalEpoch) {
-          nextWave = atk.waves[0];
-        }
+        if (!nextWave || atk.waves[0].arrivalEpoch < nextWave.arrivalEpoch) nextWave = atk.waves[0];
       }
     }
     vObj.totalCount = newTotal;
@@ -750,31 +933,15 @@
     }
   }
 
-  function pingUIForVillage(vid) {
-    const m = document.getElementById(MODAL_ID);
-    if (!m) return;
-    const dot = m.querySelector('.dot');
-    dot?.classList.add('ring');
-    setTimeout(() => dot?.classList.remove('ring'), 1200);
-
-    const esc = (window.CSS && CSS.escape) ? CSS.escape(String(vid)) : String(vid).replace(/[^a-zA-Z0-9_\-]/g,'');
-    const box = m.querySelector(`.vbox[data-vid="${esc}"]`);
-    if (box) {
-      box.classList.add('flash');
-      setTimeout(()=> box.classList.remove('flash'), 950);
-    }
-  }
-
   function handleInfoboxDeltaForActiveVillage() {
     if (!isOnDorf1()) return;
 
     const activeVid = getActiveVillageIdFromSidebar();
     if (!activeVid) return;
 
-    const infCount = parseInfoboxCount(); // null si no hay infobox renderizado
+    const infCount = parseInfoboxCount();
     const state = loadState();
     const current = state.villages[activeVid]?.totalCount || 0;
-
     const activeHasAttackClass = !!$("#sidebarBoxVillageList .listEntry.village.active.attack");
 
     if ((!activeHasAttackClass) && (infCount === null || infCount === 0) && (current > 0)) {
@@ -797,35 +964,115 @@
     }
   }
 
-  /******************************************************************
-   * 👂 Observers & Hooks
-   ******************************************************************/
+  // ────────────────────────────────────────────────────────────────────────────
+  // Auto-evade: planificación y ejecución
+  // ────────────────────────────────────────────────────────────────────────────
+  async function planAndRunEvade(state) {
+    if (!state.settings.autoEvade) return;
+
+    const tNow = now();
+
+    for (const vid of Object.keys(state.villages)) {
+      const village = state.villages[vid];
+
+      for (const akey of Object.keys(village.attackers || {})) {
+        const atk = village.attackers[akey];
+
+        for (const w of atk.waves || []) {
+          const eta = w.arrivalEpoch - tNow;
+
+          // 1) T-10m: reservar objetivo (usa tropas reales para calcular umbral)
+          if (eta > 0 && eta <= T10_WINDOW_MS) {
+            if (!w.evade?.target && (!w.evade?.lastErrorAt || (tNow - w.evade.lastErrorAt) > 30_000)) {
+              try {
+                // Inspecciona RP para conocer cuántas tropas hay AHORA
+                const rpHtml = await openRallyFor(vid, 0, 0).catch(()=>null);
+                let totalTroops = 0;
+                if (rpHtml) {
+                  const maxMap = parseMaxForAllTypes(rpHtml);
+                  totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
+                }
+                // Umbral dinámico: 1 animal cada 20 tropas, máx 30
+                const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
+
+                const target = await findTargetForEvade(village, maxAnimals);
+                if (target) {
+                  w.evade.target = { x: target.x, y: target.y, link: target.link };
+                  w.evade.plannedAt = tNow;
+                  w.evade.kind = target.kind || 'oasis';
+                  saveState(state, "evade:planned");
+                  ensureModal(); renderModal(loadState());
+                  console.log(`[${nowTs()}] [AA] Evade planned for village ${vid} -> (${target.x}|${target.y}) kind=${w.evade.kind} maxAnimals=${maxAnimals}`);
+                } else {
+                  w.evade.lastErrorAt = tNow;
+                  saveState(state, "evade:no-target");
+                }
+              } catch (e) {
+                w.evade.lastErrorAt = tNow;
+                saveState(state, "evade:plan-error");
+                console.warn(`[${nowTs()}] [AA] plan target error`, e);
+              }
+            }
+          }
+
+          // 2) T-60s: envío total
+          if (eta > 0 && eta <= T60_WINDOW_MS && !(w.evade?.firstSent)) {
+            if (w.evade?.target) {
+              try {
+                const ok = await sendAllTroopsRaid(vid, w.evade.target);
+                if (ok) {
+                  w.evade.firstSent = true;
+                  saveState(state, "evade:first");
+                  console.log(`[${nowTs()}] [AA] Evade first send (T-60) OK for village ${vid}.`);
+                }
+              } catch (e) {
+                w.evade.lastErrorAt = tNow;
+                saveState(state, "evade:first-error");
+                console.warn(`[${nowTs()}] [AA] Evade first send failed:`, e);
+              }
+            }
+          }
+
+          // 3) T-10s: reintento
+          if (eta > 0 && eta <= T10s_WINDOW_MS && !(w.evade?.secondSent)) {
+            if (w.evade?.target) {
+              try {
+                const ok2 = await sendAllTroopsRaid(vid, w.evade.target);
+                if (ok2) {
+                  w.evade.secondSent = true;
+                  saveState(state, "evade:second");
+                  console.log(`[${nowTs()}] [AA] Evade second send (T-10s) OK for village ${vid}.`);
+                }
+              } catch (e) {
+                w.evade.lastErrorAt = tNow;
+                saveState(state, "evade:second-error");
+                console.warn(`[${nowTs()}] [AA] Evade second send failed:`, e);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Observers & Hooks
+  // ────────────────────────────────────────────────────────────────────────────
   function observeSidebar() {
     const box = $("#sidebarBoxVillageList");
     if (!box) return;
-    const mo = new MutationObserver(() => {
-      scheduleLateSidebarScan('sidebarMutation');
-    });
-    mo.observe(box, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['class', 'data-did']
-    });
+    const mo = new MutationObserver(() => { scheduleLateSidebarScan('sidebarMutation'); });
+    mo.observe(box, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-did'] });
   }
 
   function hookNavigation() {
     const push = history.pushState;
     history.pushState = function () {
       push.apply(this, arguments);
-      setTimeout(() => {
-        handleInfoboxDeltaForActiveVillage();
-      }, 300);
+      setTimeout(() => { handleInfoboxDeltaForActiveVillage(); }, 300);
     };
     window.addEventListener("popstate", () => {
-      setTimeout(() => {
-        handleInfoboxDeltaForActiveVillage();
-      }, 300);
+      setTimeout(() => { handleInfoboxDeltaForActiveVillage(); }, 300);
     });
   }
 
@@ -833,6 +1080,11 @@
     setInterval(() => {
       const st = loadState();
       if (Object.keys(st.villages).length === 0) return;
+
+      // 1) Auto-evade plan/execute
+      planAndRunEvade(st).catch(e => console.warn(`[${nowTs()}] [AA] planAndRunEvade error`, e));
+
+      // 2) UI + T-10 avisos
       saveState(st, "tick");
       ensureModal();
       renderModal(st);
@@ -840,12 +1092,8 @@
     }, TICK_MS);
   }
 
-  /******************************************************************
-   * ⏰ T-10 triggers (local, sin red)
-   ******************************************************************/
   function evalT10Triggers(state) {
     if (!canSendTelegram(state)) return;
-
     for (const vid of Object.keys(state.villages)) {
       const v = state.villages[vid];
       for (const akey of Object.keys(v.attackers || {})) {
@@ -863,28 +1111,22 @@
     }
   }
 
-  /******************************************************************
-   * 🛠️ Utils
-   ******************************************************************/
+  // ────────────────────────────────────────────────────────────────────────────
+  // Utils
+  // ────────────────────────────────────────────────────────────────────────────
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function isOnDorf1() { return /\/dorf1\.php$/.test(location.pathname); }
 
-  function isOnDorf1() {
-    return /\/dorf1\.php$/.test(location.pathname);
-  }
-
-  /******************************************************************
-   * 🚀 Boot
-   ******************************************************************/
+  // ────────────────────────────────────────────────────────────────────────────
+  // Boot
+  // ────────────────────────────────────────────────────────────────────────────
   (function init() {
-    console.log(`[${nowTs()}] [AA] Attack Detector Pro init on ${location.host} (${SUFFIX})`);
+    console.log(`[${nowTs()}] [AA] Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.1.0`);
     observeSidebar();
     hookNavigation();
 
-    // Primer chequeo: solo late scan
     scheduleLateSidebarScan('init');
-    if (isOnDorf1()) {
-      handleInfoboxDeltaForActiveVillage();
-    }
+    if (isOnDorf1()) handleInfoboxDeltaForActiveVillage();
 
     startTickUI();
   })();

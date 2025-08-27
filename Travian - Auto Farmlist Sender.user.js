@@ -9,6 +9,7 @@
 // @exclude      *://support.travian.*
 // @exclude      *://blog.travian.*
 // @exclude     *://*.travian.*/report*
+// @exclude     *://*.travian.*/karte.php*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      *travian.com
