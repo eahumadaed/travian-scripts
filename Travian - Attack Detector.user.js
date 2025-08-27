@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart
+// @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart (dbg-heavy)
 // @namespace    https://edi.travian
-// @version      2.1.1
-// @description  Detecta ataques, consolida olas y ejecuta auto-evasión: reserva oasis (vacío o bajo umbral), envía TODO a T-60s y reintenta a T-10s. Modal persistente + Telegram. Reacciona a DOM (sin polling agresivo).
+// @version      2.2.2
+// @description  Detecta ataques, consolida olas y ejecuta auto-evasión (vacío/umbral/natar). Incluye LOGS de depuración detallados y botón "Evadir ahora" (sin reintentos) para pruebas.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
 // @exclude     *://*.travian.*/report*
@@ -22,12 +22,28 @@
   "use strict";
 
   // ────────────────────────────────────────────────────────────────────────────
+  // Logger helpers (timestamps + niveles)
+  // ────────────────────────────────────────────────────────────────────────────
+  const ts = () => new Date().toISOString().replace("T", " ").replace("Z", "");
+  const L = {
+    info:  (...a)=>console.log  (`[${ts()}] [AA][INFO]`, ...a),
+    warn:  (...a)=>console.warn (`[${ts()}] [AA][WARN]`, ...a),
+    error: (...a)=>console.error(`[${ts()}] [AA][ERR ]`, ...a),
+    dbg:   (...a)=>console.log  (`[${ts()}] [AA][DBG ]`, ...a),
+    group: (label)=>console.group(`[${ts()}] [AA] ${label}`),
+    groupEnd: ()=>console.groupEnd(),
+  };
+
+  // ────────────────────────────────────────────────────────────────────────────
   // Early exit si no hay UI base
   // ────────────────────────────────────────────────────────────────────────────
   function esacosaexiste() {
     return !!document.querySelector('#stockBar .warehouse .capacity');
   }
-  if (!esacosaexiste()) return;
+  if (!esacosaexiste()) {
+    L.warn("Sin UI base (#stockBar .warehouse .capacity). Script no se carga.");
+    return;
+  }
 
   // ────────────────────────────────────────────────────────────────────────────
   // Config & Constantes
@@ -43,22 +59,27 @@
   // Auto-evade
   const AUTO_EVADE_DEFAULT = true;
   const EVADE_SEARCH_RADIUS = 3;                  // zoomLevel para /map/position
-  const EVADE_RETRY_MS = 20 * 60 * 1000;         // backoff si algo falla
-  const T10_WINDOW_MS = 10 * 60 * 1000;          // T-10m plan
-  const T60_WINDOW_MS = 60 * 1000;               // T-60s envío total
-  const T10s_WINDOW_MS = 10 * 1000;              // T-10s reintento
-  const API_VERSION = "228.2";                   // vers. API ajax travian
+  const T10_WINDOW_MS      = 10 * 60 * 1000;     // T-10m plan
+  const T60_WINDOW_MS      = 60 * 1000;          // T-60s envío total
+  const T10s_WINDOW_MS     = 10 * 1000;          // T-10s reintento
+  const API_VERSION        = "228.2";
 
   // ────────────────────────────────────────────────────────────────────────────
-  // State helpers
+  // Utils generales
   // ────────────────────────────────────────────────────────────────────────────
   const now = () => Date.now();
-  const nowTs = () => new Date().toISOString().replace("T", " ").replace("Z", "");
+  const nowTs = () => ts();
   const jitter = (min = JITTER_MIN, max = JITTER_MAX) => Math.floor(Math.random() * (max - min + 1)) + min;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const clamp = (n, min, max)=> Math.max(min, Math.min(max, n));
+  const isOnDorf1 = () => /\/dorf1\.php$/.test(location.pathname);
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // Estado
+  // ────────────────────────────────────────────────────────────────────────────
   function makeEmpty() {
     return {
-      version: "2.1.0",
+      version: "2.2.0",
       suffix: SUFFIX,
       meta: {
         createdAt: now(),
@@ -82,14 +103,14 @@
       const raw = localStorage.getItem(LS_KEY);
       if (!raw) return makeEmpty();
       const s = JSON.parse(raw);
-      if (!s.version) s.version = "1.0";
-      s.meta ||= {};
-      s.meta.ui ||= { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } };
+      s.version  ||= "2.2.0";
+      s.meta     ||= {};
+      s.meta.ui  ||= { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } };
       s.settings ||= { telegramToken:"", chatId:"", quietHours:null, autoEvade: AUTO_EVADE_DEFAULT };
       s.villages ||= {};
       return s;
     } catch (e) {
-      console.warn(`[${nowTs()}] [AA] Bad state JSON, resetting.`, e);
+      L.warn("Bad state JSON, resetting.", e);
       return makeEmpty();
     }
   }
@@ -115,16 +136,14 @@
     compactState(state);
     state.meta.updatedAt = now();
     localStorage.setItem(LS_KEY, JSON.stringify(state));
-    // Log (timestamp) — seguimiento de razones de guardado
-    if (reason) console.log(`[${nowTs()}] [AA] state saved: ${reason}`);
+    //if (reason) L.dbg("state saved:", reason, { villages: Object.keys(state.villages).length });
   }
 
   // ────────────────────────────────────────────────────────────────────────────
   // DOM helpers
   // ────────────────────────────────────────────────────────────────────────────
-  const $ = (sel, root = document) => root.querySelector(sel);
+  const $  = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-  const ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
 
   function getActiveVillageIdFromSidebar() {
     const active = $("#sidebarBoxVillageList .listEntry.village.active");
@@ -166,7 +185,7 @@
     lateScanTimer = setTimeout(() => {
       (async () => {
         const attacks = getSidebarAttackVillages();
-        console.log(`[${ts()}] [AA][DBG] late sidebar scan (${reason}): ${attacks.length}`);
+        L.dbg("late sidebar scan:", reason, { count: attacks.length, attacks });
 
         const st = loadState();
         const activeDid = getActiveVillageIdFromSidebar();
@@ -181,8 +200,10 @@
           if (touchesOther && activeDid) {
             try {
               await fetch(`/dorf1.php?newdid=${encodeURIComponent(activeDid)}`, { credentials: "include" });
-              console.log(`[${nowTs()}] [AA] Restored active village to ${activeDid}`);
-            } catch { /* no-op */ }
+              L.info("Restored active village:", activeDid);
+            } catch (e) {
+              L.warn("Failed to restore active village newdid.", e);
+            }
           }
         }
       })();
@@ -197,35 +218,56 @@
     const m = a1.textContent.match(/(\d+)/);
     return m ? parseInt(m[1], 10) : null;
   }
+    // ────────────────────────────────────────────────────────────────────────────
+    // Helper: restaurar la aldea activa tras un envío exitoso (contranavegación)
+    // ────────────────────────────────────────────────────────────────────────────
+    function restoreActiveVillageAfterSend(vid, delayMs = 2000) {
+        try {
+            const url = `/dorf1.php?newdid=${encodeURIComponent(vid)}`;
+            // Espera un poco para dejar que localStorage/estado quede persistido y logs salgan
+            setTimeout(() => {
+                // Si ya estamos en esa aldea, no hagas nada
+                const u = new URL(location.href);
+                if (u.pathname === "/dorf1.php" && u.searchParams.get("newdid") === String(vid)) {
+                    console.log("[AA][INFO] Aldea ya activa, no se contranavega.", { vid });
+                    return;
+                }
+                console.log("[AA][INFO] Contranavegando a aldea original tras envío…", { vid, url });
+                // Usa assign (no replace) por si quieres volver con back; cambia a replace si prefieres ocultar en el historial
+                location.replace(url);
+            }, Math.max(0, delayMs|0));
+        } catch (e) {
+            console.warn("[AA][WARN] No se pudo programar contranavegación:", e);
+        }
+    }
 
   // ────────────────────────────────────────────────────────────────────────────
   // Rally Point (detalle)
   // ────────────────────────────────────────────────────────────────────────────
   async function fetchRallyDetails(villageId) {
     const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=1&filter=1&subfilters=1`;
+    L.group(`fetchRallyDetails did=${villageId}`);
+    L.dbg("GET", url);
     const res = await fetch(url, { credentials: "include" });
     const html = await res.text();
+    L.dbg("HTML len:", html.length);
     const doc = new DOMParser().parseFromString(html, "text/html");
 
     const tables = $$("table.troop_details", doc).filter(t => t.classList.contains("inAttack") || t.classList.contains("inRaid"));
+    L.dbg("troop_details found:", tables.length);
+
     const wavesByAttacker = {};
 
-    tables.forEach(tbl => {
+    tables.forEach((tbl, idx) => {
       const isRaid = tbl.classList.contains("inRaid");
       const type = isRaid ? "raid" : "attack";
 
       let attackerName = "";
       let attackerHref = "";
-      const headLink = tbl.querySelector("thead .troopHeadline a[href*='karte.php']");
+      const headLink = tbl.querySelector("thead .troopHeadline a[href*='karte.php']") || tbl.querySelector("thead a[href*='karte.php']");
       if (headLink) {
         attackerName = headLink.textContent.trim();
         attackerHref = headLink.getAttribute("href") || "";
-      } else {
-        const anyLink = tbl.querySelector("thead a[href*='karte.php']");
-        if (anyLink) {
-          attackerName = anyLink.textContent.trim();
-          attackerHref = anyLink.getAttribute("href") || "";
-        }
       }
 
       const coordsTh = tbl.querySelector("tbody.units th.coords .coordinatesWrapper") || tbl.querySelector("th.coords .coordinatesWrapper");
@@ -233,16 +275,17 @@
       if (coordsTh) {
         const x = coordsTh.querySelector(".coordinateX")?.textContent?.replace(/[()]/g, "")?.trim();
         const y = coordsTh.querySelector(".coordinateY")?.textContent?.replace(/[()]/g, "")?.trim();
-        coordsTxt = x && y ? `(${x}|${y})` : coordsTh.textContent.trim().replace(/\s+/g, " ");
+        coordsTxt = (x && y) ? `(${x}|${y})` : coordsTh.textContent.trim().replace(/\s+/g, " ");
       }
 
       const timerSpan = tbl.querySelector("tbody.infos .in .timer[value]");
       const atSpan = tbl.querySelector("tbody.infos .at");
       const sec = timerSpan ? parseInt(timerSpan.getAttribute("value"), 10) : null;
-      let atText = "";
-      if (atSpan) atText = atSpan.textContent.replace(/\s+/g, " ").trim().replace(/^at\s*/i, "");
-      if (sec == null) return;
+      let atText = atSpan ? atSpan.textContent.replace(/\s+/g, " ").trim().replace(/^at\s*/i, "") : "";
 
+      L.dbg(`table#${idx}`, { attackerName, coordsTxt, sec, atText, type });
+
+      if (sec == null) return;
       const arrivalEpoch = now() + (sec * 1000);
       const aKey = `${attackerName}|${coordsTxt}`;
       if (!wavesByAttacker[aKey]) {
@@ -261,14 +304,17 @@
     for (const k of Object.keys(wavesByAttacker)) {
       wavesByAttacker[k].waves.sort((a, b) => a.arrivalEpoch - b.arrivalEpoch);
     }
+    L.groupEnd();
     return wavesByAttacker;
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // API Mapa: encontrar oasis y natars (vacío / bajo umbral / fallback)
+  // API Mapa: encontrar oasis y natars
   // ────────────────────────────────────────────────────────────────────────────
   async function fetchMapTiles(centerX, centerY, zoomLevel = 3) {
     const body = JSON.stringify({ data: { x: centerX, y: centerY, zoomLevel, ignorePositions: [] } });
+    L.group("fetchMapTiles");
+    L.dbg("POST /api/v1/map/position body:", body);
     const res = await fetch("/api/v1/map/position", {
       method: "POST",
       credentials: "include",
@@ -280,19 +326,47 @@
       },
       body
     });
-    if (!res.ok) throw new Error(`map/position HTTP ${res.status}`);
-    return res.json();
+    const json = await res.json().catch(e => ({ error: String(e) }));
+    L.dbg("map/position result keys:", Object.keys(json || {}));
+    L.groupEnd();
+    return json;
   }
 
-  function looksOasis(t) {
-    const title = (t.title || "").trim();
-    const looksOasisish = /{k\.(vt|f\d+|fo)}/i.test(title) || /oasis/i.test(title);
-    return looksOasisish;
-  }
+function looksOasis(t) {
+  const title = String(t?.title || "").toLowerCase();
+  return /{k\.(fo|f\d+|vt)}/i.test(title);
+}
+function isUnoccupiedOasis(t) {
+  return t && t.did === -1;
+}
+function hasAnimalsInText(text) {
+  return /inlineIcon\s+tooltipUnit/i.test(text || "") || /class="unit u3\d+"/i.test(text || "");
+}
+function countAnimalsFromText(text) {
+  if (!text) return 0;
+  let total = 0;
+  const re = /class="unit u3\d+"[\s\S]*?<span class="value[^>]*>\s*(\d+)\s*<\/span>/gi;
+  let m; while ((m = re.exec(text)) !== null) total += parseInt(m[1], 10) || 0;
+  return total;
+}
+function isEmptyOasis(t) {
+  return isUnoccupiedOasis(t) && looksOasis(t) && !hasAnimalsInText(t.text || "");
+}
+function isLowAnimalOasis(t, maxAnimals) {
+  if (!isUnoccupiedOasis(t) || !looksOasis(t)) return false;
+  const n = countAnimalsFromText(t.text || "");
+  return n > 0 && n <= maxAnimals;
+}
+function isNatarNonWW(t) {
+  if (!t || t.uid !== 1) return false; // Natar = uid 1
+  const title = String(t.title || "").toLowerCase();
+  const text  = String(t.text  || "").toLowerCase();
+  const isWW  = /wonder of the world|maravilla del mundo|weltwunder/i.test(title) || /k\.ww/i.test(text);
+  return !isWW;
+}
 
-  function isUnoccupied(t) {
-    return (t.did === -1 || t.did === undefined || t.did === null);
-  }
+
+    //-------------------------------------------------------------------------
 
   function parseAnimalsFromMapText(text) {
     if (!text) return 0;
@@ -303,115 +377,199 @@
     return total;
   }
 
-  function isEmptyOasis(t) {
-    if (!looksOasis(t)) return false;
-    if (!isUnoccupied(t)) return false;
-    const text = t.text || "";
-    const hasAnimals = /{k\.animals}|inlineIcon\s+tooltipUnit|class="unit u3\d+"/i.test(text);
-    return !hasAnimals;
-  }
 
-  function isLowAnimalOasis(t, maxAnimals) {
-    if (!looksOasis(t)) return false;
-    if (!isUnoccupied(t)) return false;
-    const text = t.text || "";
-    const count = parseAnimalsFromMapText(text);
-    return Number.isFinite(count) && count > 0 && count <= maxAnimals;
-  }
-
-  function isNatarNonWW(t) {
-    const title = (t.title || "").toLowerCase();
-    const text = (t.text || "").toLowerCase();
-    const isNat = /natar/i.test(title) || /natar/i.test(text);
-    const isWW = /wonder of the world|maravilla del mundo|weltwunder/i.test(title) || /k\.ww/i.test(text);
-    return isNat && !isWW;
-  }
-
+  // ✅ Reemplazo robusto de coordsFromVillageText (tu versión refinada)
   function coordsFromVillageText(txt) {
-    const m = String(txt||"").match(/(-?\d+)\s*\|\s*(-?\d+)/);
+    let s = String(txt || "").normalize("NFKC")
+      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, ""); // bidi marks
+    s = s
+      .replace(/[()\[\]{}]/g, "")              // quita paréntesis/corchetes
+      .replace(/\s+/g, "")                     // quita espacios
+      .replace(/[\u2212\u2012\u2013\u2014]/g, "-") // guiones raros → "-"
+      .replace(/\uFF5C/g, "|");                // fullwidth bar → "|"
+    // dígitos no ASCII → ASCII
+    s = s
+      .replace(/[\u0660-\u0669]/g, ch => String(ch.charCodeAt(0) - 0x0660))
+      .replace(/[\u06F0-\u06F9]/g, ch => String(ch.charCodeAt(0) - 0x06F0))
+      .replace(/[\uFF10-\uFF19]/g, ch => String(ch.charCodeAt(0) - 0xFF10));
+    const m = s.match(/(-?\d+)\|(-?\d+)/);
     if (!m) return null;
-    return { x: parseInt(m[1],10), y: parseInt(m[2],10) };
+    return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
   }
 
-  async function findTargetForEvade(village, maxAnimals) {
-    const c = coordsFromVillageText(village.coords || "");
-    if (!c) { console.warn(`[${nowTs()}] [AA] No village coords found for evade.`); return null; }
+async function findTargetForEvade(village, maxAnimals) {
+  console.group("[AA] findTargetForEvade");
+  console.log("input village:", village);
+  console.log("maxAnimals:", maxAnimals);
 
-    const mp = await fetchMapTiles(c.x, c.y, EVADE_SEARCH_RADIUS);
-    const tiles = mp.tiles || [];
+  const c = coordsFromVillageText(village.coords || "");
+  if (!c) { console.warn("No village coords found for evade."); console.groupEnd(); return null; }
 
-    // 1) Oasis vacío sin animales
-    const empties = tiles.filter(isEmptyOasis).map(t => {
-      const { x, y } = t.position || {};
-      return (typeof x==="number" && typeof y==="number") ? { x,y, dist: Math.hypot(c.x-x, c.y-y), type:'oasis0' } : null;
-    }).filter(Boolean);
-    empties.sort((a,b)=>a.dist-b.dist);
-    if (empties[0]) {
-      const best = empties[0];
-      console.log(`[${nowTs()}] [AA] Evade target: empty oasis (${best.x}|${best.y}) d=${best.dist.toFixed(1)}`);
-      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_empty' };
-    }
+  const mp = await fetchMapTiles(c.x, c.y, EVADE_SEARCH_RADIUS);
+  const tiles = Array.isArray(mp?.tiles) ? mp.tiles : [];
+  console.log("tiles count:", tiles.length);
 
-    // 2) Oasis con pocos animales (<= maxAnimals)
-    const lows = tiles.filter(t => isLowAnimalOasis(t, maxAnimals)).map(t => {
-      const { x, y } = t.position || {};
-      return (typeof x==="number" && typeof y==="number") ? { x,y, dist: Math.hypot(c.x-x, c.y-y), type:'oasisLow' } : null;
-    }).filter(Boolean);
-    lows.sort((a,b)=>a.dist-b.dist);
-    if (lows[0]) {
-      const best = lows[0];
-      console.log(`[${nowTs()}] [AA] Evade target: low-animal oasis (${best.x}|${best.y}) ≤ ${maxAnimals} d=${best.dist.toFixed(1)}`);
-      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_low' };
-    }
+  // Solo tiles con position válida
+  const valid = tiles.filter(t => t && t.position && Number.isFinite(t.position.x) && Number.isFinite(t.position.y));
 
-    // 3) Natar no-WW (último recurso)
-    const natars = tiles.filter(isNatarNonWW).map(t => {
-      const { x, y } = t.position || {};
-      return (typeof x==="number" && typeof y==="number") ? { x,y, dist: Math.hypot(c.x-x, c.y-y), type:'natar' } : null;
-    }).filter(Boolean);
-    natars.sort((a,b)=>a.dist-b.dist);
-    if (natars[0]) {
-      const best = natars[0];
-      console.log(`[${nowTs()}] [AA] Evade target: Natar non-WW (${best.x}|${best.y}) d=${best.dist.toFixed(1)} [fallback]`);
-      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'natar' };
-    }
+  // --- ¡OJO! Declarar primero, loguear después (para evitar el ReferenceError) ---
+  const empties = valid
+    .filter(t => isEmptyOasis(t))
+    .map(t => ({ x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "oasis_empty" }))
+    .sort((a,b)=>a.dist-b.dist);
 
-    console.warn(`[${nowTs()}] [AA] No evade target found (empty/low/natar).`);
-    return null;
+  const lows = valid
+    .filter(t => isLowAnimalOasis(t, maxAnimals))
+    .map(t => ({ x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "oasis_low" }))
+    .sort((a,b)=>a.dist-b.dist);
+
+  const natars = valid
+    .filter(t => isNatarNonWW(t))
+    .map(t => ({ x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "natar" }))
+    .sort((a,b)=>a.dist-b.dist);
+
+  console.log("[AA][DBG] filtro tiles →", {
+    total: tiles.length, valid: valid.length,
+    empties: empties.length, lowOasis: lows.length, natars: natars.length
+  });
+
+  if (empties[0]) {
+    const best = empties[0];
+    console.info(`Evade target: empty oasis (${best.x}|${best.y}) d=${best.dist.toFixed(1)}`);
+    console.groupEnd();
+    return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_empty' };
   }
+  if (lows[0]) {
+    const best = lows[0];
+    console.info(`Evade target: low-animal oasis (${best.x}|${best.y}) ≤ ${maxAnimals} d=${best.dist.toFixed(1)}`);
+    console.groupEnd();
+    return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_low' };
+  }
+  if (natars[0]) {
+    const best = natars[0];
+    console.info(`Evade target: Natar non-WW (${best.x}|${best.y}) d=${best.dist.toFixed(1)} [fallback]`);
+    console.groupEnd();
+    return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'natar' };
+  }
+
+  console.warn("No evade target found (empty/low/natar).");
+  console.groupEnd();
+  return null;
+}
+
 
   // ────────────────────────────────────────────────────────────────────────────
-  // Rally Point send all (raid)
+  // Rally Point send all (raid) + LOGS profundos
   // ────────────────────────────────────────────────────────────────────────────
   async function openRallyFor(villageId, x, y) {
     const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2&x=${x}&y=${y}`;
+    L.group("openRallyFor");
+    L.dbg("GET", url);
     const res = await fetch(url, { credentials: "include" });
+    const text = await res.text();
+    L.dbg("HTTP", res.status, "HTML len:", text.length);
+    L.groupEnd();
     if (!res.ok) throw new Error(`RP form HTTP ${res.status}`);
-    return res.text();
+    return text;
   }
 
   function parseHeroAvailable(html) {
     const has = /name="troop\[t11\]"/i.test(html);
     const dis = /name="troop\[t11\]"[^>]*disabled/i.test(html);
+    L.dbg("parseHeroAvailable:", { has_t11_input: has, disabled: dis });
     return has && !dis;
   }
 
-  function parseMaxForAllTypes(html) {
-    const out = {};
-    for (let i=1;i<=12;i++){
-      const t = `t${i}`;
-      // referencia de "max" al lado del input (X / MAX)
-      const re = new RegExp(`name=['"]troop\\[${t}\\]['"][\\s\\S]*?\\/(?:&nbsp;)?(?:<span[^>]*>\\s*([0-9]+)\\s*<\\/span>|([0-9]+))`,"i");
-      const m = html.match(re);
-      if (m) {
-        const raw = (m[1]||m[2]||"").replace(/[^\d]/g,"");
-        out[t] = parseInt(raw||"0",10) || 0;
-      } else {
-        if (new RegExp(`name=['"]troop\\[${t}\\]`,"i").test(html)) out[t]=0;
-      }
+    function toIntSafe(v) {
+        if (v == null) return 0;
+        const n = parseInt(String(v).replace(/[^\d]/g, ""), 10);
+        return Number.isFinite(n) ? n : 0;
     }
-    return out;
-  }
+
+    function cleanNumberText(s) {
+        // Normaliza, quita bidi marks y dígitos no ASCII → ASCII
+        let t = String(s||"").normalize("NFKC")
+        .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, ""); // bidi
+        t = t
+            .replace(/[\u0660-\u0669]/g, ch => String(ch.charCodeAt(0) - 0x0660)) // Arabic-Indic
+            .replace(/[\u06F0-\u06F9]/g, ch => String(ch.charCodeAt(0) - 0x06F0)) // Eastern Arabic-Indic
+            .replace(/[\uFF10-\uFF19]/g, ch => String(ch.charCodeAt(0) - 0xFF10)); // Fullwidth
+        return t;
+    }
+
+    function parseMaxForAllTypes(html) {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const out = {};
+
+        const table = doc.querySelector("table#troops");
+        if (!table) {
+            console.warn("[AA][WARN] table#troops no encontrado en tt=2");
+            return out;
+        }
+
+        // t1..t10 (+ t11 héroe si existiera en esta vista)
+        const inputs = table.querySelectorAll('input[name^="troop[t"]');
+        inputs.forEach(inp => {
+            const name = inp.getAttribute("name"); // troop[tX]
+            const m = name && name.match(/troop\[(t\d+)\]/);
+            if (!m) return;
+            const key = m[1];
+
+            // Si está disabled, es 0
+            if (inp.disabled) { out[key] = 0; return; }
+
+            // Busca el <td> contenedor
+            const td = inp.closest("td") || inp.parentElement;
+
+            let max = 0;
+
+            // (1) Texto del <a> vecino (el caso del snippet: …>&nbsp;/&nbsp;<a …> 890 </a>)
+            if (td) {
+                const a = td.querySelector("a");
+                if (a) {
+                    const txt = cleanNumberText(a.textContent || "");
+                    const n = toIntSafe(txt);
+                    if (n > 0) max = n;
+                }
+            }
+
+            // (2) Si no salió por texto, intenta por onclick: …val(890).focus()
+            if (max === 0 && td) {
+                const a = td.querySelector("a[onclick]");
+                if (a) {
+                    const on = a.getAttribute("onclick") || "";
+                    const m2 = on.match(/\.val\(\s*([0-9][0-9\.,]*)\s*\)/);
+                    if (m2) {
+                        const txt = cleanNumberText(m2[1]);
+                        const n = toIntSafe(txt);
+                        if (n > 0) max = n;
+                    }
+                }
+            }
+
+            // (3) Último fallback: buscar “ / <span>…</span>” solo dentro del TD
+            if (max === 0 && td) {
+                const rowHtml = (td.innerHTML || "").replace(/\n/g, " ");
+                const m3 = rowHtml.match(/\/\s*(?:<span[^>]*>\s*([\d\.,]+)\s*<\/span>|([\d\.,]+))/i);
+                if (m3) {
+                    const txt = cleanNumberText(m3[1] || m3[2]);
+                    const n = toIntSafe(txt);
+                    if (n > 0) max = n;
+                }
+            }
+
+            // (4) Respeta maxlength (típico 6 dígitos)
+            const maxLen = parseInt(inp.getAttribute("maxlength") || "6", 10);
+            const hardCap = Math.min(10**maxLen - 1, 2_000_000); // cinturón
+            if (max > hardCap) max = 0; // algo raro: descarta
+
+            out[key] = max;
+            console.log("[AA][DBG] troop max", key, "=", max);
+        });
+
+        return out;
+    }
+
 
   async function postPreviewRaid(villageId, x, y, troops, hero) {
     const params = new URLSearchParams();
@@ -422,71 +580,173 @@
     params.set("eventType","4");
     params.set("ok","ok");
     const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2`;
+
+    L.group("postPreviewRaid");
+    L.dbg("POST", url);
+    L.table && console.table([{ x, y, eventType: 4, hero, troops_count: Object.values(troops).reduce((a,b)=>a+b,0) }]);
     const res = await fetch(url, {
       method: "POST", credentials: "include",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: params.toString()
     });
+    const html = await res.text();
+    L.dbg("HTTP", res.status, "preview HTML len:", html.length);
+    L.groupEnd();
     if (!res.ok) throw new Error(`Preview HTTP ${res.status}`);
-    return res.text();
+    return html;
   }
 
-  function parseChecksumFromPreview(html) {
-    const m = html.match(/checksum'\]\)\.value\s*=\s*'([^']+)'/i);
-    if (m) return m[1];
-    const m2 = html.match(/value\s*=\s*'([0-9a-f]{4,})'/i);
-    return m2 ? m[1] : null;
+function unescapeUnicode(str) {
+  return String(str || "").replace(/\\u([0-9a-fA-F]{4})/g, (_, g) => String.fromCharCode(parseInt(g, 16)));
+}
+function decodeHtmlEntities(s) {
+  const ta = document.createElement("textarea");
+  ta.innerHTML = s;
+  return ta.value;
+}
+
+function parseChecksumFromPreview(html) {
+  if (!html) return null;
+
+  // 0) Por si viene directo en un hidden
+  let m = html.match(/name=['"]checksum['"][^>]*value=['"]([0-9a-fA-F]+)['"]/i);
+  if (m) return m[1];
+
+  // 1) Extrae todos los <script> y el contenido plano, desescapa \uXXXX y entidades
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  let scriptTxt = Array.from(doc.querySelectorAll("script"))
+      .map(s => s.textContent || "")
+      .join("\n");
+  scriptTxt = decodeHtmlEntities(unescapeUnicode(scriptTxt));
+
+  // a) document.querySelector('#troopSendForm input[name=checksum]').value = 'abc123';
+  m = scriptTxt.match(/input\[name\s*=\s*checksum\][^\n]*?\.value\s*=\s*['"]([0-9a-fA-F]+)['"]/i);
+  if (m) return m[1];
+
+  // b) bloque del botón en el JSON del trigger: ..."onclick": "…value = 'abc123'; …"
+  m = scriptTxt.match(/onclick['"]\s*:\s*['"][\s\S]*?value\s*=\s*['"]([0-9a-fA-F]+)['"][\s\S]*?submit\(\)/i);
+  if (m) return m[1];
+
+  // c) variantes con getElementsByName/setAttribute
+  m = scriptTxt.match(/getElementsByName\(['"]checksum['"]\)\s*\[\s*0\s*\]\.value\s*=\s*['"]([0-9a-fA-F]+)['"]/i);
+  if (m) return m[1];
+
+  m = scriptTxt.match(/input\[name\s*=\s*checksum\][^\n]*?setAttribute\(\s*['"]value['"]\s*,\s*['"]([0-9a-fA-F]+)['"]\s*\)/i);
+  if (m) return m[1];
+
+  // 2) Por si el atributo onclick está como texto HTML (no en <script>)
+  const htmlU = decodeHtmlEntities(unescapeUnicode(html));
+  m = htmlU.match(/input\[name\s*=\s*checksum\][^\n]*?\.value\s*=\s*['"]([0-9a-fA-F]+)['"]/i);
+  if (m) return m[1];
+
+  return null;
+}
+
+async function confirmSendFromPreview(villageId, previewHtml) {
+  console.group("[AA] confirmSendFromPreview");
+
+  const doc = new DOMParser().parseFromString(previewHtml, "text/html");
+  let form = doc.querySelector("#troopSendForm")
+         || doc.querySelector("form#troopSendForm")
+         || doc.querySelector("form[name='snd']")
+         || doc.querySelector("form[action*='tt=2']")
+         || null;
+
+  // Construye params desde el form si existe; si no, desde todos los hidden del doc
+  const params = new URLSearchParams();
+  if (form) {
+    try {
+      // Toma todos los campos "como el form real"
+      const fd = new FormData(form);
+      for (const [k,v] of fd.entries()) params.set(k, String(v));
+    } catch { /* fallback abajo */ }
   }
-
-  async function confirmSendFromPreview(villageId, previewHtml) {
-    const div = document.createElement("div");
-    div.innerHTML = previewHtml;
-    const form = div.querySelector("#troopSendForm");
-    if (!form) throw new Error("No troopSendForm en preview.");
-
-    const params = new URLSearchParams();
-    form.querySelectorAll("input[type=hidden]").forEach(inp => {
+  if (!form || params.keys().next().done) {
+    (doc.querySelectorAll("input[type=hidden][name]") || []).forEach(inp => {
       params.set(inp.name, inp.value || "");
     });
-    if (!params.get("checksum")) {
-      const cs = parseChecksumFromPreview(previewHtml);
-      if (!cs) throw new Error("Sin checksum.");
-      params.set("checksum", cs);
-    }
-    const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2`;
-    const res = await fetch(url, {
-      method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params.toString()
-    });
-    if (!(res.status===200 || res.status===304)) throw new Error(`Confirm HTTP ${res.status}`);
-    return res.text();
   }
 
+  // Asegura eventType (raid=4) si no viene
+  if (!params.get("eventType")) params.set("eventType", "4");
+
+  // Extrae checksum de scripts/onclick si no está seteado
+  let checksum = params.get("checksum");
+  if (!checksum) {
+    checksum = parseChecksumFromPreview(previewHtml);
+    if (!checksum) {
+      console.warn("[AA][WARN] No pude extraer checksum; dump corto de <script>:");
+      const firstScript = doc.querySelector("script")?.textContent || "";
+      console.warn((firstScript || "").slice(0, 400));
+      console.groupEnd();
+      throw new Error("Sin checksum en preview.");
+    }
+    params.set("checksum", checksum);
+  }
+
+  // Algunas plantillas exigen el nombre del botón (si existía)
+  if (form) {
+    const btn = form.querySelector('button[name], input[type=submit][name]');
+    if (btn && !params.get(btn.name)) params.set(btn.name, btn.value || "");
+  }
+
+  const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=2`;
+
+  // Log de control
+  const dbg = new URLSearchParams(params);
+  console.log("[AA][DBG] confirm payload (partial):", dbg.toString().slice(0, 500) + (dbg.toString().length > 500 ? "…" : ""));
+  console.log("[AA][DBG] checksum:", checksum);
+
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  const text = await res.text();
+  console.log("[AA] confirm HTTP", res.status, "HTML len:", text.length);
+  console.groupEnd();
+
+  if (!(res.status === 200 || res.status === 304)) throw new Error(`Confirm HTTP ${res.status}`);
+  return text;
+}
+
   async function sendAllTroopsRaid(villageId, target) {
+    L.group("sendAllTroopsRaid");
+    L.info("Sending troops (RAID) →", { villageId, target });
     const {x,y} = target;
+
+    // 1) Abrir RP con destino
     const rp = await openRallyFor(villageId, x, y);
+
+    // 2) Parsear disponibilidad héroe + máximos
     const heroOk = parseHeroAvailable(rp);
     const maxMap = parseMaxForAllTypes(rp);
 
     const troops = {};
     Object.keys(maxMap).forEach(k => { if (maxMap[k]>0) troops[k]=maxMap[k]; });
-
     const sum = Object.values(troops).reduce((a,b)=>a+b,0);
-    if (sum===0 && !heroOk) return false;
+    L.dbg("Troops to send:", troops, "sum=", sum, "hero=", heroOk);
 
+    if (sum===0 && !heroOk) { L.warn("No troops and no hero available."); L.groupEnd(); return false; }
+
+    // 3) Preview
     const preview = await postPreviewRaid(villageId, x, y, troops, heroOk);
-    await confirmSendFromPreview(villageId, preview);
+
+    // 4) Confirm
+    const result = await confirmSendFromPreview(villageId, preview);
+    L.info("Send result HTML len:", result.length);
+    L.groupEnd();
     return true;
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // UI (modal + settings)
+  // UI (modal + settings + "Evadir ahora")
   // ────────────────────────────────────────────────────────────────────────────
   GM_addStyle(`
     #${MODAL_ID} { position: fixed; top: 60px; right: 24px; background: rgba(24,24,24,.95); color: #fff;
       font-family: system-ui, sans-serif; font-size: 13px; z-index: 99999; border-radius: 12px; padding: 10px 10px 8px;
-      box-shadow: 0 10px 24px rgba(0,0,0,.35); min-width: 260px; max-width: 360px; user-select: none; }
+      box-shadow: 0 10px 24px rgba(0,0,0,.35); min-width: 260px; max-width: 380px; user-select: none; }
     #${MODAL_ID}.hidden { display: none; }
     #${MODAL_ID} .hdr { display:flex; align-items:center; gap:8px; margin-bottom:8px; cursor:grab; }
     #${MODAL_ID} .hdr .title { font-weight:700; letter-spacing:.2px; }
@@ -498,7 +758,7 @@
     #${MODAL_ID}.minimized .body { display:none; }
     #${MODAL_ID}.minimized { padding-bottom:8px; }
     #${MODAL_ID} .vbox { background:#111; border:1px solid #2a2a2a; border-radius:10px; padding:8px; margin-bottom:8px; }
-    #${MODAL_ID} .vrow { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+    #${MODAL_ID} .vrow { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; gap:8px; }
     #${MODAL_ID} .badge { background:#2d7; color:#000; font-weight:700; padding:2px 8px; border-radius:999px; }
     #${MODAL_ID} .alist { margin:0; padding-left:16px; }
     #${MODAL_ID} .alist li { margin:4px 0; }
@@ -510,10 +770,15 @@
     @keyframes aa-ring { 0%{transform:rotate(0)}15%{rotate:14deg}30%{-webkit-transform:rotate(-12deg);transform:rotate(-12deg)}45%{transform:rotate(10deg)}60%{transform:rotate(-8deg)}75%{transform:rotate(6deg)}100%{transform:rotate(0)}}
     #${MODAL_ID} .vbox.flash { animation: aa-flash 950ms ease-in-out; }
     @keyframes aa-flash { 0%,100%{ box-shadow: 0 0 0 rgba(255,215,0,0);} 40%{ box-shadow: 0 0 18px rgba(255,215,0,0.65);} }
+
+    #${MODAL_ID} .btn { cursor:pointer; border:0; border-radius:8px; padding:6px 10px; font-weight:700; }
+    #${MODAL_ID} .btn.debug { background:#7db9ff; color:#000; }
+    #${MODAL_ID} .btn.debug:hover { filter:brightness(1.05); }
+
     #${SETTINGS_ID} { position: fixed; top: 100px; right: 24px; background: #1b1b1b; color: #fff; z-index: 100000;
       border-radius: 12px; padding: 12px; width: 340px; box-shadow: 0 10px 24px rgba(0,0,0,.4); }
     #${SETTINGS_ID} .row { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
-    #${SETTINGS_ID} input { background:#0f0f0f; color:#ddd; border:1px solid #2b2b2b; border-radius:8px; padding:8px 10px; width:100%; outline:none; }
+    #${SETTINGS_ID} input, #${SETTINGS_ID} select { background:#0f0f0f; color:#ddd; border:1px solid #2b2b2b; border-radius:8px; padding:8px 10px; width:100%; outline:none; }
     #${SETTINGS_ID} .btns { display:flex; gap:8px; justify-content:flex-end; }
     #${SETTINGS_ID} button { background:#2d7; color:#000; font-weight:700; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; }
     #${SETTINGS_ID} button.secondary { background:#333; color:#fff; }
@@ -530,7 +795,6 @@
     st.meta.ui = ui;
     saveState(st, reason);
   }
-  function clamp(n, min, max){ return Math.max(min, Math.min(max, n)); }
 
   function applyModalPosition() {
     const m = document.getElementById(MODAL_ID);
@@ -596,6 +860,7 @@
         <div class="dot"></div>
         <div class="title">Ataques detectados</div>
         <div class="total">0</div>
+        <button class="btn debug" id="aa-evadir-ahora" title="Ejecución única sin reintentos">Evadir ahora</button>
         <div class="gear" title="Configurar / Auto-evadir">⚙️</div>
       </div>
       <div class="body"></div>
@@ -606,9 +871,10 @@
     updateHeaderTotalBadge();
 
     m.querySelector(".gear")?.addEventListener("click", (e) => { e.stopPropagation(); toggleSettings(); });
+    m.querySelector("#aa-evadir-ahora")?.addEventListener("click", onEvadirAhoraClicked);
 
     m.querySelector(".hdr")?.addEventListener("click", (e) => {
-      if (e.target && (e.target.closest('.gear'))) return;
+      if (e.target && (e.target.closest('.gear') || e.target.closest('#aa-evadir-ahora'))) return;
       const ui = getUi();
       ui.modal.minimized = !ui.modal.minimized;
       saveUi(ui, "modal:minToggle");
@@ -616,9 +882,10 @@
       updateModalMaxHeight();
     });
 
+    // Drag
     let dragging = false, ox = 0, oy = 0;
     const onDown = (e) => {
-      if (e.target && (e.target.closest('.gear'))) return;
+      if (e.target && (e.target.closest('.gear') || e.target.closest('#aa-evadir-ahora'))) return;
       dragging = true;
       const rect = m.getBoundingClientRect();
       ox = e.clientX - rect.left;
@@ -806,7 +1073,7 @@
       st.settings.chatId = chatId;
       saveState(st, "settings");
       dlg.remove();
-      console.log(`[${nowTs()}] [AA] Settings saved (autoEvade=${autoEvade}).`);
+      L.info("Settings saved", { autoEvade, token_set: !!token, chat_set: !!chatId });
     });
   }
 
@@ -842,8 +1109,8 @@
       url: `https://api.telegram.org/bot${token}/sendMessage`,
       headers: { "Content-Type": "application/json" },
       data: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
-      onload: () => console.log(`[${nowTs()}] [AA] Telegram sent.`),
-      onerror: (e) => console.warn(`[${nowTs()}] [AA] Telegram error`, e)
+      onload: () => L.info("Telegram sent."),
+      onerror: (e) => L.warn("Telegram error", e)
     });
   }
 
@@ -869,10 +1136,11 @@
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // Core: consolidación + notificaciones + auto-evade
+  // Core: consolidación
   // ────────────────────────────────────────────────────────────────────────────
   async function refreshVillageDetailsIfNeeded(village) {
-    console.log(`[${nowTs()}] [AA] refreshVillageDetailsIfNeeded did=${village?.did} name=${village?.name||''}`);
+    L.group(`refreshVillageDetailsIfNeeded did=${village?.did}`);
+    L.dbg("village input:", village);
     const state = loadState();
     const vid = village.did;
     const prevTotal = state.villages[vid]?.totalCount || 0;
@@ -937,6 +1205,7 @@
       if (newTotal > 0) { ensureModal(); renderModal(loadState()); }
       else { removeModalIfEmpty(loadState()); }
     }
+    L.groupEnd();
   }
 
   function handleInfoboxDeltaForActiveVillage() {
@@ -954,7 +1223,7 @@
       delete state.villages[activeVid];
       saveState(state, "active:clear");
       removeModalIfEmpty(loadState());
-      console.log(`[${nowTs()}] [AA] Cleared attacks for active village ${activeVid} (dorf1: no sidebar/infobox).`);
+      L.info("Cleared attacks for active village (dorf1 no sidebar/infobox).", activeVid);
       return;
     }
 
@@ -991,16 +1260,13 @@
           if (eta > 0 && eta <= T10_WINDOW_MS) {
             if (!w.evade?.target && (!w.evade?.lastErrorAt || (tNow - w.evade.lastErrorAt) > 30_000)) {
               try {
-                // Inspecciona RP para conocer cuántas tropas hay AHORA
                 const rpHtml = await openRallyFor(vid, 0, 0).catch(()=>null);
                 let totalTroops = 0;
                 if (rpHtml) {
                   const maxMap = parseMaxForAllTypes(rpHtml);
                   totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
                 }
-                // Umbral dinámico: 1 animal cada 20 tropas, máx 30
                 const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
-
                 const target = await findTargetForEvade(village, maxAnimals);
                 if (target) {
                   w.evade.target = { x: target.x, y: target.y, link: target.link };
@@ -1008,7 +1274,7 @@
                   w.evade.kind = target.kind || 'oasis';
                   saveState(state, "evade:planned");
                   ensureModal(); renderModal(loadState());
-                  console.log(`[${nowTs()}] [AA] Evade planned for village ${vid} -> (${target.x}|${target.y}) kind=${w.evade.kind} maxAnimals=${maxAnimals}`);
+                  L.info("Evade planned", { vid, target: w.evade.target, kind: w.evade.kind, maxAnimals });
                 } else {
                   w.evade.lastErrorAt = tNow;
                   saveState(state, "evade:no-target");
@@ -1016,7 +1282,7 @@
               } catch (e) {
                 w.evade.lastErrorAt = tNow;
                 saveState(state, "evade:plan-error");
-                console.warn(`[${nowTs()}] [AA] plan target error`, e);
+                L.warn("plan target error", e);
               }
             }
           }
@@ -1029,12 +1295,14 @@
                 if (ok) {
                   w.evade.firstSent = true;
                   saveState(state, "evade:first");
-                  console.log(`[${nowTs()}] [AA] Evade first send (T-60) OK for village ${vid}.`);
+                  L.info("Evade first send (T-60) OK", { vid });
+                  restoreActiveVillageAfterSend(vid, 2000);
+
                 }
               } catch (e) {
                 w.evade.lastErrorAt = tNow;
                 saveState(state, "evade:first-error");
-                console.warn(`[${nowTs()}] [AA] Evade first send failed:`, e);
+                L.warn("Evade first send failed:", e);
               }
             }
           }
@@ -1047,17 +1315,69 @@
                 if (ok2) {
                   w.evade.secondSent = true;
                   saveState(state, "evade:second");
-                  console.log(`[${nowTs()}] [AA] Evade second send (T-10s) OK for village ${vid}.`);
+                  L.info("Evade second send (T-10s) OK", { vid });
+                  restoreActiveVillageAfterSend(vid, 2000);
+
                 }
               } catch (e) {
                 w.evade.lastErrorAt = tNow;
                 saveState(state, "evade:second-error");
-                console.warn(`[${nowTs()}] [AA] Evade second send failed:`, e);
+                L.warn("Evade second send failed:", e);
               }
             }
           }
         }
       }
+    }
+  }
+
+  // "Evadir ahora": una sola ejecución (sin reintentos) para debug
+  async function onEvadirAhoraClicked() {
+    try {
+      L.group("EVADIR AHORA (debug one-shot)");
+      const st = loadState();
+
+      // 1) Elegir la ola más próxima entre todas las aldeas
+      let best = null;
+      let bestVid = null;
+      const tNow = now();
+
+      for (const vid of Object.keys(st.villages)) {
+        const v = st.villages[vid];
+        for (const akey of Object.keys(v.attackers || {})) {
+          const atk = v.attackers[akey];
+          for (const w of atk.waves || []) {
+            if (w.arrivalEpoch <= tNow) continue;
+            if (!best || w.arrivalEpoch < best.arrivalEpoch) { best = w; bestVid = vid; }
+          }
+        }
+      }
+
+      if (!best || !bestVid) { L.warn("No hay olas futuras para evadir ahora."); L.groupEnd(); return; }
+
+      // 2) Calcular maxAnimals con estado actual
+      const rpHtml = await openRallyFor(bestVid, 0, 0).catch(()=>null);
+      let totalTroops = 0;
+      if (rpHtml) {
+        const maxMap = parseMaxForAllTypes(rpHtml);
+        totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
+      }
+      const vdata = st.villages[bestVid];
+      const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
+      L.info("Evadir ahora → cálculo umbral animales", { totalTroops, maxAnimals, bestVid, eta_ms: best.arrivalEpoch - tNow });
+
+      // 3) Encontrar target sin reintentos
+      const target = await findTargetForEvade(vdata, maxAnimals);
+      if (!target) { L.warn("Evadir ahora → sin target."); L.groupEnd(); return; }
+
+      // 4) Enviar una vez (sin reintentos)
+      const ok = await sendAllTroopsRaid(bestVid, target);
+      L.info("Evadir ahora → resultado envío:", ok);
+      L.groupEnd();
+      restoreActiveVillageAfterSend(bestVid, 2000);
+    } catch (e) {
+      L.error("Evadir ahora → error:", e);
+      L.groupEnd();
     }
   }
 
@@ -1088,7 +1408,7 @@
       if (Object.keys(st.villages).length === 0) return;
 
       // 1) Auto-evade plan/execute
-      planAndRunEvade(st).catch(e => console.warn(`[${nowTs()}] [AA] planAndRunEvade error`, e));
+      planAndRunEvade(st).catch(e => L.warn("planAndRunEvade error", e));
 
       // 2) UI + T-10 avisos
       saveState(st, "tick");
@@ -1118,22 +1438,17 @@
   }
 
   // ────────────────────────────────────────────────────────────────────────────
-  // Utils
-  // ────────────────────────────────────────────────────────────────────────────
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-  function isOnDorf1() { return /\/dorf1\.php$/.test(location.pathname); }
-
-  // ────────────────────────────────────────────────────────────────────────────
   // Boot
   // ────────────────────────────────────────────────────────────────────────────
   (function init() {
-    console.log(`[${nowTs()}] [AA] Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.1.0`);
+    L.info(`Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.2.0`);
     observeSidebar();
     hookNavigation();
 
     scheduleLateSidebarScan('init');
     if (isOnDorf1()) handleInfoboxDeltaForActiveVillage();
 
+    ensureModal();
     startTickUI();
   })();
 
