@@ -1,7 +1,6 @@
 // ==UserScript==
 // @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart (dbg-heavy)
-// @namespace    https://edi.travian
-// @version      2.2.3
+// @version      2.2.4
 // @description  Detecta ataques, consolida olas y ejecuta auto-evasión (vacío/umbral/natar). Incluye LOGS de depuración detallados y botón "Evadir ahora" (sin reintentos) para pruebas.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*

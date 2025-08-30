@@ -1,6 +1,5 @@
 // ==UserScript==
 // @name         🛰️ Ping Travian Username (Headless probe)
-// @namespace    https://edi.travian
 // @version      0.1
 // @description  Si existe .playerName al cargar, hace ping a loverman.net con el username.
 // @include        *://*.travian.*

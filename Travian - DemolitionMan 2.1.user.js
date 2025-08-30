@@ -1,7 +1,6 @@
 // ==UserScript==
-// @name         🧱 Travian - DemolitionMan 2.1 (colas + botón en edificio + intervalos dinámicos)
-// @namespace    https://edinson-darkmode
-// @version      2.1
+// @name         🧱 Travian - DemolitionMan 2.2 (colas + botón en edificio + intervalos dinámicos)
+// @version      2.2
 // @description  Cola por aldea, botón “Demoler” en la vista del edificio, intervalos dinámicos por nivel, reintentos inteligentes, sin alerts nativos, modal/toasts propios, y ocultar UI si no hay cola.
 // @author       Edi
 // @include        *://*.travian.*

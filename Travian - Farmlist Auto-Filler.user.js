@@ -1,390 +1,842 @@
 // ==UserScript==
-// @name         🏹 Travian Farmlist Auto-Filler (Debug+) — modal cerrable, orden, progreso y manejo de duplicados
-// @namespace    travian
-// @version      1.3
-// @description  Agrega hasta 100 nuevas aldeas (sin WW) a una farmlist con orden configurable, cortina de progreso y manejo de duplicados por API (targetExists). Logs con timestamp.
-// @author       Edinson
-// @match        *://*.travian.*/profile/1
-// @grant        GM_xmlhttpRequest
-// @grant        GM_addStyle
-// @connect      *.travian.com
-// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Farmlist%20Auto-Filler.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Farmlist%20Auto-Filler.user.js
+// @name         🧭 Farm Finder & Farmlist Filler (GraphQL only)
+// @version      1.1.1
+// @description  Escanea anillos/9-puntos desde la aldea activa, filtra Natares, aldeas (con GraphQL) y OASIS vacíos (≤5 animales), y llena farmlists. UI con STOP, logs y delays humanos.
+// @author       Edi
+// @match        https://*/karte.php*
+// @run-at       document-idle
+// @grant        none
 // ==/UserScript==
 
-(function () {
+(() => {
   "use strict";
-  function esacosaexiste() {
-    return !!document.querySelector('#stockBar .warehouse .capacity');
-  }
-  if (!esacosaexiste()) {
-    //console.log('🛑 stockBar no encontrado → abort.');
-    return; // no carga nada más
-  }
-  const VILLAGE_TABLE_SELECTOR = "table.villages.borderGap tbody tr";
-  const GRAPHQL_URL = "/api/v1/graphql";
-  const ADD_SLOT_URL = "/api/v1/farm-list/slot";
 
-  const delay = (ms) => new Promise((res) => setTimeout(res, ms));
-  const nowTs = () => {
-    const d = new Date();
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  /******************************************************************
+   * CONFIG
+   ******************************************************************/
+  const BASE = location.origin;
+  const MAP_ENDPOINT = `${BASE}/api/v1/map/position`;
+  const FL_CREATE_ENDPOINT = `${BASE}/api/v1/farm-list`;
+  const FL_SLOT_ENDPOINT   = `${BASE}/api/v1/farm-list/slot`;
+  const GQL_ENDPOINT       = `${BASE}/api/v1/graphql`;
+  const PROFILE_PATH       = `${BASE}/profile/`; // solo para "Ver" si hace falta, no para parsear
+  const RING_INCREMENT_DEFAULT = 10;
+
+  const COMMON_HEADERS = {
+    "content-type": "application/json; charset=UTF-8",
+    "x-requested-with": "XMLHttpRequest",
+    "x-version": "228.2",
+    accept: "application/json, text/javascript, */*; q=0.01",
   };
 
-  // 🎨 Estilos
-  GM_addStyle(`
-    #farmOverlay, #farmCurtain {
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(0,0,0,0.6); z-index: 99998;
+  const MAX_LISTS = 4;             // máx 4 listas
+  const SLOTS_PER_LIST = 100;      // 100 por lista
+  const DEFAULT_ZOOM = 3;
+  const DEFAULT_STEP = 30;         // salto de “reloj” en tiles
+  const DEFAULT_MAX_DISTANCE = 100; // filtro por distancia
+
+  // Delays humanos
+  const HUMAN_DELAY_MS       = [800, 1500];
+  const PROFILE_DELAY_MS     = [350, 700];
+  const CREATE_LIST_DELAY_MS = [700, 1200];
+  const ADD_SLOT_DELAY_MS    = [100, 500];
+
+  const DEBUG_VERBOSE = true;      // pon en false si quieres menos ruido
+
+  // Oasis: umbral de animales (≤ N)
+  const OASIS_ANIMALS_MAX = 2;
+
+  // Unidades por modo
+  const UNITS_VILLAGE = { t1:0,t2:0,t3:0,t4:10,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+  const UNITS_NATARS  = { t1:0,t2:0,t3:0,t4: 3,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+  const UNITS_OASIS   = { t1:0,t2:0,t3:0,t4: 10,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+
+  // GraphQL: solo lo que necesitamos
+  const PLAYER_PROFILE_QUERY = `
+    query PlayerProfileMin($uid: Int!) {
+      player(id: $uid) {
+        id
+        name
+        alliance { id tag }
+        hero { level }
+        ranks { population }
+        villages { id name x y population }
+      }
     }
-    #farmCurtain { display: none; background: rgba(0,0,0,0.45); }
+  `;
 
-    #farmModal {
-      position: fixed; top: 18%; left: 50%; transform: translateX(-50%);
-      width: min(520px, 92%); background: #fff; border: 2px solid #333;
-      border-radius: 12px; z-index: 99999; padding: 18px 20px 20px;
-      text-align: left; box-shadow: 0 0 20px rgba(0,0,0,0.5);
-      font-family: Arial, sans-serif;
-    }
-    #farmModal h2 { margin: 0 0 10px 0; font-size: 18px; }
-    #farmModal .row { display: flex; gap: 10px; margin: 10px 0; align-items: center; }
-    #farmModal label { min-width: 140px; font-weight: bold; }
-    #farmModal select, #farmModal button {
-      padding: 8px; font-size: 14px; height: 34px;
-    }
-    #farmModal .farmButton {
-      background-color: #28a745; color: white; padding: 8px 16px;
-      border: none; border-radius: 6px; cursor: pointer; font-weight: bold;
-    }
-    #farmModal .farmButton:disabled { opacity: 0.6; cursor: default; }
-
-    #farmClose {
-      position: absolute; top: 6px; right: 10px; border: none; background: transparent;
-      font-size: 20px; line-height: 20px; cursor: pointer; color: #444;
-    }
-    #farmClose:hover { color: #000; }
-
-    #curtainBox {
-      position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
-      background: rgba(255,255,255,0.92); color: #111;
-      padding: 12px 16px; border-radius: 10px; border: 1px solid #333;
-      min-width: 340px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-      font-family: Arial, sans-serif; font-size: 14px;
-    }
-    #curtainBox .big { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
-    #curtainBox .small { font-size: 12px; opacity: 0.9; }
-  `);
-
-  // 🚦 Esperar el contenedor
-  const waitForContainer = setInterval(() => {
-    const descBox = document.querySelector(".playerDescription");
-    if (descBox) {
-      clearInterval(waitForContainer);
-      console.log(`[${nowTs()}] ✅ .playerDescription listo`);
-
-      const initButton = document.createElement("button");
-      initButton.innerText = "➕ Agregar aldeas a Farmlist";
-      initButton.className = "farmButton";
-      initButton.style.margin = "10px 0 0 0";
-
-      descBox.insertAdjacentElement("afterend", initButton);
-      console.log(`[${nowTs()}] ✅ Botón insertado`);
-
-      initButton.onclick = async () => {
-        console.log(`[${nowTs()}] 🚀 Escaneando aldeas…`);
-        const rows = document.querySelectorAll(VILLAGE_TABLE_SELECTOR);
-        console.log(`[${nowTs()}] 🔍 Filas detectadas: ${rows.length}`);
-
-        let villages = [];
-        rows.forEach((row, i) => {
-          // Nombre
-          const nameCell = row.querySelector("td:nth-child(1)");
-          const name = (nameCell?.innerText || "").trim();
-          console.log(`[${nowTs()}] 🔍 [${i}] Nombre crudo: '${name}'`);
-
-          if (!name || /^(WW|WoW)/i.test(name) || name.includes("WW") || name.includes("WoW")) {
-            console.log(`[${nowTs()}] ⚠️ [${i}] Aldea excluida: "${name}"`);
-            return;
-          }
-
-          // Coordenadas
-          const xRaw = row.querySelector(".coordinateX")?.innerText || "";
-          const yRaw = row.querySelector(".coordinateY")?.innerText || "";
-          const x = cleanCoord(xRaw);
-          const y = cleanCoord(yRaw);
-
-          // Distancia
-          const distText = row.querySelector("td:last-child")?.innerText?.trim() || "";
-          const dist = parseFloat(distText.replace(",", "."));
-
-          // Población
-          const popCell =
-            row.querySelector(".population, .inhabitants") ||
-            row.querySelector("td:nth-child(2)") ||
-            row.querySelector("td:nth-child(3)");
-          const pop = parseInt((popCell?.innerText || "").replace(/[^\d]/g, ""), 10);
-
-          console.log(
-            `[${nowTs()}] 🔢 [${i}] coords RAW: x='${xRaw}', y='${yRaw}' -> x=${x}, y=${y}; dist='${distText}' -> ${isNaN(dist) ? "n/a" : dist}; pop=${isNaN(pop) ? "n/a" : pop}`
-          );
-
-          if (!isNaN(x) && !isNaN(y)) {
-            villages.push({
-              name,
-              x,
-              y,
-              dist: isNaN(dist) ? Infinity : dist,
-              pop: isNaN(pop) ? -1 : pop,
-              index: i,
-            });
-            console.log(`[${nowTs()}] ✅ [${i}] Aldea válida: ${name} (${x}|${y})`);
-          } else {
-            console.warn(`[${nowTs()}] ❌ [${i}] Coordenadas inválidas: x='${xRaw}', y='${yRaw}'`);
-          }
-        });
-
-        const farmLists = await fetchFarmLists();
-        console.log(`[${nowTs()}] 📥 Farmlists:`, farmLists);
-
-        if (!farmLists.length) {
-          alert("❌ No se encontraron farmlists.");
-          return;
-        }
-
-        showModal(farmLists, villages);
-      };
-    } else {
-      console.log(`[${nowTs()}] ⏳ Esperando .playerDescription…`);
-    }
-  }, 500);
-
-  // 🧠 GraphQL: obtener farmlists
-  async function fetchFarmLists() {
-    const query = {
-      query:
-        "query{ownPlayer{currentVillageId farmLists{id name slotsAmount defaultTroop{t1 t2 t3 t4 t5 t6 t7 t8 t9 t10}}}}",
-      variables: {},
-    };
-    const res = await fetch(GRAPHQL_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(query),
+  /******************************************************************
+   * UTILS & LOG
+   ******************************************************************/
+  function dedupeByXY(arr) {
+    const seen = new Set();
+    return arr.filter(r => {
+      const k = `${r.x}|${r.y}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
     });
-    const json = await res.json();
-    return json?.data?.ownPlayer?.farmLists || [];
+  }
+  function labelFor(dx, dy) {
+    const sx = dx === 0 ? "" : (dx > 0 ? "E" : "W");
+    const sy = dy === 0 ? "" : (dy > 0 ? "N" : "S");
+    return (sy + sx) || "C";
   }
 
-  // 🔢 limpieza de coord
-  function cleanCoord(value) {
-    return parseInt(
-      String(value || "")
-        .replace(/[^\d\-−–]/g, "")
-        .replace(/[−–]/g, "-")
-        .replace(/\u202D|\u202C|\u200E|\u200F/g, "")
-        .trim(),
-      10
-    );
-  }
-
-  // 🔀 shuffle Fisher–Yates
-  function shuffle(arr) {
-    const a = arr.slice();
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
+  const scanRings = async (cx, cy, maxRadius, inc = RING_INCREMENT_DEFAULT) => {
+    inc = Math.max(1, Math.min(inc, maxRadius));
+    const points = [[0, 0]];
+    for (let r = inc; r <= maxRadius; r += inc) {
+      points.push(
+        [ r,  0], [-r,  0], [ 0,  r], [ 0, -r],
+        [ r,  r], [ r, -r], [-r,  r], [-r, -r]
+      );
     }
-    return a;
-  }
+    const plan = points.map(([dx,dy]) => {
+      const x = cx + dx, y = cy + dy;
+      const ring = Math.ceil(Math.hypot(dx, dy) / inc);
+      return { x, y, ring, dir: labelFor(dx,dy) };
+    });
+    log(`Scan plan (${plan.length} pts): ` + plan.map(p => `${p.dir}@(${p.x}|${p.y})#${p.ring}`).join(" | "));
 
-  // 📦 Modal con orden
-  function showModal(farmLists, villages) {
-    const overlay = document.createElement("div");
-    overlay.id = "farmOverlay";
+    const all = [];
+    for (let i = 0; i < points.length; i++) {
+      guardAbort();
+      const [dx, dy] = points[i];
+      const x = cx + dx, y = cy + dy;
+      const ring = Math.ceil(Math.hypot(dx, dy) / inc);
+      log(`Scanning map chunk @ (${x}|${y}) [call ${i+1}/${points.length}] ring=${ring}`);
+      const chunk = await fetchMapChunk(x, y, DEFAULT_ZOOM, []);
+      log(`→ chunk (${x}|${y}) returned ${Array.isArray(chunk) ? chunk.length : 0} tiles`);
+      all.push(...chunk);
+      await sleep(...HUMAN_DELAY_MS);
+    }
+    return all;
+  };
 
-    const modal = document.createElement("div");
-    modal.id = "farmModal";
-    modal.innerHTML = `
-      <button id="farmClose" title="Cerrar">×</button>
-      <h2>Agregar aldeas a Farmlist 📜</h2>
+  const DATE_FMT = () => {
+    const d = new Date();
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    return `${dd}-${mm}-${yyyy}`;
+  };
+  const ts = () => {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `[${DATE_FMT()} ${hh}:${mm}:${ss}]`;
+  };
+  const sleep = (min, max) => new Promise(r => setTimeout(r, Math.floor(min + Math.random() * (max - min))));
+  const distance = (x1, y1, x2, y2) => Math.hypot(x1 - x2, y1 - y2);
 
-      <div class="row">
-        <label for="farmSelect">Farmlist:</label>
-        <select id="farmSelect">
-          ${farmLists
-            .map(
-              (fl) =>
-                `<option value="${fl.id}" data-slots="${fl.slotsAmount}">${fl.name} (${fl.slotsAmount}/100)</option>`
-            )
-            .join("")}
-        </select>
-      </div>
+  const normalizeNumText = (txt) =>
+    (txt || "")
+      .replace(/\u2212/g, "-")
+      .replace(/[\u202A-\u202E\u2066-\u2069\u200E\u200F]/g, "");
 
-      <div class="row">
-        <label for="orderSelect">Orden:</label>
-        <select id="orderSelect">
-          <option value="none">Sin orden (como aparecen)</option>
-          <option value="distance">Por distancia (asc)</option>
-          <option value="population">Por población (desc)</option>
-          <option value="random">Al azar</option>
-        </select>
-      </div>
+  const log = (msg) => {
+    console.log(`${ts()} ${msg}`);
+    const box = document.getElementById("FF_LOG_BOX");
+    if (box) {
+      const p = document.createElement("div");
+      p.textContent = `${ts()} ${msg}`;
+      box.prepend(p);
+    }
+  };
+  const dbg  = (...a) => { if (DEBUG_VERBOSE) log(a.join(" ")); };
+  const warn = (...a) => log("⚠️ " + a.join(" "));
+  const err  = (...a) => log("❌ " + a.join(" "));
 
-      <div class="row" style="justify-content:flex-end;">
-        <button id="confirmFarm" class="farmButton">🚀 Comenzar</button>
-      </div>
+  /******************************************************************
+   * UI
+   ******************************************************************/
+  const UI = {};
+  const ensureUI = () => {
+    const content = document.querySelector("#content.map");
+    if (!content || document.getElementById("FF_WRAP")) return;
+
+    const wrap = document.createElement("div");
+    wrap.id = "FF_WRAP";
+    wrap.style.cssText = `
+      margin-top:8px; padding:10px; border:1px solid #ccc; border-radius:8px;
+      background:#f9fafb; display:flex; flex-direction:column; gap:10px;
     `;
 
-    function closeModal() {
-      overlay.remove();
-      modal.remove();
-    }
+    // Fila 1: selectores
+    const rowTop = document.createElement("div");
+    rowTop.style.cssText = "display:flex; gap:8px; align-items:center; flex-wrap:wrap;";
 
-    document.body.appendChild(overlay);
-    document.body.appendChild(modal);
+    const stepLbl = document.createElement("label");
+    stepLbl.textContent = "Paso (tiles):";
+    const stepIn = document.createElement("input");
+    stepIn.type = "number"; stepIn.min = "10"; stepIn.max = "60"; stepIn.value = String(DEFAULT_STEP);
+    stepIn.style.width = "70px";
 
-    document.getElementById("farmClose").onclick = closeModal;
-    overlay.onclick = (e) => {
-      if (!modal.contains(e.target)) closeModal();
-    };
+    const maxLbl = document.createElement("label");
+    maxLbl.textContent = "Distancia máx:";
+    const maxSel = document.createElement("select");
+    [50, 75, 100, 150, 200].forEach(n => {
+      const opt = document.createElement("option");
+      opt.value = String(n); opt.textContent = String(n);
+      if (n === DEFAULT_MAX_DISTANCE) opt.selected = true;
+      maxSel.append(opt);
+    });
 
-    document.getElementById("confirmFarm").onclick = async () => {
-      const selected = document.getElementById("farmSelect");
-      const listId = parseInt(selected.value, 10);
-      const currentSlots = parseInt(selected.selectedOptions[0].dataset.slots, 10) || 0;
-      const left = Math.max(0, 100 - currentSlots);
+    rowTop.append(stepLbl, stepIn, maxLbl, maxSel);
 
-      const order = document.getElementById("orderSelect").value;
+    // Fila 2: botones
+    const rowBtns = document.createElement("div");
+    rowBtns.style.cssText = "display:flex; gap:8px; align-items:center; flex-wrap:wrap;";
 
-      // Ordenar según selección (sin mutar el array original)
-      let ordered = villages.slice();
-      if (order === "distance") {
-        ordered = ordered.sort((a, b) => a.dist - b.dist);
-      } else if (order === "population") {
-        ordered = ordered.sort((a, b) => b.pop - a.pop);
-      } else if (order === "random") {
-        ordered = shuffle(ordered);
-      } else {
-        ordered = ordered.sort((a, b) => a.index - b.index);
+    const btnVillages = document.createElement("button");
+    btnVillages.textContent = "🔎 Buscar aldeas";
+    btnVillages.id = "FF_BTN_VILLAGES";
+    btnVillages.className = "textButtonV1 green";
+    btnVillages.onclick = () => runSearch(false);
+
+    const btnNatars = document.createElement("button");
+    btnNatars.textContent = "🔎 Buscar natares";
+    btnNatars.id = "FF_BTN_NATARS";
+    btnNatars.className = "textButtonV1 green";
+    btnNatars.onclick = () => runSearch(true);
+
+    const btnOasis = document.createElement("button");
+    btnOasis.textContent = "🔎 Buscar oasis (vacíos/≤5)";
+    btnOasis.id = "FF_BTN_OASIS";
+    btnOasis.className = "textButtonV1 green";
+    btnOasis.onclick = () => runSearchOasis();
+
+    const btnAdd = document.createElement("button");
+    btnAdd.textContent = "➕ Agregar a farmlists";
+    btnAdd.id = "FF_BTN_ADD";
+    btnAdd.className = "textButtonV1";
+    btnAdd.disabled = true;
+    btnAdd.onclick = addSelectedToFarmlists;
+
+    const btnStop = document.createElement("button");
+    btnStop.textContent = "⛔ Detener";
+    btnStop.id = "FF_BTN_STOP";
+    btnStop.className = "textButtonV1 red";
+    btnStop.style.display = "none";
+    btnStop.onclick = stopAll;
+
+    rowBtns.append(btnVillages, btnNatars, btnOasis, btnAdd, btnStop);
+
+    // Tabla
+    const tblWrap = document.createElement("div");
+    tblWrap.id = "FF_TBL_WRAP";
+    tblWrap.style.cssText = "max-height:360px; overflow:auto; border:1px solid #ddd; border-radius:6px; background:#fff; display:none;";
+
+    const table = document.createElement("table");
+    table.id = "FF_TBL";
+    table.className = "row_table_data";
+    table.style.cssText = "width:100%; font-size:12px;";
+    table.innerHTML = `
+      <thead style="position:sticky; top:0; background:#f3f4f6;">
+        <tr>
+          <th style="padding:6px;">✔</th>
+          <th>Jugador</th>
+          <th>Alianza</th>
+          <th>Aldea/Oasis</th>
+          <th>Dist</th>
+          <th>Coords</th>
+          <th>Ver</th>
+          <th>Estado</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    tblWrap.append(table);
+
+    // Log box
+    const logBox = document.createElement("div");
+    logBox.id = "FF_LOG_BOX";
+    logBox.style.cssText = "max-height:160px; overflow:auto; font-family:monospace; font-size:12px; padding:6px; border:1px dashed #bbb; border-radius:6px; background:#fff;";
+
+    // Modal
+    const modal = document.createElement("div");
+    modal.id = "FF_MODAL";
+    modal.style.cssText = "display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); align-items:center; justify-content:center; z-index:9999;";
+    modal.innerHTML = `
+      <div style="background:#fff; padding:16px; border-radius:8px; min-width:320px;">
+        <div id="FF_MODAL_BODY" style="margin-bottom:10px;">Proceso terminado.</div>
+        <div style="text-align:right;">
+          <button class="textButtonV1 green" id="FF_MODAL_OK">OK</button>
+        </div>
+      </div>
+    `;
+    modal.querySelector("#FF_MODAL_OK").addEventListener("click", () => modal.style.display = "none");
+
+    wrap.append(rowTop, rowBtns, tblWrap, logBox, modal);
+    content.append(wrap);
+
+    UI.stepIn = stepIn;
+    UI.maxSel = maxSel;
+    UI.btnVillages = btnVillages;
+    UI.btnNatars  = btnNatars;
+    UI.btnOasis   = btnOasis;
+    UI.btnAdd     = btnAdd;
+    UI.btnStop    = btnStop;
+    UI.tblBody    = table.querySelector("tbody");
+    UI.tblWrap    = tblWrap;
+    UI.modal      = modal;
+    UI.modalBody  = modal.querySelector("#FF_MODAL_BODY");
+  };
+
+  const setBusy = (busy) => {
+    [UI.btnVillages, UI.btnNatars, UI.btnOasis, UI.btnAdd].forEach(b => {
+      if (!b) return;
+      if (busy) { b.disabled = true; b.classList.add("disabled"); }
+      else {
+        if (b === UI.btnAdd) b.disabled = !state.rows.length;
+        else b.disabled = false;
+        b.classList.remove("disabled");
       }
+    });
+    if (UI.btnStop) UI.btnStop.style.display = busy ? "inline-block" : "none";
+  };
 
-      closeModal();
-
-      console.log(
-        `[${nowTs()}] 🏁 Iniciando: objetivo=${left} nuevas aldeas -> farmlist ${listId} (orden=${order})`
-      );
-      // ⬇️ IMPORTANTE: ahora pasamos TODOS los candidatos ordenados.
-      await sendVillagesToFarmlist(listId, ordered, left);
-    };
-  }
-
-  // 🧊 Cortina de progreso
-  function showCurtain() {
-    let curtain = document.getElementById("farmCurtain");
-    if (!curtain) {
-      curtain = document.createElement("div");
-      curtain.id = "farmCurtain";
-      const box = document.createElement("div");
-      box.id = "curtainBox";
-      box.innerHTML = `
-        <div class="big">⏳ Preparando…</div>
-        <div class="small">Iniciando envío de aldeas a la farmlist</div>
+  const showTable = (rows) => {
+    UI.tblBody.innerHTML = "";
+    rows.forEach((r, idx) => {
+      const tr = document.createElement("tr");
+      tr.dataset.idx = String(idx);
+      tr.innerHTML = `
+        <td style="text-align:center;"><input type="checkbox" class="ff_chk" checked></td>
+        <td>${r.player ?? "-"}</td>
+        <td>${r.alliance ?? "-"}</td>
+        <td>${r.village ?? r.oasis ?? "-"}</td>
+        <td>${r.dist.toFixed(1)}</td>
+        <td>(${r.x}|${r.y})</td>
+        <td><button class="textButtonV1" data-x="${r.x}" data-y="${r.y}" data-action="ver">Ver</button></td>
+        <td class="ff_status">-</td>
       `;
-      curtain.appendChild(box);
-      document.body.appendChild(curtain);
+      UI.tblBody.append(tr);
+    });
+    UI.tblWrap.style.display = rows.length ? "block" : "none";
+    UI.btnAdd.disabled = !rows.length;
+  };
+
+  document.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-action='ver']");
+    if (!btn) return;
+    const x = btn.dataset.x, y = btn.dataset.y;
+    const form = document.getElementById("mapCoordEnter");
+    if (!form) { log("Map form not found. Navigate manually or refresh."); return; }
+    form.querySelector("#xCoordInputMap").value = x;
+    form.querySelector("#yCoordInputMap").value = y;
+    log(`Jump to (${x}|${y})`);
+    form.querySelector("button[type='submit']").click();
+  });
+
+  /******************************************************************
+   * STATE & CANCEL
+   ******************************************************************/
+  const state = {
+    active: { did: null, x: null, y: null },
+    rows: [],
+    mode: "villages", // 'villages' | 'natars' | 'oasis'
+    abort: false,
+    ctrls: [],
+  };
+
+  const stopAll = () => {
+    state.abort = true;
+    state.ctrls.forEach(c => { try { c.abort(); } catch {} });
+    state.ctrls = [];
+    setBusy(false);
+    log("⛔ Proceso detenido por el usuario.");
+  };
+  const guardAbort = () => { if (state.abort) throw new Error("Canceled by user"); };
+
+  const fetchWithAbort = (url, opts = {}) => {
+    const ctrl = new AbortController();
+    state.ctrls.push(ctrl);
+    const signal = ctrl.signal;
+    return fetch(url, { ...opts, signal })
+      .finally(() => { state.ctrls = state.ctrls.filter(c => c !== ctrl); });
+  };
+
+  /******************************************************************
+   * CORE
+   ******************************************************************/
+  const getActiveVillage = () => {
+    const el = document.querySelector(".listEntry.village.active");
+    if (!el) throw new Error("Active village not found");
+    const did = Number(el.dataset.did || el.getAttribute("data-did"));
+
+    const coordWrap = el.querySelector(".coordinatesGrid .coordinatesWrapper");
+    const xTxt = normalizeNumText(coordWrap?.querySelector(".coordinateX")?.textContent || "");
+    const yTxt = normalizeNumText(coordWrap?.querySelector(".coordinateY")?.textContent || "");
+    const x = parseInt((xTxt.match(/-?\d+/)||["0"])[0], 10);
+    const y = parseInt((yTxt.match(/-?\d+/)||["0"])[0], 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Active coords not parsed");
+    return { did, x, y };
+  };
+
+  const gqlFetch = async (query, variables) => {
+    guardAbort();
+    const ctrl = new AbortController();
+    state.ctrls.push(ctrl);
+    try {
+      const res = await fetch(GQL_ENDPOINT, {
+        method: "POST",
+        credentials: "include",
+        headers: COMMON_HEADERS,
+        body: JSON.stringify({ query, variables }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`GQL ${res.status}`);
+      const json = await res.json();
+      if (json.errors?.length) throw new Error(json.errors.map(e => e.message).join("; "));
+      return json.data;
+    } finally {
+      state.ctrls = state.ctrls.filter(c => c !== ctrl);
     }
-    curtain.style.display = "block";
-  }
+  };
 
-  function updateCurtain(line1, line2) {
-    const box = document.getElementById("curtainBox");
-    if (!box) return;
-    const [big, small] = box.children;
-    if (big) big.textContent = line1;
-    if (small) small.textContent = line2 || "";
-  }
+  const normalizePlayerFromGQL = (player, uid) => {
+    const playerName  = player?.name || "";
+    const allianceTag = player?.alliance?.tag || "-";
+    const totalPop    = Number(player?.ranks?.population ?? 0);
+    const heroLevel   = Number(player?.hero?.level ?? 0);
+    const villagesArr = Array.isArray(player?.villages) ? player.villages : [];
+    const villagesCount = villagesArr.length;
 
-  function hideCurtain() {
-    const curtain = document.getElementById("farmCurtain");
-    if (curtain) curtain.style.display = "none";
-  }
+    const condVillages = villagesCount <= 2;
+    const condPop      = totalPop <= 600;
+    const condHero     = heroLevel <= 15;
+    const ok = condVillages && condPop && condHero;
 
-  // 🎯 Enviar 1 a 1 con delay, rellenando HASTA completar 'goal',
-  //     ignorando duplicados (error 400 raidList.targetExists) y sin contarlos como agregados.
-  async function sendVillagesToFarmlist(listId, candidates, goal) {
-    if (goal <= 0) {
-      alert("No hay espacios disponibles en la farmlist (100/100).");
-      return;
-    }
-    if (!candidates.length) {
-      alert("No hay aldeas candidatas para procesar.");
-      return;
+    let reason = "OK";
+    if (!ok) {
+      const fails = [];
+      if (!condVillages) fails.push("villages>2");
+      if (!condPop)      fails.push("pop>=600");
+      if (!condHero)     fails.push("hero>=15");
+      reason = fails.join(",");
     }
 
-    showCurtain();
-    let added = 0;       // ✅ agregadas realmente
-    let dupes = 0;       // 🔁 ya existían (targetExists)
-    let processed = 0;   // 📦 intentos hechos
+    log(`uid=${uid} (gql) ${playerName || "(no-name)"} | Villages=${villagesCount} | Pop=${totalPop} | HeroLvl=${heroLevel} => ${ok ? "✅ OK" : "❌ FAIL(" + reason + ")"}`);
 
-    updateCurtain("⏳ Iniciando…", `Objetivo: ${goal} nuevas • Candidatas: ${candidates.length}`);
+    const villages = villagesArr.map(v => ({
+      name: v?.name || "-",
+      pop:  Number(v?.population ?? 0),
+      x:    Number(v?.x),
+      y:    Number(v?.y),
+    }));
 
-    for (let i = 0; i < candidates.length && added < goal; i++) {
-      const v = candidates[i];
-      processed++;
-      const remaining = goal - added;
+    return { ok, player: playerName, alliance: allianceTag, villages, heroLevel, totalPop };
+  };
 
-      console.log(`[${nowTs()}] 📦 intento #${processed} — ${v.name} (${v.x}|${v.y}) • faltan ${remaining}`);
-      updateCurtain(
-        `🚀 Agregando (${added}/${goal}) — faltan ${remaining}`,
-        `Aldea: ${v.name} (${v.x}|${v.y}) • Duplicadas: ${dupes}`
-      );
+  const fetchProfileAndFilter = async (uid) => {
+    guardAbort();
+    try {
+      const t0 = performance.now();
+      const data = await gqlFetch(PLAYER_PROFILE_QUERY, { uid: Number(uid) });
+      const t1 = performance.now();
+      dbg(`uid=${uid} GQL ok en ${(t1 - t0).toFixed(0)}ms`);
+      if (!data?.player) return { ok:false };
+      return normalizePlayerFromGQL(data.player, uid);
+    } catch (e) {
+      err(`uid=${uid} GQL fail: ${e?.message || e}`);
+      return { ok:false };
+    }
+  };
 
-      try {
-        const response = await fetch(ADD_SLOT_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            slots: [{ listId, x: v.x, y: v.y, units: { t1:0,t2:0,t3:0,t4:2,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 }, active: true }],
-          }),
-        });
+  const fetchMapChunk = async (x, y, zoom = DEFAULT_ZOOM, ignorePositions = []) => {
+    guardAbort();
+    const body = { data: { x, y, zoomLevel: zoom, ignorePositions } };
+    const res = await fetchWithAbort(MAP_ENDPOINT, {
+      method: "POST",
+      credentials: "include",
+      headers: COMMON_HEADERS,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`map/position ${res.status}`);
+    const json = await res.json();
+    const items = json?.tiles || json?.data || json || [];
+    return Array.isArray(items) ? items : [];
+  };
 
-        if (response.ok) {
-          added++;
-          console.log(`[${nowTs()}] ✅ Agregada: ${v.name} • total=${added}/${goal}`);
-        } else {
-          // ⬇️ Nuevo manejo de 400 con JSON targetExists
-          let j = null;
-          try { j = await response.json(); } catch(_) {}
-          const code = response.status;
+  const parseMapItems = (items) =>
+    items
+      .filter((it) => it?.position && typeof it?.position?.x !== "undefined" && typeof it?.position?.y !== "undefined")
+      .map((it) => ({
+        x: it.position.x,
+        y: it.position.y,
+        uid: typeof it.uid === "undefined" ? undefined : it.uid,
+        did: typeof it.did === "undefined" ? null : it.did,
+        title: it.title ?? "",
+        htmlText: it.text ?? "",
+      }));
 
-          if (code === 400 && j && j.error === "raidList.targetExists") {
-            dupes++;
-            console.log(`[${nowTs()}] 🔁 Ya existía en la lista: ${v.name} • duplicadas=${dupes}`);
-            // NO sumamos 'added', continuamos con el siguiente para intentar completar el objetivo
-          } else {
-            console.error(`[${nowTs()}] ❌ HTTP ${code} en ${v.name}`, j || "");
-            hideCurtain();
-            alert(`❌ Error HTTP ${code} al agregar "${v.name}". Se detiene.`);
-            return; // aborta todo por error real
+  const looksLikeWW = (rec) => {
+    const t = (rec.title || "").toLowerCase();
+    const h = (rec.htmlText || "").toLowerCase();
+    return t.includes("world wonder") || t.includes("wonder of the world") || t.includes("ww") || h.includes("world wonder");
+  };
+
+  // Parseo animales de oasis desde el HTML del tooltip
+  const animalsInText = (html) => {
+    if (!html) return 0;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    // Íconos de animales: u31..u40; los valores están en .inlineIcon.tooltipUnit > .value
+    let total = 0;
+    tmp.querySelectorAll(".inlineIcon.tooltipUnit .value").forEach(span => {
+      const n = parseInt(normalizeNumText(span.textContent || "0"), 10);
+      if (Number.isFinite(n)) total += n;
+    });
+    return total;
+  };
+
+  /******************************************************************
+   * PIPELINES
+   ******************************************************************/
+  const runSearch = async (isNatars) => {
+    try {
+      ensureUI();
+      setBusy(true);
+      state.abort = false;
+      state.rows = [];
+      state.mode = isNatars ? "natars" : "villages";
+      if (UI.tblWrap) UI.tblWrap.style.display = "none";
+
+      // 1) Aldea activa
+      state.active = getActiveVillage();
+      log(`Active village did=${state.active.did} @ (${state.active.x}|${state.active.y})`);
+
+      // 2) Escaneo en anillos (de 10 en 10 hasta "Paso")
+      const maxRadius = parseInt(UI.stepIn.value, 10) || DEFAULT_STEP;
+      const raw = await scanRings(state.active.x, state.active.y, maxRadius, 10);
+
+      let entries = parseMapItems(raw);
+      entries = dedupeByXY(entries);
+      log(`Map yielded ${entries.length} unique entries.`);
+
+      const maxDist = parseInt(UI.maxSel.value, 10) || DEFAULT_MAX_DISTANCE;
+
+      if (isNatars) {
+        // Natares
+        const natars = dedupeByXY(
+          entries
+            .filter(r => r.uid === 1)
+            .filter(r => !looksLikeWW(r))
+            .map(r => ({
+              uid: 1,
+              player: "Natars",
+              alliance: "-",
+              village: "Natar Village",
+              x: r.x, y: r.y,
+              dist: distance(state.active.x, state.active.y, r.x, r.y),
+              mode: "natars",
+            }))
+        ).filter(r => r.dist <= maxDist)
+         .sort((a,b) => a.dist - b.dist);
+
+        state.rows = natars.slice(0, MAX_LISTS * SLOTS_PER_LIST);
+        showTable(state.rows);
+        setBusy(false);
+        log(`Natars candidates: ${state.rows.length}`);
+      } else {
+        // Aldeas humanas (GraphQL)
+        const uids = [...new Set(entries.filter(r => typeof r.uid !== "undefined" && r.uid !== 1).map(r => r.uid))];
+        log(`Unique players to check: ${uids.length}`);
+        dbg(`UID list (first 20): ${uids.slice(0,20).join(", ")}`);
+
+        const seen = new Set();
+        const candidates = [];
+        let addedCandidates = 0;
+        let skippedNotOk    = 0;
+        let skippedNoCoords = 0;
+
+        for (let i = 0; i < uids.length; i++) {
+          guardAbort();
+          const uid = uids[i];
+          if (seen.has(uid)) { dbg(`uid=${uid} (dup) skip`); continue; }
+          seen.add(uid);
+
+          const t0 = performance.now();
+          log(`Checking profile uid=${uid} [${i+1}/${uids.length}]`);
+
+          let info;
+          try {
+            info = await fetchProfileAndFilter(uid);
+          } catch (e) {
+            err(`uid=${uid} fetchProfileAndFilter error: ${e?.message || e}`);
+            continue;
           }
+
+          await sleep(...PROFILE_DELAY_MS);
+
+          if (!info || !info.ok) {
+            skippedNotOk++;
+            dbg(`uid=${uid} descartado (no cumple condiciones)`);
+            continue;
+          }
+
+          let addedThisUid = 0;
+          const candidateKeys = new Set();
+
+          for (const v of info.villages) {
+            if (typeof v.x !== "number" || typeof v.y !== "number") { skippedNoCoords++; continue; }
+            const dist = distance(state.active.x, state.active.y, v.x, v.y);
+            if (dist <= maxDist) {
+              const k = `${v.x}|${v.y}`;
+              if (candidateKeys.has(k)) continue;
+              candidateKeys.add(k);
+              candidates.push({
+                uid,
+                player: info.player,
+                alliance: info.alliance,
+                village: v.name,
+                x: v.x, y: v.y, dist,
+                mode: "villages",
+              });
+              addedCandidates++;
+              addedThisUid++;
+            }
+          }
+
+          const t1 = performance.now();
+          dbg(`uid=${uid} done: villagesAdded=${addedThisUid} time=${(t1 - t0).toFixed(0)}ms`);
         }
-      } catch (err) {
-        console.error(`[${nowTs()}] 🔥 Error de red al enviar ${v.name}`, err);
-        hideCurtain();
-        alert(`🔥 Error de red al agregar "${v.name}". Se detiene.`);
-        return; // aborta
+
+        log(`Summary: uids=${uids.length} | candidates=${addedCandidates} | skippedNotOk=${skippedNotOk} | skippedNoCoords=${skippedNoCoords}`);
+
+        candidates.sort((a,b) => a.dist - b.dist);
+        state.rows = candidates.slice(0, MAX_LISTS * SLOTS_PER_LIST);
+        showTable(state.rows);
+        setBusy(false);
+        log(`Village candidates: ${state.rows.length}`);
+      }
+    } catch (e) {
+      if (e?.message !== "Canceled by user") {
+        log(`ERROR runSearch: ${e.message}`);
+        alert(`Farm Finder: ${e.message}`);
+      }
+      setBusy(false);
+    }
+  };
+
+  // NUEVO: búsqueda de OASIS vacíos (did=-1, sin uid) y ≤ OASIS_ANIMALS_MAX
+  const runSearchOasis = async () => {
+    try {
+      ensureUI();
+      setBusy(true);
+      state.abort = false;
+      state.rows = [];
+      state.mode = "oasis";
+      if (UI.tblWrap) UI.tblWrap.style.display = "none";
+
+      // 1) Aldea activa
+      state.active = getActiveVillage();
+      log(`Active village did=${state.active.did} @ (${state.active.x}|${state.active.y})`);
+
+      // 2) Escaneo en anillos
+      const maxRadius = parseInt(UI.stepIn.value, 10) || DEFAULT_STEP;
+      const raw = await scanRings(state.active.x, state.active.y, maxRadius, 10);
+
+      // 3) Parse
+      let entries = parseMapItems(raw);
+      entries = dedupeByXY(entries);
+      log(`Map yielded ${entries.length} unique entries.`);
+
+      const maxDist = parseInt(UI.maxSel.value, 10) || DEFAULT_MAX_DISTANCE;
+
+      // 4) Filtrado de oasis
+      const oasis = [];
+      let checked = 0, kept = 0, skippedOccupied = 0, skippedTooMany = 0;
+
+      for (const rec of entries) {
+        guardAbort();
+        // Oasis: did -1
+        if (rec.did !== -1) continue;
+        checked++;
+
+        // Ocupado si tiene uid/aid (en este JSON suele venir uid)
+        if (typeof rec.uid !== "undefined") {
+          skippedOccupied++;
+          dbg(`oasis @(${rec.x}|${rec.y}) ocupado (uid=${rec.uid}) → skip`);
+          continue;
+        }
+
+        // Contar animales
+        const animals = animalsInText(rec.htmlText);
+        const dist = distance(state.active.x, state.active.y, rec.x, rec.y);
+
+        if (animals <= OASIS_ANIMALS_MAX && dist <= maxDist) {
+          kept++;
+          oasis.push({
+            player: "Oasis",
+            alliance: "-",
+            oasis: `Oasis (animales=${animals})`,
+            x: rec.x, y: rec.y,
+            dist,
+            mode: "oasis",
+          });
+          dbg(`oasis @(${rec.x}|${rec.y}) animals=${animals} dist=${dist.toFixed(1)} ✅`);
+        } else {
+          skippedTooMany++;
+          dbg(`oasis @(${rec.x}|${rec.y}) animals=${animals} dist=${dist.toFixed(1)} ❌`);
+        }
+        await sleep(10, 25); // micro pausa
       }
 
-      // Delay aleatorio para evitar detección
-      await delay(1000 + Math.random() * 1500);
-    }
+      log(`Oasis scan: checked=${checked} kept=${kept} occupied=${skippedOccupied} overLimit=${skippedTooMany} (limit=${OASIS_ANIMALS_MAX})`);
 
-    hideCurtain();
-
-    if (added >= goal) {
-      alert(`✅ ¡Completado! Agregadas ${added}/${goal}. Duplicadas detectadas: ${dupes}.`);
-    } else {
-      alert(`ℹ️ Proceso finalizado parcialmente. Agregadas ${added}/${goal}. Duplicadas: ${dupes}. No hubo suficientes candidatas para completar.`);
+      oasis.sort((a,b) => a.dist - b.dist);
+      state.rows = oasis.slice(0, MAX_LISTS * SLOTS_PER_LIST);
+      showTable(state.rows);
+      setBusy(false);
+      log(`Oasis candidates: ${state.rows.length}`);
+    } catch (e) {
+      if (e?.message !== "Canceled by user") {
+        log(`ERROR runSearchOasis: ${e.message}`);
+        alert(`Farm Finder (Oasis): ${e.message}`);
+      }
+      setBusy(false);
     }
-  }
+  };
+
+  /******************************************************************
+   * FARMLIST
+   ******************************************************************/
+  const createFarmlist = async (name, did, units, onlyLosses = true) => {
+    guardAbort();
+    const body = { villageId: did, name, defaultUnits: units, useShip:false, onlyLosses };
+    const res = await fetchWithAbort(FL_CREATE_ENDPOINT, {
+      method: "POST",
+      credentials: "include",
+      headers: COMMON_HEADERS,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`farm-list create ${res.status}`);
+    const json = await res.json();
+    const id = json?.id;
+    if (!id) throw new Error("farm-list id missing");
+    return id;
+  };
+
+  const addSlots = async (listId, entries) => {
+    for (let i = 0; i < entries.length; i++) {
+      guardAbort();
+      const e = entries[i];
+      const payload = { slots: [{ listId, x:e.x, y:e.y, units:e.units, active:true }] };
+      const res = await fetchWithAbort(FL_SLOT_ENDPOINT, {
+        method: "POST",
+        credentials: "include",
+        headers: COMMON_HEADERS,
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`add slot ${res.status}`);
+      await sleep(...ADD_SLOT_DELAY_MS);
+    }
+  };
+
+  const addSelectedToFarmlists = async () => {
+    try {
+      ensureUI();
+      setBusy(true);
+      state.abort = false;
+
+      // 1) Tomar seleccionados desde la tabla
+      const rows = Array.from(UI.tblBody.querySelectorAll("tr"));
+      const chosen = [];
+      rows.forEach((tr) => {
+        const chk = tr.querySelector(".ff_chk");
+        if (chk?.checked) {
+          const idx = parseInt(tr.dataset.idx, 10);
+          chosen.push({ tr, data: state.rows[idx] });
+        }
+      });
+      if (!chosen.length) { setBusy(false); return; }
+
+      // 2) DEDUP por (x|y)
+      const uniqueChosen = [];
+      const seenXY = new Set();
+      for (const item of chosen) {
+        const k = `${item.data.x}|${item.data.y}`;
+        if (seenXY.has(k)) continue;
+        seenXY.add(k);
+        uniqueChosen.push(item);
+      }
+
+      // 3) Orden por distancia
+      uniqueChosen.sort((a,b) => a.data.dist - b.data.dist);
+
+      // 4) Unidades según modo
+      let units = UNITS_VILLAGE;
+      if (state.mode === "natars") units = UNITS_NATARS;
+      else if (state.mode === "oasis") units = UNITS_OASIS;
+
+      // 5) Crear listas en lotes de 100, máx 4
+      const dateStr = DATE_FMT();
+      const baseName = state.mode === "natars" ? "Natares"
+                         : state.mode === "oasis" ? "Oasis"
+                         : "Aldeas";
+      const flNames = [];
+
+      let pending = uniqueChosen.slice(0, MAX_LISTS * SLOTS_PER_LIST);
+      let created = 0;
+      let totalDone = 0;
+      const totalToDo = pending.length;
+
+      while (pending.length && created < MAX_LISTS) {
+        guardAbort();
+        created++;
+        const thisBatch = pending.splice(0, SLOTS_PER_LIST);
+        const fname = `${baseName} #${created} ${dateStr}`;
+        flNames.push(fname);
+        log(`Creating farmlist "${fname}" with ${thisBatch.length} slots...`);
+
+        const listId = await createFarmlist(fname, state.active.did, units, true);
+        await sleep(...CREATE_LIST_DELAY_MS);
+
+        for (let i = 0; i < thisBatch.length; i++) {
+          guardAbort();
+          const entry = thisBatch[i];
+          entry.tr.querySelector(".ff_status").textContent = "…";
+          entry.data.units = units;
+          await addSlots(listId, [entry.data]);
+          totalDone++;
+          entry.tr.querySelector(".ff_status").textContent = "✅";
+          UI.btnAdd.textContent = `➕ Agregar a farmlists (${totalDone}/${totalToDo})`;
+          await sleep(...ADD_SLOT_DELAY_MS);
+        }
+      }
+
+      UI.modalBody.innerHTML = `
+        <div style="margin-bottom:6px;"><strong>Proceso terminado</strong></div>
+        <div style="font-size:12px;">Listas creadas:</div>
+        <ul style="margin:6px 0 0 18px; font-size:12px;">
+          ${flNames.map((n) => `<li>${n}</li>`).join("")}
+        </ul>
+      `;
+      UI.modal.style.display = "flex";
+      log(`Done. Created ${flNames.length} list(s).`);
+    } catch (e) {
+      if (e?.message !== "Canceled by user") {
+        log(`ERROR addSelected: ${e.message}`);
+        alert(`Farmlist: ${e.message}`);
+      }
+    } finally {
+      setBusy(false);
+      UI.btnAdd.textContent = "➕ Agregar a farmlists";
+    }
+  };
+
+  /******************************************************************
+   * BOOT
+   ******************************************************************/
+  const onReady = () => {
+    if (!/\/karte\.php/.test(location.pathname)) return;
+    ensureUI();
+    log("Farm Finder ready.");
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", onReady);
+  else onReady();
 })();

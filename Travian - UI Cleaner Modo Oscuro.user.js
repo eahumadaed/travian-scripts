@@ -1,9 +1,7 @@
 // ==UserScript==
 // @name         🌙 Travian UI Cleaner + Modo Oscuro
-// @namespace    https://edinson-darkmode
-// @version      1.3.2
-// @description  Oculta botones molestos y activa modo nocturno permanente en Travian
-// @author       Edi
+// @version      1.3
+// @description  Oculta botones molestos, banner CMP y activa modo nocturno permanente en Travian
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
 // @exclude     *://support.travian.*
@@ -11,8 +9,6 @@
 // @exclude     *.css
 // @exclude     *.js
 // @grant        none
-// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20UI%20Cleaner%20Modo%20Oscuro.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20UI%20Cleaner%20Modo%20Oscuro.user.js
 // ==/UserScript==
 
 (function() {
