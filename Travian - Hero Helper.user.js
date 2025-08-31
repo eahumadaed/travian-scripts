@@ -1,5 +1,6 @@
 // ==UserScript==
-// @name         🛡️ Travian Hero Helper v1.7.1
+// @name         🛡️ Travian Hero Helper (by Edi) v1.7.0
+// @namespace    https://edi.hh
 // @version      1.7.1
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
 // @author       Edi & Gemini
@@ -8,6 +9,7 @@
 // @exclude      *://*.travian.*/report*
 // @exclude      *://support.travian.*
 // @exclude      *://blog.travian.*
+// @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
 // @grant        none
 // @updateURL    https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
@@ -33,7 +35,8 @@
     const CROP_FLOOR = 1000;
     const MIN_GAP_FOR_CROP = 400;
     const NON_CROP_PRIORITY = [3, 1, 2];
-
+    const URL = "/api/v1/tooltip/quickLink";
+    const BODY = JSON.stringify({ type: "RallyPointOverview" });
     const RES_ICONS = {
         0: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/resources_small.png", 1: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/lumber_small.png",
         2: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/clay_small.png", 3: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/iron_small.png",
@@ -75,8 +78,33 @@
     }
 
     function guessXVersion() {
-        try { return (window.Travian.Game.version || "220.7"); } catch { return "220.7"; }
+        const KEY = "tscm_xversion";
+        let localVer = localStorage.getItem(KEY);
+        let gpackVer = null;
+        try {
+            const el = document.querySelector('link[href*="gpack"], script[src*="gpack"]');
+            if (el) {
+                const url = el.href || el.src || "";
+                const match = url.match(/gpack\/([\d.]+)\//);
+                if (match) {
+                    gpackVer = match[1];
+                }
+            }
+        } catch (e) {
+            console.warn("[guessXVersion] DOM parse error:", e);
+        }
+        if (gpackVer) {
+            if (localVer !== gpackVer) {
+                localStorage.setItem(KEY, gpackVer);
+            }
+            return gpackVer;
+        }
+        if (localVer) {
+            return localVer;
+        }
+        return "228.2";
     }
+
 
     /******************************************************************
      * Aldea activa / Stock
@@ -93,7 +121,7 @@
         if (!force && age < FAST_SYNC_MAX_AGE) { logI(`⏭️ GET omitido (cache ${Math.round(age/1000)}s) [${reason}]`); return cache?.data || null; }
         logI(`🔄 GET /api/v1/hero/v2/screen/attributes [${reason}]`);
         try {
-            const res = await fetch("/api/v1/hero/v2/screen/attributes", { method: "GET", credentials: "include", headers: { "accept": "application/json", "x-requested-with": "XMLHttpRequest" } });
+            const res = await fetch("/api/v1/hero/v2/screen/attributes", { method: "GET", credentials: "include", headers: { "accept": "application/json", "x-requested-with": "XMLHttpRequest","x-version": xv } });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             const s = loadState(); s.lastJson = { data, ts: now() }; saveState(s);
@@ -242,6 +270,33 @@
     const DQ_LOCK_KEY = "HH_DQ_LOCK", DQ_LOCK_TTL = 45000; function tryAcquireLock(key = DQ_LOCK_KEY, ttl = DQ_LOCK_TTL) { try { const last = parseInt(localStorage.getItem(key) || "0", 10); if (now() - last < ttl) return false; localStorage.setItem(key, String(now())); return true; } catch { return true; } }
     async function maybeClaimDailyAndReload(){ try{ if (!/!/.test($("a.dailyQuests .indicator")?.textContent || "")) return; if (!tryAcquireLock()) return; const q=`query{ownPlayer{dailyQuests{achievedPoints rewards{id awardRedeemed points}}}}`; const dq = (await(await fetch("/api/v1/graphql",{method:"POST",credentials:"include",headers:makeStdHeaders(),body:JSON.stringify({query:q})})).json())?.data?.ownPlayer?.dailyQuests; const pending = (dq.rewards||[]).filter(r => !r.awardRedeemed && (r.points|0) <= (dq.achievedPoints|0)); if (!pending.length) return; for (const r of pending){ await fetch("/api/v1/daily-quest/award",{method:"POST",credentials:"include",headers:makeStdHeaders(),body:JSON.stringify({action:"dailyQuest",questId:r.id})}); await sleep(400); } logI("✅ DQs cobrados → recargando..."); location.reload(); }catch(e){ logI("⚠️ Error daily quests:", e); } }
 
+    /*****************************************************************
+    * ANTI CAIDAS
+    *****************************************************************/
+    async function keepAlive() {
+        try {
+            const xv = guessXVersion();
+            await fetch(URL, {
+                method: "POST",
+                credentials: "include",
+                headers: {
+                    "accept": "application/json, text/javascript, */*; q=0.01",
+                    "content-type": "application/json; charset=UTF-8",
+                    "x-requested-with": "XMLHttpRequest",
+                    "x-version": xv
+                },
+                body: BODY
+            });
+            console.log(`[KeepAlive] ${new Date().toLocaleTimeString()} ping OK ✅ (x-version=${xv})`);
+        } catch (err) {
+            console.warn(`[KeepAlive] ${new Date().toLocaleTimeString()} error ❌`, err);
+        }
+    }
+
+
+
+
+
     /******************************************************************
      * Init
      ******************************************************************/
@@ -255,6 +310,8 @@
         setTimeout(maybeClaimDailyAndReload, 1500);
         await autoBalanceIfNeeded("init");
         setInterval(() => autoBalanceIfNeeded("timer"), AUTO_MIN_INTERVAL_MS + 5000);
+
+          setInterval(keepAlive, 12 * 60 * 1000); //SISTEMA ANTICAIDAS
     }
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", init); } else { init(); }
 
