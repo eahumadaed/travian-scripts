@@ -1,8 +1,7 @@
 // ==UserScript==
-// @name         🛡️ Travian Hero Helper v1.7.2
-// @version      1.7.2
+// @name         🛡️ Travian Hero Helper v1.7.8
+// @version      1.7.8
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
-// @author       Edi
 // @include      *://*.travian.*
 // @include      *://*/*.travian.*
 // @exclude      *://*.travian.*/report*
@@ -104,7 +103,7 @@
         return "228.2";
     }
 
-
+    const xv = guessXVersion();
     /******************************************************************
      * Aldea activa / Stock
      ******************************************************************/
@@ -272,8 +271,21 @@
     /*****************************************************************
     * ANTI CAIDAS
     *****************************************************************/
+
+    const HARD_REFRESH_EVERY_MS = 2 * 60 * 60 * 1000; // 2 horas
+    const startedAt = Date.now();
     async function keepAlive() {
+        const URL = "/api/v1/tooltip/quickLink";
+        const BODY = JSON.stringify({ type: "RallyPointOverview" });
         try {
+            const elapsed = Date.now() - startedAt;
+
+            // --- Cada 2h forzamos refresh completo del juego ---
+            if (elapsed >= HARD_REFRESH_EVERY_MS) {
+                location.assign("/dorf1.php"); // full reload
+                return;
+            }
+
             const xv = guessXVersion();
             await fetch(URL, {
                 method: "POST",
@@ -286,12 +298,10 @@
                 },
                 body: BODY
             });
-            console.log(`[KeepAlive] ${new Date().toLocaleTimeString()} ping OK ✅ (x-version=${xv})`);
         } catch (err) {
-            console.warn(`[KeepAlive] ${new Date().toLocaleTimeString()} error ❌`, err);
+            console.warn(`[KeepAlive] ${nowStr()} error ❌`, err);
         }
     }
-
 
 
 
