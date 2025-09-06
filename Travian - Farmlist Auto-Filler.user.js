@@ -1,6 +1,7 @@
 // ==UserScript==
 // @name         🧭 Farm Finder & Farmlist Filler (GraphQL only)
-// @version      1.1.1
+// @namespace    https://edi.travian.tools
+// @version      1.1.2
 // @description  Escanea anillos/9-puntos desde la aldea activa, filtra Natares, aldeas (con GraphQL) y OASIS vacíos (≤5 animales), y llena farmlists. UI con STOP, logs y delays humanos.
 // @author       Edi
 // @match        https://*/karte.php*
@@ -44,12 +45,22 @@
   const DEBUG_VERBOSE = true;      // pon en false si quieres menos ruido
 
   // Oasis: umbral de animales (≤ N)
-  const OASIS_ANIMALS_MAX = 2;
+  const OASIS_ANIMALS_MAX = 0;
 
+  //condiciones
+  // const condVillages = villagesCount <= 3;
+  // const condPop      = totalPop <= 800;
+  // const condHero     = heroLevel <= 20;
+  const condVillagesTotal = 3;
+  const condPopTotal = 900;
+  const condHeroTotal = 25;
+  
+    
+    
   // Unidades por modo
-  const UNITS_VILLAGE = { t1:0,t2:0,t3:0,t4:10,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+  const UNITS_VILLAGE = { t1:0,t2:0,t3:0,t4:5,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
   const UNITS_NATARS  = { t1:0,t2:0,t3:0,t4: 3,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
-  const UNITS_OASIS   = { t1:0,t2:0,t3:0,t4: 10,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+  const UNITS_OASIS   = { t1:0,t2:0,t3:0,t4: 3,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
 
   // GraphQL: solo lo que necesitamos
   const PLAYER_PROFILE_QUERY = `
@@ -405,9 +416,9 @@
     const villagesArr = Array.isArray(player?.villages) ? player.villages : [];
     const villagesCount = villagesArr.length;
 
-    const condVillages = villagesCount <= 2;
-    const condPop      = totalPop <= 600;
-    const condHero     = heroLevel <= 15;
+    const condVillages = villagesCount <= condVillagesTotal;
+    const condPop      = totalPop <= condPopTotal;
+    const condHero     = heroLevel <= condHeroTotal;
     const ok = condVillages && condPop && condHero;
 
     let reason = "OK";
