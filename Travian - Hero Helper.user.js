@@ -35,11 +35,7 @@
     const NON_CROP_PRIORITY = [3, 1, 2];
     const URL = "/api/v1/tooltip/quickLink";
     const BODY = JSON.stringify({ type: "RallyPointOverview" });
-    const RES_ICONS = {
-        0: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/resources_small.png", 1: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/lumber_small.png",
-        2: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/clay_small.png", 3: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/iron_small.png",
-        4: "https://cdn.legends.travian.com/gpack/220.7/img_ltr/global/resources/crop_small.png"
-    };
+
     const getResIcon = (r) => RES_ICONS[r] || RES_ICONS[0];
 
     const $ = (sel, root = document) => root.querySelector(sel);
@@ -104,6 +100,13 @@
     }
 
     const xv = guessXVersion();
+    const RES_ICONS = {
+        0: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/resources_small.png",
+        1: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/lumber_small.png",
+        2: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/clay_small.png",
+        3: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/iron_small.png",
+        4: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/crop_small.png"
+    };
     /******************************************************************
      * Aldea activa / Stock
      ******************************************************************/
