@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ▶️ AutoPlay OADTS + Cross-Frame AutoSkip (IMA)
 // @namespace    https://edi-autoclick
-// @version      1.4
+// @version      1.4.1
 // @description  Autoplay en media.oadts.com y Skip Ad en iframe IMA (35s + 1 reintento a 5s) via postMessage + Reload si Chrome quita el anuncio (<20s).
 // @match        *://media.oadts.com/*
 // @match        *://imasdk.googleapis.com/*
@@ -9,6 +9,8 @@
 // @match        *://googleads.g.doubleclick.net/*
 // @run-at       document-idle
 // @grant        none
+// @all-frames   true
+
 // @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/AutoPlay%20OADTS%20%2B%20Cross-Frame%20AutoSkip.user.js
 // @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/AutoPlay%20OADTS%20%2B%20Cross-Frame%20AutoSkip.user.js
 // ==/UserScript==
@@ -19,6 +21,8 @@
   // ========= Helpers =========
   const nowTs = () => new Date().toISOString();
   const log = (...args) => console.log(`[${nowTs()}]`, ...args);
+  function ts(){ return new Date().toISOString(); }
+  function hlog(...a){ console.log(`[${ts()}] [HeavyAd]`, ...a); }
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -60,22 +64,131 @@
     '.ytp-ad-skip-button',
   ];
 
-  // ========= Detección de Heavy Ad (mensaje "Se quitó el anuncio") =========
-  const HEAVY_PATTERNS = [
-    /Se quitó el anuncio/i,
-    /Chrome quitó este anuncio porque usó demasiados recursos/i
-  ];
-
-  function hasHeavyAdMessage() {
+// ====== Heavy Ad detector (determinístico) ======
+  // usa ?vrid=... para agrupar intentos
+  function getVRID() {
     try {
-      const nodes = document.querySelectorAll('#main-message span, #details p, h1 span, p');
-      for (const n of nodes) {
-        const t = (n.textContent || '').trim();
-        if (t && HEAVY_PATTERNS.some(rx => rx.test(t))) return true;
-      }
-    } catch (_) {}
+      const p = new URLSearchParams(location.search);
+      return p.get("vrid") || "default";
+    } catch { return "default"; }
+  }
+
+  // contador por ventana de 60s, aislado por vrid
+  function bumpAttempts() {
+    try {
+      const key = "OADTS_RELOAD_COUNT";
+      const vrid = getVRID();
+      const obj = JSON.parse(sessionStorage.getItem(key) || "{}");
+      const now = Date.now();
+      const entry = obj[vrid] || { count: 0, ts: now };
+      if (now - entry.ts > 60_000) { entry.count = 0; entry.ts = now; }
+      entry.count++;
+      obj[vrid] = entry;
+      sessionStorage.setItem(key, JSON.stringify(obj));
+      return entry.count;
+    } catch { return 1; }
+  }
+
+  // detección fuerte dentro del iframe que muestra el interstitial
+  function isChromeHeavyAd(doc = document) {
+    try {
+      if (doc.body?.classList?.contains("heavy-ad")) return true;
+      const ltd = (typeof window.loadTimeDataRaw === "object") ? window.loadTimeDataRaw : null;
+      if (ltd?.type === "HEAVYAD") return true;
+      // fallback suave por texto, por si cambia estilo
+      const h = doc.querySelector("#main-message span");
+      if (h && /se quit[oó] el anuncio|ad removed|heavy ad/i.test(h.textContent)) return true;
+    } catch {}
     return false;
   }
+
+  // Guardia: solo durante los primeros 20s tras el Play
+  function startHeavyAdGuard_Strict({ windowMs = 20_000 } = {}) {
+    const deadline = Date.now() + windowMs;
+    let active = true;
+
+    const tryReload = (reason) => {
+      if (!active) return;
+      if (Date.now() > deadline) { active = false; return; }
+      if (isChromeHeavyAd()) {
+        const n = bumpAttempts();
+        if (n <= 3) {
+          hlog(`Detectado. Recargando iframe... (motivo=${reason}, intento=${n})`);
+          try { location.reload(); } catch { location.href = location.href; }
+        } else {
+          hlog("Límite de recargas alcanzado (60s). No recargo de nuevo.");
+          active = false;
+        }
+      }
+    };
+
+    // 1) chequeo inmediato
+    tryReload("immediate");
+
+    // 2) observer por si el DOM del interstitial aparece después
+    let mo = null, iv = null, to = null;
+    try {
+      mo = new MutationObserver(() => tryReload("mutation"));
+      mo.observe(document.documentElement, { subtree: true, childList: true });
+    } catch {}
+
+    // 3) polling por si algo no muta
+    iv = setInterval(() => tryReload("poll"), 500);
+
+    // 4) corte al finalizar la ventana
+    to = setTimeout(() => {
+      active = false;
+      try { mo?.disconnect(); } catch {}
+      clearInterval(iv);
+    }, windowMs + 1000);
+  }
+
+  // ========= Detección de Heavy Ad (mensaje "Se quitó el anuncio") =========
+    // Normaliza texto: lowercase, sin tildes/diacríticos y sin espacios raros
+    function norm(s) {
+        return (s || "")
+            .replace(/\u00A0/g, " ")                    // NBSP → espacio normal
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita diacríticos (tildes)
+            .toLowerCase()
+            .trim();
+    }
+
+    // Frases clave en ES/EN sin tildes (compara con texto ya normalizado)
+    const HEAVY_STRINGS = [
+        "se quito el anuncio",
+        "chrome quito este anuncio porque uso demasiados recursos",
+        "este anuncio se quito porque uso demasiados recursos",
+        "anuncio quitado",
+        "ad removed",
+        "this ad was removed",
+        "removed because it used too many resources",
+        "heavy ad",
+    ];
+
+    function hasHeavyAdMessage() {
+        try {
+            // 1) método robusto: todo el texto visible del documento
+            const full = norm(document.documentElement?.innerText || document.body?.innerText || "");
+
+            if (full) {
+                for (const key of HEAVY_STRINGS) {
+                    if (full.includes(key)) return true;
+                }
+            }
+
+            // 2) fallback: escanear algunos nodos comunes (por si innerText está vacío)
+            const nodes = document.querySelectorAll('h1, h2, h3, p, #main-message, #details, span, div');
+            for (const n of nodes) {
+                const t = norm(n.textContent);
+                if (!t) continue;
+                for (const key of HEAVY_STRINGS) {
+                    if (t.includes(key)) return true;
+                }
+            }
+        } catch (_) {}
+        return false;
+    }
+
 
   function bumpReloadCount() {
     try {
@@ -161,6 +274,17 @@
 
         // Programar intentos de skip
         scheduleSkipBroadcasts();
+
+        startHeavyAdGuard_Strict({ windowMs: 20_000 });
+
+          // 1) Activa en el documento actual
+          //observeVideos(document);
+
+          // 2) (Opcional) Intenta también en iframes de MISMO ORIGEN
+          //    OJO: si es cross-origin, no verás nada desde aquí.
+          //setTimeout(() => scanSameOriginIframes(window), 1000);
+
+
         return true;
       }
       return false;
@@ -217,6 +341,73 @@
 
     // No hacemos return aquí: dejamos que, si por error nos inyectamos en un host de IMA dentro OADTS (poco probable), el bloque de abajo también viva.
   }
+
+    //----------------------------------------------test---------------------------------------------------------------------------
+    function ts() { return new Date().toISOString(); }
+    function vlog(...a){ console.log(`[${ts()}] [VideoCtrl]`, ...a); }
+
+    function enableControlsInDoc(doc = document) {
+        try {
+            const vids = Array.from(doc.querySelectorAll('video'));
+            if (!vids.length) return 0;
+            let touched = 0;
+            for (const v of vids) {
+                try {
+                    // Fuerza controles
+                    v.controls = true;
+                    v.setAttribute('controls', '');
+                    // Cosas útiles para móviles/UX:
+                    v.setAttribute('playsinline', '');
+                    v.setAttribute('webkit-playsinline', '');
+                    // Opcional: evita que el sitio oculte controles vía CSS
+                    v.style.opacity = '';
+                    v.style.pointerEvents = '';
+                    touched++;
+                } catch (_) {}
+            }
+            if (touched) vlog(`Controles activados en ${touched} <video>`);
+            return touched;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    // 🔁 Observa mutaciones por si el <video> aparece después
+    function observeVideos(doc = document) {
+        try {
+            const mo = new MutationObserver(() => enableControlsInDoc(doc));
+            mo.observe(doc.documentElement, { subtree: true, childList: true, attributes: true });
+            // Primer barrido inmediato
+            enableControlsInDoc(doc);
+            // Corte de seguridad
+            setTimeout(() => mo.disconnect(), 60000);
+        } catch (_) {}
+    }
+
+    // 🧭 (Opcional) Recorre iframes de MISMO ORIGEN y activa controles dentro
+    function scanSameOriginIframes(rootWin = window) {
+        const iframes = Array.from(rootWin.document.getElementsByTagName('iframe'));
+        for (const f of iframes) {
+            try {
+                const cw = f.contentWindow;
+                const cd = cw?.document;
+                if (!cd) continue; // puede no estar listo
+                // Si es cross-origin, esto tirará excepción y caemos al catch
+                enableControlsInDoc(cd);
+                observeVideos(cd);
+                // Recursivo por si hay iframes anidados del mismo origen
+                scanSameOriginIframes(cw);
+            } catch (_) {
+                // Cross-origin: no se puede leer el DOM desde aquí. Inyéctate con @all-frames.
+            }
+        }
+    }
+
+    //---------------------------------------------------------------------------------------------------------------
+
+
+
+
 
   // ========= BLOQUE SKIP (in-frame IMA / Ads) =========
   if (/imasdk\.googleapis\.com|googlesyndication\.com|doubleclick\.net/i.test(location.hostname)) {
