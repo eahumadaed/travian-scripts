@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider (v1.0.5 Pro) — Final Fix
-// @namespace    https://edi.hh
-// @version      1.0.5
+// @version      1.0.6
 // @description  Atracos inteligentes a oasis con UI avanzada. Calcula ola óptima, lee ataque real del héroe, permite configurar tropas, elige objetivos por eficiencia. [Fix: Event Handler Logic]
-// @author       Edi (Pro features & Fix by Gemini)
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
 // @grant        none
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
 // ==/UserScript==
 
 (function () {
@@ -17,7 +17,6 @@
    * Configuración por Defecto (ahora se puede sobreescribir desde la UI)
    ******************************************************************/
   const CFG = {
-    API_VERSION: "228.2",
     QUEUE_SIZE: 50,
     HERO_RETURN_SPEED_BONUS: 0.29,
     EXTRA_BUFFER_SEC: 200,
@@ -25,14 +24,22 @@
     STOP_HP: 20,
     LOSS_TARGET: 0.02,
     RETRY_MS: 20 * 60 * 1000,
-    HERO_ATTACK_FALLBACK: 750, // Usado solo si la API falla
+    HERO_ATTACK_FALLBACK: 500, // Usado solo si la API falla
     // --------------------------------------------------------
+    HERO_ITEM_CHANGE: false,
     HERO_ITEM: {
       idWhenNoInfantry: 186804, // CAB
       idWhenWithInfantry: 190486, // INF
       targetPlaceId: -3,
     },
-    UNITS_ATTACK: { t1: 15, t2: 65, t4: 90, t5: 45, t6: 140 }, // Galos, ajustar si es necesario
+    UNITS_ATTACK: {
+      GAUL:   { t1: 15, t2: 60, t4: 90,  t5: 45,  t6: 130 },
+      TEUTON: { t1: 40, t2: 70, t3: 90, t6: 130 },
+      ROMAN:  { t1: 20, t3: 80,  t6: 140 }
+    },
+
+
+
     NATURE_DEF: {
       rat: { inf: 25, cav: 20 }, spider: { inf: 35, cav: 40 }, snake: { inf: 40, cav: 60 },
       bat: { inf: 66, cav: 50 }, boar: { inf: 70, cav: 33 }, wolf: { inf: 80, cav: 70 },
@@ -41,10 +48,71 @@
     },
   };
 
-  const U3X_TO_BEAST = {
-    31: "rat", 32: "spider", 33: "snake", 34: "bat", 35: "boar",
-    36: "wolf", 37: "bear", 38: "crocodile", 39: "tiger", 40: "elephant"
+  const TRIBE_UNIT_GROUPS = {
+    GAUL: {
+      cav: ["t4","t6","t5"],          // TT, Haeduan, Druida
+      inf: ["t2","t1"]                // Espada, Falange
+    },
+    TEUTON: {
+      cav: ["t6"],                    // Teutón montado
+      inf: ["t3","t1","t2"]           // Hacha, Porra, Lanza (lanza es más defensiva, queda al final)
+    },
+    ROMAN: {
+      cav: ["t6"],                    // Caesaris
+      inf: ["t3","t1"]                // Imperano, Legionario
+    }
   };
+
+    const ALLOW_EQUIP = false;
+
+    const U3X_TO_BEAST = {
+        31: "Rat",
+        32: "Spider",
+        33: "Snake",
+        34: "Bat",
+        35: "Wild Boar",
+        36: "Wolf",
+        37: "Bear",
+        38: "Crocodile",
+        39: "Tiger",
+        40: "Elephant",
+    };
+    const NAME_TO_BEAST = {
+        "rat": "Rat",
+        "spider": "Spider",
+        "snake": "Snake",
+        "bat": "Bat",
+        "wild boar": "Wild Boar",
+        "wolf": "Wolf",
+        "bear": "Bear",
+        "crocodile": "Crocodile",
+        "tiger": "Tiger",
+        "elephant": "Elephant",
+    };
+    // Mapea nombres y códigos a u31..u40
+    const ANIMAL_CODE_BY_NAME = {
+        "rat":"u31","spider":"u32","snake":"u33","bat":"u34","wild boar":"u35","boar":"u35",
+        "wolf":"u36","bear":"u37","crocodile":"u38","croco":"u38","tiger":"u39","elephant":"u40",
+        // por si el parser te da español:
+        "rata":"u31","araña":"u32","serpiente":"u33","murciélago":"u34","jabalí":"u35",
+        "lobo":"u36","oso":"u37","cocodrilo":"u38","tigre":"u39","elefante":"u40"
+    };
+
+    // Defensa vs inf/cab por código (fuente oficial arriba)
+    const NATURE_DEF = {
+        u31:{inf:25,  cav:20},  // Rat
+        u32:{inf:35,  cav:40},  // Spider
+        u33:{inf:40,  cav:60},  // Snake
+        u34:{inf:66,  cav:50},  // Bat
+        u35:{inf:70,  cav:33},  // Wild Boar
+        u36:{inf:80,  cav:70},  // Wolf
+        u37:{inf:140, cav:200}, // Bear
+        u38:{inf:380, cav:240}, // Crocodile
+        u39:{inf:170, cav:250}, // Tiger
+        u40:{inf:440, cav:520}, // Elephant
+    };
+
+
 
   let RUN_LOCK = false;
 
@@ -397,15 +465,73 @@
     showAlert(STATE.alert?.text || "");
   }
 
+    function normAnimalKey(k){
+        if (!k) return null;
+        const s = String(k).trim().toLowerCase();
+        // t31/u31 → u31
+        const m = s.match(/^[tu](\d{2})$/);
+        if (m) return "u"+m[1];
+        // "Wild Boar" → u35
+        const name = s.replace(/\s+/g," ");
+        if (ANIMAL_CODE_BY_NAME[name]) return ANIMAL_CODE_BY_NAME[name];
+        // intenta sin acentos
+        const noAcc = name.normalize("NFD").replace(/\p{Diacritic}/gu,"");
+        return ANIMAL_CODE_BY_NAME[noAcc] || null;
+    }
+
+    function sumDef(oasisCounts){
+        let Dinf = 0, Dcav = 0;
+        for (const [k, cntRaw] of Object.entries(oasisCounts || {})){
+            const cnt = +cntRaw || 0;
+            const code = normAnimalKey(k);
+            const row = code ? NATURE_DEF[code] : null;
+            if (!row) {
+                console.warn("[sumDef] Unknown animal key:", k);
+                continue;
+            }
+            Dinf += row.inf * cnt;
+            Dcav += row.cav * cnt;
+        }
+        return { Dinf, Dcav };
+    }
   /******************************************************************
    * API & Parsers
    ******************************************************************/
+  function guessXVersion() {
+        const KEY = "tscm_xversion";
+        let localVer = localStorage.getItem(KEY);
+        let gpackVer = null;
+        try {
+            const el = document.querySelector('link[href*="gpack"], script[src*="gpack"]');
+            if (el) {
+                const url = el.href || el.src || "";
+                const match = url.match(/gpack\/([\d.]+)\//);
+                if (match) {
+                    gpackVer = match[1];
+                }
+            }
+        } catch (e) {
+            console.warn("[guessXVersion] DOM parse error:", e);
+        }
+        if (gpackVer) {
+            if (localVer !== gpackVer) {
+                localStorage.setItem(KEY, gpackVer);
+            }
+            return gpackVer;
+        }
+        if (localVer) {
+            return localVer;
+        }
+        return "228.2";
+  }
+  const xv = guessXVersion();
+
   const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
   const distFields = (a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 
   async function fetchMapTiles(centerX, centerY, zoomLevel=3){
     const body = JSON.stringify({ data:{ x:centerX, y:centerY, zoomLevel, ignorePositions:[] }});
-    const res = await fetch("/api/v1/map/position", { method:"POST", credentials:"include", headers:{ "accept":"application/json", "content-type":"application/json; charset=UTF-8", "x-version": CFG.API_VERSION, "x-requested-with":"XMLHttpRequest" }, body });
+    const res = await fetch("/api/v1/map/position", { method:"POST", credentials:"include", headers:{ "accept":"application/json", "content-type":"application/json; charset=UTF-8", "x-version": xv, "x-requested-with":"XMLHttpRequest" }, body });
     if (!res.ok) throw new Error(`map/position HTTP ${res.status}`);
     return await res.json();
   }
@@ -426,7 +552,7 @@
   async function updateActiveVillage(){
     log("updateActiveVillage: Obteniendo datos del héroe y aldea...");
     try {
-        const heroRes = await fetch("/api/v1/hero/v2/screen/attributes", { method:"GET", credentials:"include", headers:{ "accept":"application/json", "x-version":CFG.API_VERSION, "x-requested-with":"XMLHttpRequest" }});
+        const heroRes = await fetch("/api/v1/hero/v2/screen/attributes", { method:"GET", credentials:"include", headers:{ "accept":"application/json", "x-version":xv, "x-requested-with":"XMLHttpRequest" }});
         if (!heroRes.ok) throw new Error(`API hero attributes HTTP ${heroRes.status}`);
         const heroData = await heroRes.json();
         const heroAttack = parseInt(heroData?.fightingStrength, 10);
@@ -453,18 +579,70 @@
         return false;
     }
   }
+  function parseTimeToSeconds(t) {
+    // Soporta "H:MM:SS" o "M:SS"
+    if (!t) return null;
+    const parts = t.trim().split(":").map(n => parseInt(n, 10));
+    if (parts.some(Number.isNaN)) return null;
+    if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+    if (parts.length === 2) return parts[0]*60 + parts[1];
+    return null;
+  }
 
-  async function checkHeroStatus(){
-    try{
-      const res = await fetch("/api/v1/hero/dataForHUD", { method:"GET", credentials:"include", headers:{ "accept":"application/json", "x-requested-with":"XMLHttpRequest" } });
+  // Devuelve { dir: 'outbound'|'inbound', secs: number } o null
+  function extractHeroMoveInfoFromHUD(raw) {
+    if (!raw) return null;
+    const s = String(raw).toLowerCase();
+
+    // Dirección
+    let dir = null;
+    if (s.includes("on its way back")) dir = "inbound";
+    else if (s.includes("on its way to")) dir = "outbound";
+
+    // 1) Intenta leer attribute value="###" del timer
+    let m = s.match(/value\s*=\s*"(\\?\d+)"/);
+    if (!m) m = s.match(/value\s*=\s*'\\?(\d+)'/);
+    if (m) {
+      const secs = parseInt(m[1].replace("\\", ""), 10);
+      return (dir && secs > 0) ? { dir, secs } : null;
+    }
+
+    // 2) Fallback: parsear texto "0:04:22" / "4:22"
+    let t = s.match(/>\s*(\d{1,2}:\d{2}:\d{2})\s*<|>\s*(\d{1,2}:\d{2})\s*</);
+    if (t) {
+      const ts = parseTimeToSeconds(t[1] || t[2]);
+      return (dir && ts > 0) ? { dir, secs: ts } : null;
+    }
+
+    return null;
+  }
+
+
+  async function checkHeroStatus() {
+    try {
+      const res = await fetch("/api/v1/hero/dataForHUD", {
+        method: "GET",
+        credentials: "include",
+        headers: { "accept": "application/json", "x-requested-with": "XMLHttpRequest" }
+      });
       if (!res.ok) throw new Error(`API dataForHUD HTTP ${res.status}`);
       const data = await res.json();
-      return { available: !data.statusInlineIcon?.includes("heroRunning"), health: parseInt(data.health,10) };
-    }catch(e){
+
+      const running = !!(data.statusInlineIcon && data.statusInlineIcon.includes("heroRunning"));
+      const available = !running;
+      const health = parseInt(data.health, 10);
+
+      // Extrae movimiento desde los tooltips del HUD
+      const rawHUD = data.heroButtonTitle || data.heroStatusTitle || "";
+      const move = extractHeroMoveInfoFromHUD(rawHUD); // {dir, secs} | null
+
+      return { available, health, move };
+    } catch (e) {
       error("checkHeroStatus falló:", e);
-      return { available:false, health:100 };
+      return { available: false, health: 100, move: null };
     }
   }
+
 
   async function openRallyPointFor(x,y){
     const res = await fetch(`/build.php?newdid=${STATE.currentVillage.id}&gid=16&tt=2&x=${x}&y=${y}`, { credentials:"include" });
@@ -472,15 +650,39 @@
     return await res.text();
   }
 
-  function parseMaxOfType(html, tName){
-    const re = new RegExp(`name=['"]troop\\[${tName}\\]['"][\\s\\S]*?<a[^>]*>([\\s\\S]*?)<\\/a>`,"i");
-    const m = html.match(re);
-    if (m) return parseInt(m[1].replace(/[^\d]/g,"")||"0",10);
-    const re2 = new RegExp(`name=['"]troop\\[${tName}\\]['"][\\s\\S]*?\\/(?:&nbsp;)?(?:<span[^>]*>\\s*([0-9]+)\\s*<\\/span>|([0-9]+))`,"i");
-    const m2 = html.match(re2);
-    if (m2) return parseInt((m2[1]||m2[2]||"").replace(/[^\d]/g,"")||"0",10);
-    return 0;
-  }
+    function parseMaxOfType(html, tName) {
+        try {
+            const doc = (html && typeof html.querySelector === "function")
+            ? html
+            : new DOMParser().parseFromString(String(html || ""), "text/html");
+
+            const input = doc.querySelector(`table#troops input[name="troop[${tName}]"]`);
+            if (!input) return 0;
+
+            const cell = input.closest("td");
+            if (!cell) return 0;
+
+            // 1) Preferir el <a> (habilitado) o <span> (deshabilitado)
+            const node = cell.querySelector("a, span");
+            if (node) {
+                const txt = (node.textContent || "")
+                .replace(/[\u202A-\u202E]/g, "")  // remove bidi marks
+                .replace(/[^\d]/g, "");           // keep digits only
+                const n = parseInt(txt || "0", 10);
+                if (!Number.isNaN(n)) return n;
+            }
+
+            // 2) Fallback: extraer desde onclick ".val(###)"
+            const m = (cell.innerHTML || "").match(/\.val\((\d+)\)/);
+            if (m) return parseInt(m[1], 10) || 0;
+
+            return 0;
+        } catch (e) {
+            console.warn("[parseMaxOfType] error:", e);
+            return 0;
+        }
+    }
+
 
   async function postPreview(x,y,send){
     const params = new URLSearchParams({ x, y, eventType:"4", ok:"ok" });
@@ -513,76 +715,243 @@
   }
 
   async function equipHeroFor(withInfantry){
+    if(!CFG.HERO_ITEM_CHANGE) return;
+
     const itemId = withInfantry ? CFG.HERO_ITEM.idWhenWithInfantry : CFG.HERO_ITEM.idWhenNoInfantry;
-    await fetch("/api/v1/hero/v2/inventory/move-item", { method:"POST", credentials:"include", headers:{ "accept":"application/json", "content-type":"application/json; charset=UTF-8", "x-version": CFG.API_VERSION, "x-requested-with":"XMLHttpRequest" }, body: JSON.stringify({ action:"inventory", itemId, amount:1, targetPlaceId: CFG.HERO_ITEM.targetPlaceId }) });
+    await fetch("/api/v1/hero/v2/inventory/move-item", { method:"POST", credentials:"include", headers:{ "accept":"application/json", "content-type":"application/json; charset=UTF-8", "x-version": xv, "x-requested-with":"XMLHttpRequest" }, body: JSON.stringify({ action:"inventory", itemId, amount:1, targetPlaceId: CFG.HERO_ITEM.targetPlaceId }) });
     await sleep(300);
   }
 
-  async function fetchOasisDetails(x,y){
-    const res = await fetch("/api/v1/map/tile-details", { method:"POST", credentials:"include", headers:{ "accept":"application/json, text/javascript, */*; q=0.01", "content-type":"application/json; charset=UTF-8", "x-requested-with":"XMLHttpRequest", "x-version": CFG.API_VERSION }, body: JSON.stringify({x,y}) });
-    if (!res.ok) { warn(`tile-details HTTP ${res.status} for ${x}|${y}`); return { counts: {} }; }
-    const data = await res.json();
-    const html = data?.html || "";
-    const counts = {};
-    const re = /class="unit u3(\d+)"[^>]*>.*?<\/td>\s*<td class="val">(\d+)<\/td>/gis;
-    let m;
-    while ((m = re.exec(html)) !== null){
-      const beast = U3X_TO_BEAST[parseInt(m[1],10)];
-      if (beast) counts[beast] = (counts[beast]||0) + parseInt(m[2],10);
-    }
-    return { counts };
-  }
+    async function fetchOasisDetails(x, y) {
+        try {
+            const res = await fetch("/api/v1/map/tile-details", {
+                method: "POST",
+                credentials: "include",
+                headers: {
+                    "accept": "application/json, text/javascript, */*; q=0.01",
+                    "content-type": "application/json; charset=UTF-8",
+                    "x-requested-with": "XMLHttpRequest",
+                    "x-version": xv
+                },
+                body: JSON.stringify({ x, y })
+            });
 
-  function sumDef(counts){
-    let Dinf=0, Dcav=0;
-    for (const k in counts){
-      const d = CFG.NATURE_DEF[k];
-      if (d) { Dinf += (counts[k]||0) * d.inf; Dcav += (counts[k]||0) * d.cav; }
+            if (!res.ok) {
+                warn(`[tile-details HTTP ${res.status} for ${x}|${y}`);
+                return { counts: {} };
+            }
+
+            const data = await res.json();
+            const html = data?.html || "";
+            const doc  = new DOMParser().parseFromString(html, "text/html");
+
+            // Toma la tabla de tropas que NO sea la de reportes (rep)
+            const troopsTable = doc.querySelector('#map_details table#troop_info:not(.rep)');
+            if (!troopsTable) {
+                warn(`No troopsTable (non-rep) found for ${x}|${y}`);
+                return { counts: {} };
+            }
+
+            const rows = troopsTable.querySelectorAll("tbody > tr");
+            const counts = {};
+            let found = 0;
+
+            rows.forEach(tr => {
+                const img   = tr.querySelector("td.ico img") || tr.querySelector("td.ico i");
+                const valTd = tr.querySelector("td.val");
+                if (!img || !valTd) return;
+
+                // 1) Intenta por clase u3X
+                let code = null;
+                if (img.classList) {
+                    const uClass = Array.from(img.classList).find(c => /^u3\d+$/.test(c));
+                    if (uClass) code = parseInt(uClass.replace("u3", ""), 10);
+                }
+
+                let beast = code != null ? U3X_TO_BEAST[code] : undefined;
+
+                // 2) Fallback por title/alt/desc
+                if (!beast) {
+                    const byText = (img.getAttribute?.("title") || img.getAttribute?.("alt") || "")
+                    .trim().toLowerCase();
+                    const descTd = tr.querySelector("td.desc");
+                    const descTx = (descTd?.textContent || "").trim().toLowerCase();
+
+                    const key = (byText || descTx).replace(/\s+/g, " ");
+                    if (key) {
+                        for (const k of Object.keys(NAME_TO_BEAST)) {
+                            if (key.includes(k)) {
+                                beast = NAME_TO_BEAST[k];
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                const num = parseInt((valTd.textContent || "").replace(/[^\d]/g, ""), 10) || 0;
+                if (!beast || !num) return;
+
+                counts[beast] = (counts[beast] || 0) + num;
+                found++;
+            });
+
+            console.log(`Oasis ${x}|${y} parsed. Rows:${rows.length} Found:${found} ->`, counts);
+            return { counts };
+        } catch (e) {
+            error(`fetchOasisDetails error for ${x}|${y}: ${e?.message || e}`);
+            return { counts: {} };
+        }
     }
-    return { Dinf, Dcav };
-  }
 
   function calcLossFromRatio(R){ return Math.pow(R, 1.5) / (1 + Math.pow(R, 1.5)); }
 
-  function smartBuildWave(oasisCounts, available, opts){
-    const p = opts.lossTarget, heroAtk = opts.heroAttack, allowedUnits = opts.allowedUnits, UA = CFG.UNITS_ATTACK;
-    const { Dinf, Dcav } = sumDef(oasisCounts);
-    if (Dinf<=0 && Dcav<=0){ return { send: { hero:1 }, explain:{ Dinf, Dcav, loss_est:0 }}; }
-    const R = Math.pow(p/(1-p), 2/3);
-    const order = ["t6","t4","t5","t2","t1"].filter(u => allowedUnits[u]);
-    log("smartBuildWave: Unidades permitidas:", order);
-    const cap = {}; order.forEach(u => cap[u] = available[u] || 0);
-    let send = { hero:1 }; order.forEach(u => send[u] = 0);
-    let cavPct = 1.0;
-    for (let pass=0; pass<3; pass++){
-      const Deff = cavPct*Dcav + (1-cavPct)*Dinf, A_target = Deff / R;
-      const A_now = order.reduce((sum, u) => sum + (send[u]||0)*UA[u], heroAtk);
-      if (A_now >= A_target) break;
-      let deficit = A_target - A_now;
-      for (const k of order){
-        if (deficit <= 0) break;
-        const take = Math.min(cap[k], Math.ceil(deficit / UA[k]));
-        if (take > 0){ send[k] += take; cap[k] -= take; deficit -= take * UA[k]; }
+    // Hero-only → add ALL available TT (t4) as escort
+    function applyHeroTTEscortAll(send, available, allowedUnits) {
+        const L = (...a)=> console.log(`[${nowStr()}] [escort]`, ...a);
+        try {
+            const onlyHero = (send?.hero || 0) > 0 &&
+                  Object.keys(send).filter(k => k !== "hero").every(k => (send[k] || 0) === 0);
+
+            if (!onlyHero) {
+                L("Not hero-only → skipping TT escort.");
+                return send;
+            }
+
+            if (!allowedUnits?.t4) {
+                L("t4 not allowed → skipping TT escort.");
+                return send;
+            }
+
+            const haveTT = Math.max(0, +((available && available.t4) || 0));
+            if (haveTT <= 0) {
+                L("No t4 available → skipping TT escort.");
+                return send;
+            }
+
+            send.t4 = (send.t4 || 0) + haveTT;
+            L(`Hero-only wave → adding ALL TT escort: ${haveTT}. Result send:`, JSON.stringify(send));
+            return send;
+
+        } catch (e) {
+            console.warn(`[${nowStr()}] [escort][WARN] Exception:`, e);
+            return send;
+        }
+    }
+    function getCurrentTribe() {
+      const key = "tscm_tribe";
+      const keyNum = "tscm_tribeId";
+      const map = { 1: "ROMAN", 2: "TEUTON", 3: "GAUL" };
+
+      let tribe = localStorage.getItem(key);
+      if (tribe && tribe.trim().length > 0) return tribe;
+
+      const el = document.querySelector("#resourceFieldContainer");
+      if (el) {
+        const match = (el.className || "").match(/tribe(\d+)/);
+        if (match) {
+          const num = parseInt(match[1], 10);
+          tribe = map[num] || null;
+          if (tribe) {
+            localStorage.setItem(key, tribe);
+            localStorage.setItem(keyNum, num);
+            return tribe;
+          }
+        }
       }
-      const A_cab = ["t4","t5","t6"].reduce((sum,u) => sum+(send[u]||0)*UA[u], 0);
-      const A_total = order.reduce((sum, u) => sum + (send[u]||0)*UA[u], heroAtk);
-      cavPct = A_total > 0 ? (A_cab / A_total) : 1.0;
+      return null;
     }
-    const A_total_final = order.reduce((sum, u) => sum + (send[u]||0)*UA[u], heroAtk);
-    const DeffFinal = (cavPct*Dcav + (1-cavPct)*Dinf);
-    if (A_total_final > 0 && DeffFinal / A_total_final > R) {
-        warn("No se alcanzó el objetivo de pérdidas, se enviará todo lo disponible permitido.");
-        for (const k of order){ if (cap[k] > 0) { send[k] += cap[k]; cap[k] = 0; } }
+
+
+  function smartBuildWave(oasisCounts, available, opts) {
+    // --- Inputs ---
+    const tribe = (getCurrentTribe() || "GAUL").toUpperCase();
+    const p = Math.min(Math.max(opts.lossTarget, 0.01), 0.35);       // clamp 1%..35%
+    const heroAtk = (opts.heroAttack | 0);
+
+    // --- UA por tribu (solo tropas útiles de raideo; scouts/def fuera) ---
+    const BASE = CFG.UNITS_ATTACK || {};
+    const baseUA = (BASE[tribe] || BASE.GAUL || {});
+
+    // allowedUnits como mapa {t1:true,...}; si no viene, usa tu selector de UI
+    const allowedUnits = (opts.allowedUnits && typeof opts.allowedUnits === "object")
+      ? opts.allowedUnits
+      : (typeof getSelectedUnits === "function" ? getSelectedUnits() : null);
+
+    // Filtra UA por allowedUnits y min > 0
+    const UA = Object.fromEntries(
+      Object.entries(baseUA).filter(([k, v]) => v > 0 && (!allowedUnits || allowedUnits[k]))
+    );
+
+    // --- Orden/prioridad por tribu: cav rápidas → inf (fallback si no existe TRIBE_UNIT_GROUPS) ---
+    const fallbackGroups = { GAUL:{cav:["t4","t6","t5"],inf:["t2","t1"]},
+                            TEUTON:{cav:["t6"],inf:["t3","t1","t2"]},
+                            ROMAN:{cav:["t6"],inf:["t3","t1"]} };
+    const groups = (typeof TRIBE_UNIT_GROUPS !== "undefined" && TRIBE_UNIT_GROUPS[tribe])
+      ? TRIBE_UNIT_GROUPS[tribe]
+      : fallbackGroups[tribe] || fallbackGroups.GAUL;
+
+    const order = [...(groups.cav || []), ...(groups.inf || [])].filter(u => UA[u] > 0);
+
+    // --- Defensa del oasis (sumDef ya la tienes) ---
+    const { Dinf, Dcav } = sumDef(oasisCounts || {});
+    if ((Dinf <= 0) && (Dcav <= 0)) {
+      return { send: { hero: 1 }, explain: { Dinf, Dcav, A_real: heroAtk, cavPct: 1, weapon: "cab", loss_est: 0 } };
     }
-    const A_cab_explain = ["t4","t5","t6"].reduce((sum,u) => sum+(send[u]||0)*UA[u], 0);
-    const Atot_explain  = order.reduce((sum,u) => sum+(send[u]||0)*UA[u], heroAtk);
-    const cavPct_explain = Atot_explain > 0 ? (A_cab_explain/Atot_explain) : 1.0;
-    const Deff_explain = cavPct_explain*Dcav + (1-cavPct_explain)*Dinf;
-    return { send, explain: { Dinf, Dcav, loss_est: calcLossFromRatio(Deff_explain / Math.max(1, Atot_explain)), weapon: (A_cab_explain*2 >= Atot_explain-heroAtk) ? "cab" : "inf", A_real: Atot_explain } };
+
+    // Mezcla dinámica según lo que se vaya asignando (proporción caballería)
+    let cavPct = 1.0;
+    const send = { hero: 1 };
+    const cap = {};
+    order.forEach(u => { cap[u] = Math.max(0, +((available && available[u]) || 0)); send[u] = 0; });
+
+    // Objetivo de ataque total en función de p (misma fórmula que usabas)
+    // R = (p/(1-p))^(2/3)  =>  A_target = Deff / R
+    const R = Math.pow(p / (1 - p), 2 / 3);
+
+    for (let pass = 0; pass < 3; pass++) {
+      const Deff = cavPct * Dcav + (1 - cavPct) * Dinf;
+      const A_target = Deff / R;
+      const A_now = order.reduce((s, u) => s + (send[u] || 0) * UA[u], heroAtk);
+
+      if (A_now >= A_target) break;
+
+      let deficit = A_target - A_now;
+      for (const u of order) {
+        if (deficit <= 0) break;
+        const perUnit = UA[u];
+        const take = Math.min(cap[u], Math.ceil(deficit / perUnit));
+        if (take > 0) {
+          send[u] += take;
+          cap[u] -= take;
+          deficit -= take * perUnit;
+        }
+      }
+      const Acab = ["t4", "t5", "t6"].reduce((s, u) => s + (send[u] || 0) * (UA[u] || 0), 0);
+      const Atot = order.reduce((s, u) => s + (send[u] || 0) * UA[u], heroAtk);
+      cavPct = Atot > 0 ? (Acab / Atot) : 1.0;
+    }
+
+    const Atot = order.reduce((s, u) => s + (send[u] || 0) * UA[u], heroAtk);
+    const Acab = ["t4", "t5", "t6"].reduce((s, u) => s + (send[u] || 0) * (UA[u] || 0), 0);
+    const Deff = cavPct * Dcav + (1 - cavPct) * Dinf;
+
+    return {
+      send,
+      explain: {
+        Dinf, Dcav,
+        A_real: Atot,
+        cavPct,
+        weapon: (Acab * 2 >= (Atot - heroAtk)) ? "cab" : "inf",
+        loss_est: calcLossFromRatio(Deff / Math.max(1, Atot))
+      }
+    };
   }
 
+
+
   async function equipHeroForByMajority(send){
-    const UA = CFG.UNITS_ATTACK;
+    const tribe = (getCurrentTribe() || "GAUL").toUpperCase();
+    const UA = (CFG.UNITS_ATTACK[tribe] || CFG.UNITS_ATTACK.GAUL);
     const A_cab = (send.t4||0)*UA.t4 + (send.t5||0)*UA.t5 + (send.t6||0)*UA.t6;
     const A_inf = (send.t1||0)*UA.t1 + (send.t2||0)*UA.t2;
     try{ await equipHeroFor(A_inf > A_cab); }
@@ -619,55 +988,202 @@
     scheduleNext(rtMs, `roundTrip: ${goSec}s`);
   }
 
-  async function trySendTo(oasis){
-    const { x,y } = oasis;
-    console.group(`[${nowStr()}] [OASIS] trySendTo (${x}|${y})`);
-    try{
+    // =========================
+    // DRY-RUN SWITCHES
+    // =========================
+    const DRY_RUN       = false;   // true => never send (no postConfirm)
+    const ALLOW_PREVIEW = true;   // true => call postPreview to get goSec (still no send)
+
+  async function trySendTo(oasis) {
+    const { x, y } = oasis || {};
+    const dbg = {
+      ts: new Date().toLocaleTimeString('en-GB'),
+      coords: { x, y },
+      heroStatus: null,
+      stopHp: null,
+      available: null,
+      counts: null,
+      smart: { send: null, explain: null },
+      anyTroopsToSend: null,
+      anyTroopsAvailable: null,
+      previewRequested: ALLOW_PREVIEW,
+      preview: null,
+      goSec: null,
+      decisions: {
+        lowHpAbort: false,
+        heroBusyRetry: false,
+        missingHeroInPreview: false,
+        missingGoSec: false,
+        ttEscortApplied: false,
+        dryRunSkipSend: DRY_RUN,
+        equipAttempted: false,
+        suicideSkip: false
+      },
+      result: null,
+      error: null
+    };
+
+    console.group(`[${dbg.ts}] [OASIS] trySendTo (${x}|${y})`);
+    try {
+      // 1) Estado héroe
       const heroStatus = await checkHeroStatus();
       const stopHp = getStopHp();
-      if (heroStatus.health < stopHp){
-        warn(`Héroe con vida (${heroStatus.health}%) por debajo del umbral (${stopHp}%). Deteniendo script.`);
+      dbg.heroStatus = heroStatus;
+      dbg.stopHp = stopHp;
+
+      if (heroStatus.health < stopHp) {
+        dbg.decisions.lowHpAbort = true;
         onToggleRun(true);
-        STATE.alert = { type:"warn", text:`Vida del Héroe baja (${heroStatus.health}%). Script detenido.` };
-        saveState(STATE); uiRender(); console.groupEnd(); return false;
-      }
-      if (!heroStatus.available){
-        scheduleNext(getRetryMs(), "hero is busy"); console.groupEnd(); return false;
-      }
-      const rp = await openRallyPointFor(x,y);
-      const available = { t1:parseMaxOfType(rp,"t1"), t2:parseMaxOfType(rp,"t2"), t4:parseMaxOfType(rp,"t4"), t5:parseMaxOfType(rp,"t5"), t6:parseMaxOfType(rp,"t6") };
-      const { counts } = await fetchOasisDetails(x,y);
-      const { send, explain } = smartBuildWave(counts, available, { heroAttack: STATE.heroAttack, lossTarget: getLossTarget(), allowedUnits: getSelectedUnits() });
-      log("SMART explain:", explain); log("SMART send:", send);
-
-      const anyTroopsToSend = Object.keys(send).filter(k => k !== 'hero').reduce((sum, k) => sum + (send[k] || 0), 0);
-      const anyTroopsAvailable = Object.values(available).reduce((a,b)=>a+b, 0);
-
-      if (oasis.animals > 0 && anyTroopsAvailable > 0 && anyTroopsToSend === 0){
-        warn("Protección 'héroe solo' MEJORADA: El escaneo inicial mostró animales pero el cálculo resultó en 0 tropas. Forzando envío de tropas disponibles.");
-        const allowedUnits = getSelectedUnits();
-        for(const unit in available) { if (allowedUnits[unit]) send[unit] = available[unit]; }
+        STATE.alert = { type: "warn", text: `Hero HP low (${heroStatus.health}%). Script stopped.` };
+        saveState(STATE);
+        uiRender();
+        dbg.result = false;
+        console.groupEnd();
+        return dbg;
       }
 
-      await equipHeroForByMajority(send);
-      const preview = await postPreview(x,y,send);
-      if (!/unit uhero/.test(preview)){ scheduleNext(getRetryMs(), "hero missing in preview"); console.groupEnd(); return false; }
-      const goSec = parseTravelSecondsFromPreview(preview);
-      if (!goSec){ scheduleNext(getRetryMs(), "missing goSec from preview"); console.groupEnd(); return false; }
+      if (!heroStatus.available) {
+        dbg.decisions.heroBusyRetry = true;
 
-      STATE.lastTarget = { x,y }; saveState(STATE); uiRender();
+        let ms;
+        const mv = heroStatus.move; // {dir, secs} o null
+        if (mv && mv.secs > 0) {
+          if (mv.dir === "outbound") {
+            // Va hacia el objetivo → usar ida*2 como round-trip
+            ms = (mv.secs * 2000) + 15000; // *2 + 15s buffer humano
+          } else {
+            // Viene de vuelta → ETA + aleatorio humano
+            const jitter = (10 + Math.floor(Math.random() * 31)) * 1000; // 10..40s
+            ms = (mv.secs * 1000) + jitter;
+          }
+        } else {
+          // Fallback a tu retry normal
+          ms = getRetryMs();
+        }
+
+        scheduleNext(ms, "hero busy (HUD ETA)");
+        dbg.result = false;
+        console.groupEnd();
+        return dbg;
+      }
+
+
+      // 2) Abrir punto de reunión (para máximos disponibles)
+      const rp = await openRallyPointFor(x, y);
+      const available = {
+        t1: parseMaxOfType(rp, "t1"),
+        t2: parseMaxOfType(rp, "t2"),
+        t4: parseMaxOfType(rp, "t4"),
+        t5: parseMaxOfType(rp, "t5"),
+        t6: parseMaxOfType(rp, "t6"),
+      };
+      dbg.available = { ...available };
+
+      // 3) Detalles del oasis (animales)
+      const { counts } = await fetchOasisDetails(x, y);
+      dbg.counts = counts || {};
+
+      // 4) Decisión inteligente
+      const smartInput = {
+        heroAttack: STATE.heroAttack,
+        lossTarget: getLossTarget(),
+        allowedUnits: getSelectedUnits(),
+      };
+      const { send, explain } = smartBuildWave(dbg.counts, available, smartInput);
+      dbg.smart.send = { ...send };
+      dbg.smart.explain = explain;
+
+      // 4.1) Skip suicida si pérdidas estimadas ≥ 30%
+      if (explain && explain.loss_est >= 0.30) {
+        dbg.decisions.suicideSkip = true;
+        console.log(`[OASIS] Skip: estimated loss ${(explain.loss_est * 100).toFixed(1)}% ≥ 30%`);
+        dbg.result = false;
+        console.groupEnd();
+        return dbg; // pasa al siguiente objetivo
+      }
+
+      // 5) Escort TT si es hero-only (agrega TODOS los t4 disponibles si están permitidos)
+      const beforeT4 = send.t4 || 0;
+      applyHeroTTEscortAll(send, available, getSelectedUnits());
+      if ((send.t4 || 0) > beforeT4) {
+        dbg.decisions.ttEscortApplied = true;
+      }
+
+      // Conteos finales
+      const anyTroopsToSend = Object.keys(send).filter(k => k !== "hero").reduce((s, k) => s + (send[k] || 0), 0);
+      const anyTroopsAvailable = Object.values(available).reduce((a, b) => a + (b || 0), 0);
+      dbg.anyTroopsToSend = anyTroopsToSend;
+      dbg.anyTroopsAvailable = anyTroopsAvailable;
+
+      // 6) Equip (si lo habilitas)
+      if (typeof ALLOW_EQUIP !== "undefined" && ALLOW_EQUIP) {
+        dbg.decisions.equipAttempted = true;
+        await equipHeroForByMajority(send);
+      }
+
+      // 7) Preview (no envía)
+      let preview = null, goSec = null;
+      if (ALLOW_PREVIEW) {
+        preview = await postPreview(x, y, send);
+        dbg.preview = preview ? "[[preview HTML received]]" : null;
+
+        if (!/unit uhero/.test(preview || "")) {
+          dbg.decisions.missingHeroInPreview = true;
+          const ms = getRetryMs();
+          scheduleNext(ms, "hero missing in preview");
+          dbg.result = false;
+          console.groupEnd();
+          return dbg;
+        }
+
+        goSec = parseTravelSecondsFromPreview(preview);
+        dbg.goSec = goSec || null;
+        if (!goSec) {
+          dbg.decisions.missingGoSec = true;
+          const ms = getRetryMs();
+          scheduleNext(ms, "missing goSec from preview");
+          dbg.result = false;
+          console.groupEnd();
+          return dbg;
+        }
+      }
+
+      // Persist UI
+      STATE.lastTarget = { x, y };
+      saveState(STATE);
+      uiRender();
+
+      // 8) DRY RUN?
+      if (DRY_RUN) {
+        if (goSec) setNextByRoundTrip(goSec);
+        dbg.result = true;
+        console.groupEnd();
+        return dbg;
+      }
+
+      // 9) Enviar de verdad
       await postConfirm(preview);
-      oasis.attacked = true; STATE.stats.attacked++; STATE.stats.remaining--;
-      saveState(STATE); uiRender(); setNextByRoundTrip(goSec);
-      console.groupEnd(); setTimeout(()=>location.reload(), 500);
-      return true;
-    }catch(e){
-      error("trySendTo error:", e);
-      scheduleNext(getRetryMs(), "exception in trySendTo");
+      if (oasis) oasis.attacked = true;
+      STATE.stats.attacked++;
+      STATE.stats.remaining--;
+      saveState(STATE);
+      uiRender();
+      if (goSec) setNextByRoundTrip(goSec);
+
+      dbg.result = true;
       console.groupEnd();
-      return false;
+      return dbg;
+
+    } catch (e) {
+      dbg.error = String(e && e.stack ? e.stack : e);
+      const ms = getRetryMs();
+      scheduleNext(ms, "exception in trySendTo");
+      dbg.result = false;
+      console.groupEnd();
+      return dbg;
     }
   }
+
 
   let uiTimer=null;
   function clearUiTimer(){ if (uiTimer){ clearInterval(uiTimer); uiTimer=null; } }
@@ -730,6 +1246,8 @@
       await buildOasisQueue(true);
       uiRender();
       console.groupEnd();
+      fetchOasisDetails(-14, -126).then(res => console.table(res.counts));
+
   }
 
   async function onSendNow(){
