@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         🐺 Oasis Raider (v1.0.5 Pro) — Final Fix
-// @version      1.0.6
+// @name         🐺 Oasis Raider
+// @version      1.0.7
 // @description  Atracos inteligentes a oasis con UI avanzada. Calcula ola óptima, lee ataque real del héroe, permite configurar tropas, elige objetivos por eficiencia. [Fix: Event Handler Logic]
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
@@ -579,42 +579,50 @@
         return false;
     }
   }
-  function parseTimeToSeconds(t) {
-    // Soporta "H:MM:SS" o "M:SS"
-    if (!t) return null;
-    const parts = t.trim().split(":").map(n => parseInt(n, 10));
-    if (parts.some(Number.isNaN)) return null;
-    if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
-    if (parts.length === 2) return parts[0]*60 + parts[1];
+
+  function decodeHtmlEntities(raw) {
+    if (!raw) return "";
+    const el = document.createElement("textarea");
+    el.innerHTML = String(raw);
+    return el.value;
+  }
+
+  // Devuelve "outbound" | "inbound" | null
+  function detectHeroDirection(text) {
+    const s = text.toLowerCase();
+    if (/on its way back|back to|de regreso|de vuelta|volviendo/.test(s)) return "inbound";
+    if (/on its way to|to raid|camino a|yendo a/.test(s)) return "outbound";
     return null;
+  }
+
+  function extractBestTimerSeconds(decoded) {
+    if (!decoded) return null;
+    let secs = null;
+
+    // 1) value="####"
+    for (const m of decoded.matchAll(/value\s*=\s*"(\d+)"/g)) {
+      const v = parseInt(m[1], 10);
+      if (Number.isFinite(v) && v > 0) secs = (secs == null) ? v : Math.min(secs, v);
+    }
+    if (secs != null) return secs;
+
+    // 2) Fallback: texto "H:MM:SS" o "M:SS"
+    for (const m of decoded.matchAll(/>\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*</g)) {
+      const parts = m[1].split(":").map(n => parseInt(n, 10));
+      let v = null;
+      if (parts.length === 3) v = parts[0]*3600 + parts[1]*60 + parts[2];
+      else if (parts.length === 2) v = parts[0]*60 + parts[1];
+      if (Number.isFinite(v) && v > 0) secs = (secs == null) ? v : Math.min(secs, v);
+    }
+    return secs;
   }
 
   // Devuelve { dir: 'outbound'|'inbound', secs: number } o null
   function extractHeroMoveInfoFromHUD(raw) {
-    if (!raw) return null;
-    const s = String(raw).toLowerCase();
-
-    // Dirección
-    let dir = null;
-    if (s.includes("on its way back")) dir = "inbound";
-    else if (s.includes("on its way to")) dir = "outbound";
-
-    // 1) Intenta leer attribute value="###" del timer
-    let m = s.match(/value\s*=\s*"(\\?\d+)"/);
-    if (!m) m = s.match(/value\s*=\s*'\\?(\d+)'/);
-    if (m) {
-      const secs = parseInt(m[1].replace("\\", ""), 10);
-      return (dir && secs > 0) ? { dir, secs } : null;
-    }
-
-    // 2) Fallback: parsear texto "0:04:22" / "4:22"
-    let t = s.match(/>\s*(\d{1,2}:\d{2}:\d{2})\s*<|>\s*(\d{1,2}:\d{2})\s*</);
-    if (t) {
-      const ts = parseTimeToSeconds(t[1] || t[2]);
-      return (dir && ts > 0) ? { dir, secs: ts } : null;
-    }
-
-    return null;
+    const decoded = decodeHtmlEntities(raw);
+    const dir = detectHeroDirection(decoded);
+    const secs = extractBestTimerSeconds(decoded);
+    return (secs != null) ? { dir, secs } : null;
   }
 
 
@@ -632,9 +640,8 @@
       const available = !running;
       const health = parseInt(data.health, 10);
 
-      // Extrae movimiento desde los tooltips del HUD
       const rawHUD = data.heroButtonTitle || data.heroStatusTitle || "";
-      const move = extractHeroMoveInfoFromHUD(rawHUD); // {dir, secs} | null
+      const move = extractHeroMoveInfoFromHUD(rawHUD); // {dir, secs} o null
 
       return { available, health, move };
     } catch (e) {
@@ -642,6 +649,7 @@
       return { available: false, health: 100, move: null };
     }
   }
+
 
 
   async function openRallyPointFor(x,y){
@@ -1047,14 +1055,17 @@
 
         let ms;
         const mv = heroStatus.move; // {dir, secs} o null
-        if (mv && mv.secs > 0) {
+        if (mv && Number.isFinite(mv.secs) && mv.secs > 0) {
           if (mv.dir === "outbound") {
-            // Va hacia el objetivo → usar ida*2 como round-trip
-            ms = (mv.secs * 2000) + 15000; // *2 + 15s buffer humano
-          } else {
-            // Viene de vuelta → ETA + aleatorio humano
-            const jitter = (10 + Math.floor(Math.random() * 31)) * 1000; // 10..40s
+            // Va hacia el objetivo → usa ida*2 + 15s buffer humano
+            ms = (mv.secs * 2000) + 15000;
+          } else if (mv.dir === "inbound") {
+            // Regresando → ETA + jitter 10..40s
+            const jitter = (10 + Math.floor(Math.random() * 31)) * 1000;
             ms = (mv.secs * 1000) + jitter;
+          } else {
+            // Dirección desconocida, pero tenemos value="####"
+            ms = (mv.secs * 1000) + 15000;
           }
         } else {
           // Fallback a tu retry normal
@@ -1066,6 +1077,7 @@
         console.groupEnd();
         return dbg;
       }
+
 
 
       // 2) Abrir punto de reunión (para máximos disponibles)
