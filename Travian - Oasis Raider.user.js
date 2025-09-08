@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      1.0.7
-// @description  Atracos inteligentes a oasis con UI avanzada. Calcula ola óptima, lee ataque real del héroe, permite configurar tropas, elige objetivos por eficiencia. [Fix: Event Handler Logic]
+// @version      1.0.8
+// @description  Atracos inteligentes a oasis con UI avanzada. Calcula ola óptima, lee ataque real del héroe, permite configurar tropas, elige objetivos por eficiencia.
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
@@ -159,7 +159,6 @@
   const getStopHp = () => USER_CONFIG.stopHp ?? CFG.STOP_HP;
   const getLossTarget = () => (USER_CONFIG.lossTarget ?? (CFG.LOSS_TARGET * 100)) / 100;
   const getRetryMs = () => (USER_CONFIG.retryMinutes ?? (CFG.RETRY_MS / 60000)) * 60000;
-  const getSelectedUnits = () => USER_CONFIG.units ?? { t1: true, t2: true, t4: true, t5: true, t6: true };
   const getSortMethod = () => USER_CONFIG.sort ?? 'animals';
   const getDistance = () => USER_CONFIG.dist ?? 20;
 
@@ -310,8 +309,78 @@
     document.body.appendChild(sidebar);
     setupUIHandlers();
     restoreUiState();
+    renderUnitsChecklist();
     uiRender();
   }
+
+
+  // Default allowed units for a tribe = all UA keys with min > 0
+  function defaultUnitsForTribe(tribe) {
+    const ua = (CFG.UNITS_ATTACK[tribe] || CFG.UNITS_ATTACK.GAUL || {});
+    const obj = {};
+    Object.keys(ua).forEach(k => { if (ua[k] > 0) obj[k] = true; });
+    return obj;
+  }
+
+  // Get/set selected units *per tribe*
+  function getSelectedUnits(tribe = (getCurrentTribe() || "GAUL").toUpperCase()) {
+    USER_CONFIG.unitsByTribe = USER_CONFIG.unitsByTribe || {};
+
+    // MIGRATION: if old USER_CONFIG.units exists, move it into the current tribe once
+    if (USER_CONFIG.units && !USER_CONFIG.unitsByTribe[tribe]) {
+      USER_CONFIG.unitsByTribe[tribe] = { ...USER_CONFIG.units };
+      delete USER_CONFIG.units;
+      localStorage.setItem(LS.USER_CFG, JSON.stringify(USER_CONFIG));
+    }
+
+    if (!USER_CONFIG.unitsByTribe[tribe]) {
+      USER_CONFIG.unitsByTribe[tribe] = defaultUnitsForTribe(tribe);
+      localStorage.setItem(LS.USER_CFG, JSON.stringify(USER_CONFIG));
+    }
+    return USER_CONFIG.unitsByTribe[tribe];
+  }
+
+  function setSelectedUnitForTribe(tribe, unit, checked) {
+    const t = tribe || (getCurrentTribe() || "GAUL").toUpperCase();
+    const map = getSelectedUnits(t);
+    map[unit] = !!checked;
+    localStorage.setItem(LS.USER_CFG, JSON.stringify(USER_CONFIG));
+  }
+
+
+  function renderUnitsChecklist() {
+    const tribe = (getCurrentTribe() || "GAUL").toUpperCase();
+    const ua = (CFG.UNITS_ATTACK[tribe] || CFG.UNITS_ATTACK.GAUL || {});
+    const groups = (typeof TRIBE_UNIT_GROUPS !== "undefined" && TRIBE_UNIT_GROUPS[tribe])
+      ? TRIBE_UNIT_GROUPS[tribe]
+      : { cav: ["t4","t5","t6"], inf: ["t3","t2","t1"] }; // fallback
+
+    // Order = cav first, then inf; only units present in UA (>0)
+    const order = [...(groups.cav||[]), ...(groups.inf||[])].filter(u => ua[u] > 0);
+
+    const wrap = document.querySelector(`#${IDs.CFG_PANEL} .units .unit-group`);
+    if (!wrap) return;
+
+    wrap.innerHTML = order.map(u => `
+      <input type="checkbox" id="or-unit-${u}" data-unit="${u}">
+      <label for="or-unit-${u}">${u.toUpperCase()}</label>
+    `).join("");
+
+    const selected = getSelectedUnits(tribe);
+    order.forEach(u => {
+      const cb = document.getElementById(`or-unit-${u}`);
+      if (cb) cb.checked = !!selected[u];
+    });
+
+    // Bind change handlers (per checkbox)
+    wrap.querySelectorAll('input[type="checkbox"][data-unit]').forEach(cb => {
+      cb.onchange = () => setSelectedUnitForTribe(tribe, cb.dataset.unit, cb.checked);
+    });
+  }
+
+
+
+
 
   function setupUIHandlers() {
     handleTabInteraction();
@@ -342,13 +411,13 @@
     const sortSelect = document.getElementById("or-sort-select");
     sortSelect.onchange = () => { USER_CONFIG.sort = sortSelect.value; saveCfg(); };
 
-    document.querySelectorAll('.units input[type="checkbox"]').forEach(cb => {
-        cb.onchange = () => {
-            if (!USER_CONFIG.units) USER_CONFIG.units = getSelectedUnits();
-            USER_CONFIG.units[cb.dataset.unit] = cb.checked;
-            saveCfg();
-        };
-    });
+    // document.querySelectorAll('.units input[type="checkbox"]').forEach(cb => {
+    //     cb.onchange = () => {
+    //         if (!USER_CONFIG.units) USER_CONFIG.units = getSelectedUnits();
+    //         USER_CONFIG.units[cb.dataset.unit] = cb.checked;
+    //         saveCfg();
+    //     };
+    // });
 
     const stopHpInput = document.getElementById("or-stophp-input");
     stopHpInput.onchange = () => { USER_CONFIG.stopHp = parseFloat(stopHpInput.value); saveCfg(); };
@@ -361,21 +430,30 @@
   }
 
   function restoreUiState() {
-      const sidebar = document.getElementById(SIDEBAR_ID);
-      if (localStorage.getItem(LS.UI_OPEN) === "1") sidebar.classList.add("open");
-      const top = localStorage.getItem(LS.TAB_POS);
-      if (top) sidebar.style.top = top;
-      document.getElementById("or-dist-select").value = getDistance();
-      document.getElementById("or-sort-select").value = getSortMethod();
-      const selectedUnits = getSelectedUnits();
-      Object.keys(selectedUnits).forEach(unit => {
-          const cb = document.getElementById(`or-unit-${unit}`);
-          if (cb) cb.checked = selectedUnits[unit];
-      });
-      document.getElementById("or-stophp-input").value = getStopHp();
-      document.getElementById("or-loss-input").value = getLossTarget() * 100;
-      document.getElementById("or-retry-input").value = getRetryMs() / 60000;
+    const sidebar = document.getElementById(SIDEBAR_ID);
+    if (localStorage.getItem(LS.UI_OPEN) === "1") sidebar.classList.add("open");
+
+    const top = localStorage.getItem(LS.TAB_POS);
+    if (top) sidebar.style.top = top;
+
+    const distSel = document.getElementById("or-dist-select");
+    if (distSel) distSel.value = String(getDistance());
+
+    const sortSel = document.getElementById("or-sort-select");
+    if (sortSel) sortSel.value = getSortMethod();
+
+    renderUnitsChecklist();
+
+    const stopHp = document.getElementById("or-stophp-input");
+    if (stopHp) stopHp.value = String(getStopHp());
+
+    const loss = document.getElementById("or-loss-input");
+    if (loss) loss.value = String(getLossTarget() * 100);
+
+    const retry = document.getElementById("or-retry-input");
+    if (retry) retry.value = String(getRetryMs() / 60000);
   }
+
 
   function handleTabInteraction() {
     const tab = document.getElementById(IDs.TOGGLE_TAB);
