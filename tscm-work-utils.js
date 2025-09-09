@@ -296,8 +296,19 @@
         const n = parseInt(s, 10);
         return Number.isFinite(n) ? n : 0;
     }
-    function getCurrentDidFromDom() { return parseIntSafe($('.villageList .listEntry.village.active')?.getAttribute('data-did')); }
-    function parseStockBar() { return { wood: parseIntSafe($("#stockBar .resource1 .value")?.textContent), clay: parseIntSafe($("#stockBar .resource2 .value")?.textContent), iron: parseIntSafe($("#stockBar .resource3 .value")?.textContent), crop: parseIntSafe($("#stockBar .resource4 .value")?.textContent) }; }
+    function getCurrentDidFromDom() {
+        const el = document.querySelector('.villageList .listEntry.village.active');
+        return el ? parseIntSafe(el.getAttribute('data-did')) : null;
+    }
+    function parseStockBar() {
+    return {
+        wood: parseIntSafe(document.querySelector("#stockBar .resource1 .value")?.textContent),
+        clay: parseIntSafe(document.querySelector("#stockBar .resource2 .value")?.textContent),
+        iron: parseIntSafe(document.querySelector("#stockBar .resource3 .value")?.textContent),
+        crop: parseIntSafe(document.querySelector("#stockBar .resource4 .value")?.textContent)
+    };
+    }
+
 
     // Exportar nombres en minúscula y camelCase por comodidad
     utils.setwork = setWork;
