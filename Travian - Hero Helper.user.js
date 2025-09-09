@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper
-// @version      1.8.0
+// @version      1.8.1
 // @namespace    tscm
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
 // @include      *://*.travian.*
@@ -10,9 +10,9 @@
 // @exclude      *://blog.travian.*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
-// @updateURL    https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
-// @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
-// @require      https://TU_HOST/tscm-work-utils.js
+// @updateURL    https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
+// @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
 // @grant        unsafeWindow
 // ==/UserScript==
 

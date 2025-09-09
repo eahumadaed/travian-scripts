@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.0.1
+// @version       2.0.3
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos, pausa manual por ataque (toggle), estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
-// @author        Edi (con mejoras de IA)
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
 // @exclude       *://support.travian.*
@@ -12,6 +11,10 @@
 // @exclude       *://*.travian.*/karte.php*
 // @grant         GM_addStyle
 // @grant        unsafeWindow
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
+// @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
+
 // ==/UserScript==
 
 

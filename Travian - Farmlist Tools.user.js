@@ -1,9 +1,7 @@
 // ==UserScript==
-// @name         🧹 Travian Farmlist Tools: Bulk Remove + Clean Duplicates (Local/Global)
-// @namespace    edinson.travian.tools
+// @name         🧹 Travian Farmlist Tools: Bulk Remove + Clean Duplicates
 // @version      1.3.1
 // @description  Delete selected slots and clean duplicate targets (by mapId) via Travian API. Local per-list mode and Global across all lists.
-// @author       Edi
 // @match       *://*.travian.*/build.php*
 // @exclude     *://*.travian.*/report*
 // @exclude     *://support.travian.*

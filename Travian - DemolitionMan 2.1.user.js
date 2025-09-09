@@ -1,8 +1,7 @@
 // ==UserScript==
-// @name         🧱 Travian - DemolitionMan 2.2 (colas + botón en edificio + intervalos dinámicos)
-// @version      2.2
+// @name         🧱 Travian - DemolitionMan
+// @version      2.3
 // @description  Cola por aldea, botón “Demoler” en la vista del edificio, intervalos dinámicos por nivel, reintentos inteligentes, sin alerts nativos, modal/toasts propios, y ocultar UI si no hay cola.
-// @author       Edi
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
 // @exclude     *://support.travian.*

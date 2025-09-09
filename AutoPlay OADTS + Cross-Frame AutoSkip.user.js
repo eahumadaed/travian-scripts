@@ -1,7 +1,6 @@
 // ==UserScript==
 // @name         ▶️ AutoPlay OADTS + Cross-Frame AutoSkip (IMA)
-// @namespace    https://edi-autoclick
-// @version      1.4.3
+// @version      1.4.5
 // @description  Autoplay en media.oadts.com y Skip Ad en iframe IMA (35s + 1 reintento a 5s) via postMessage + Reload si Chrome quita el anuncio (<20s).
 // @match        *://media.oadts.com/*
 // @match        *://imasdk.googleapis.com/*

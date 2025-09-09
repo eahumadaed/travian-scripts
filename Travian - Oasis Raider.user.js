@@ -6,9 +6,9 @@
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
-// @updateURL    https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
-// @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
-// @require      https://TU_HOST/tscm-work-utils.js
+// @updateURL    https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
+// @downloadURL  https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
+// @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
 // @grant        unsafeWindow
 // ==/UserScript==
 

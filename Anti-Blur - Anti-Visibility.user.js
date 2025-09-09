@@ -1,9 +1,7 @@
 // ==UserScript==
 // @name         🧠 Anti-Blur / Anti-Visibility
-// @namespace    https://edinson-antifocus
-// @version      1.0
+// @version      1.3
 // @description  Evita que detecten si estás fuera de la pestaña (ideal para anuncios o juegos tipo Travian)
-// @author       Edi el Oscuro
 // @match        https://*.travian.*/*
 // @grant        none
 
