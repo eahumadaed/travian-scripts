@@ -1,6 +1,7 @@
 // ==UserScript==
-// @name         🛡️ Travian Hero Helper v1.7.9
-// @version      1.7.9
+// @name         🛡️ Travian Hero Helper
+// @version      1.8.0
+// @namespace    tscm
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
 // @include      *://*.travian.*
 // @include      *://*/*.travian.*
@@ -9,14 +10,18 @@
 // @exclude      *://blog.travian.*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
-// @grant        none
 // @updateURL    https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
 // @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Hero%20Helper.user.js
+// @require      https://TU_HOST/tscm-work-utils.js
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
     "use strict";
-
+    const { tscm } = unsafeWindow;
+    const TASK = 'hero_helper';
+    const TTL  = 5 * 60 * 1000;
+    const xv = tscm.utils.guessXVersion();
     if (!document.querySelector('#stockBar .warehouse .capacity')) return;
 
     /******************************************************************
@@ -33,8 +38,6 @@
     const CROP_FLOOR = 1000;
     const MIN_GAP_FOR_CROP = 400;
     const NON_CROP_PRIORITY = [3, 1, 2];
-    const URL = "/api/v1/tooltip/quickLink";
-    const BODY = JSON.stringify({ type: "RallyPointOverview" });
 
     const getResIcon = (r) => RES_ICONS[r] || RES_ICONS[0];
 
@@ -44,11 +47,13 @@
     const logI = (m, ...extra) => console.log(`[${ts()}] [HH]`, m, ...extra);
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    function parseIntSafe(txt) {
-        const s = String(txt || "").replace(/[^\d-]/g, "");
-        const n = parseInt(s, 10);
-        return Number.isFinite(n) ? n : 0;
-    }
+    // --- Free points DOM trigger ---
+    const FP_DOM_DEBOUNCE_MS   = 1200;     // pequeña espera para evitar ráfagas
+    const FP_MIN_INTERVAL_MS   = 60 * 1000; // cooldown entre asignaciones por DOM
+    const LS_FP_LAST_KEY       = "HH_FREEPOINTS_DOM_LAST_TS";
+
+
+
 
     function baseState() {
         return {
@@ -71,35 +76,6 @@
         } catch { return baseState(); }
     }
 
-    function guessXVersion() {
-        const KEY = "tscm_xversion";
-        let localVer = localStorage.getItem(KEY);
-        let gpackVer = null;
-        try {
-            const el = document.querySelector('link[href*="gpack"], script[src*="gpack"]');
-            if (el) {
-                const url = el.href || el.src || "";
-                const match = url.match(/gpack\/([\d.]+)\//);
-                if (match) {
-                    gpackVer = match[1];
-                }
-            }
-        } catch (e) {
-            console.warn("[guessXVersion] DOM parse error:", e);
-        }
-        if (gpackVer) {
-            if (localVer !== gpackVer) {
-                localStorage.setItem(KEY, gpackVer);
-            }
-            return gpackVer;
-        }
-        if (localVer) {
-            return localVer;
-        }
-        return "228.2";
-    }
-
-    const xv = guessXVersion();
     const RES_ICONS = {
         0: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/resources_small.png",
         1: "https://cdn.legends.travian.com/gpack/"+xv+"/img_ltr/global/resources/lumber_small.png",
@@ -110,9 +86,100 @@
     /******************************************************************
      * Aldea activa / Stock
      ******************************************************************/
-    function getCurrentDidFromDom() { return parseIntSafe($('.villageList .listEntry.village.active')?.getAttribute('data-did')); }
-    function parseStockBar() { return { wood: parseIntSafe($("#stockBar .resource1 .value")?.textContent), clay: parseIntSafe($("#stockBar .resource2 .value")?.textContent), iron: parseIntSafe($("#stockBar .resource3 .value")?.textContent), crop: parseIntSafe($("#stockBar .resource4 .value")?.textContent) }; }
+
     function updateVillageStockInState(did, stock) { if (!did || !stock) return; const s = loadState(); s.villages[did] = { ...(s.villages[did] || {}), stock: stock, lastStockTs: now() }; saveState(s); logI(`💾 Cache de stock actualizado para aldea ${did}`); }
+
+
+
+    function hasFreePointsIcon() {
+        // Busca cualquier <i class="levelUp show"> visible en DOM
+        try {
+            return !!document.querySelector('i.levelUp.show');
+        } catch { return false; }
+    }
+
+    function getFpLastTs() {
+        const n = parseInt(localStorage.getItem(LS_FP_LAST_KEY) || "0", 10);
+        return Number.isFinite(n) ? n : 0;
+    }
+    function setFpLastTs(ts = Date.now()) {
+        try { localStorage.setItem(LS_FP_LAST_KEY, String(ts)); } catch {}
+    }
+    function observeFreePointsIcon() {
+        // Dispara cuando aparece o cambia clase el ícono <i.levelUp.show>
+        const root = document.body;
+        if (!root) return;
+
+        const scheduleCheck = () => {
+            if (fpDomDebounceT) clearTimeout(fpDomDebounceT);
+            fpDomDebounceT = setTimeout(async () => {
+                if (hasFreePointsIcon()) {
+                    await tryAssignFreePointsFromDom("dom-icon");
+                }
+            }, FP_DOM_DEBOUNCE_MS);
+        };
+
+        // 1) Observa cambios de atributos/clases y nodos nuevos
+        const mo = new MutationObserver((mlist) => {
+            for (const m of mlist) {
+                if (m.type === "attributes" && m.target instanceof Element) {
+                    const el = m.target;
+                    // Si el elemento observado ahora cumple el selector
+                    if (el.matches && el.matches("i.levelUp.show")) {
+                        scheduleCheck();
+                        break;
+                    }
+                }
+                if (m.type === "childList" && (m.addedNodes?.length || 0) > 0) {
+                    // Escaneo rápido sólo si se agregaron nodos
+                    if (hasFreePointsIcon()) {
+                        scheduleCheck();
+                        break;
+                    }
+                }
+            }
+        });
+        mo.observe(root, {
+            subtree: true,
+            childList: true,
+            attributes: true,
+            attributeFilter: ["class"]
+        });
+
+        // 2) Chequeo inmediato por si ya existe al cargar
+        if (hasFreePointsIcon()) scheduleCheck();
+
+        // 3) Reintenta cuando la pestaña vuelve a visible (a veces aparece al refrescar paneles)
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible" && hasFreePointsIcon()) {
+                scheduleCheck();
+            }
+        });
+
+        logI("👀 FreePoints DOM watcher activo.");
+    }
+    let fpDomDebounceT = null;
+    async function tryAssignFreePointsFromDom(reason = "dom-trigger") {
+        // Cooldown para no saturar
+        const last = getFpLastTs();
+        if (Date.now() - last < FP_MIN_INTERVAL_MS) {
+            logI(`⏳ FreePoints DOM cooldown (${Math.round((Date.now()-last)/1000)}s)`);
+            return;
+        }
+
+        // Confirma con JSON real del héroe
+        const data = await fetchHeroJson(true, reason);
+        const free = data?.hero?.freePoints | 0;
+        if (!free) {
+            logI("ℹ️ DOM sugiere freepoints, pero API dice 0. Ignorando.");
+            return;
+        }
+
+        logI(`🧩 DOM detectó levelUp.show → freePoints=${free}. Asignando...`);
+        await autoAssignFreePointsIfAny();
+        setFpLastTs(); // marca cooldown
+    }
+
 
     /******************************************************************
      * Red
@@ -133,7 +200,7 @@
     function currentProductionType(j) { return j?.hero?.productionType ?? 0; }
     function currentAttackBehaviour(j) { return j?.hero?.attackBehaviour || "hide"; }
     function heroAssignedDid(j) { return j?.heroState?.homeVillage?.id ?? null; }
-    function makeStdHeaders() { const h = { "accept": "application/json", "content-type": "application/json; charset=UTF-8", "x-requested-with": "XMLHttpRequest" }; const xv = guessXVersion(); if (xv) h["x-version"] = xv; return h; }
+    function makeStdHeaders() { const h = { "accept": "application/json", "content-type": "application/json; charset=UTF-8", "x-requested-with": "XMLHttpRequest" }; h["x-version"] = xv; return h; }
     const VILLAGES_Q = `query{ownPlayer{villages{id name resources{lumberStock clayStock ironStock cropStock}}}}`;
     async function fetchVillages() { try { const res = await fetch("/api/v1/graphql", { method: "POST", credentials: "include", headers: makeStdHeaders(), body: JSON.stringify({ query: VILLAGES_Q }) }); if (!res.ok) throw new Error(`GraphQL HTTP ${res.status}`); return (await res.json())?.data?.ownPlayer?.villages || []; } catch (e) { logI("⚠️ Error fetchVillages:", e); return []; } }
     async function getHeroVillageStockViaGraphQL(heroDid) { const v = (await fetchVillages()).find(x => (x.id | 0) === (heroDid | 0)); if (!v) return null; const r = v.resources || {}; return { wood: r.lumberStock | 0, clay: r.clayStock | 0, iron: r.ironStock | 0, crop: r.cropStock | 0 }; }
@@ -229,7 +296,7 @@
         const st = loadState();
         ui.btnAuto.textContent = st.autoMode ? "Auto: ON" : "Auto: OFF"; ui.btnAuto.classList.toggle("auto-on", st.autoMode);
         startOrUpdateCountdown();
-        const data = st.lastJson?.data || null; const didDom = getCurrentDidFromDom();
+        const data = st.lastJson?.data || null; const didDom =  tscm.utils.getCurrentDidFromDom();
         let didHero = null; let prodType = 0;
         if (data) {
             didHero = heroAssignedDid(data); prodType = currentProductionType(data);
@@ -246,15 +313,15 @@
      * Lógica Principal
      ******************************************************************/
     async function readStockSmart(data) {
-        const didHero = heroAssignedDid(data); if (!didHero) return parseStockBar();
+        const didHero = heroAssignedDid(data); if (!didHero) return tscm.utils.parseStockBar();
         const st = loadState(); const cached = st.villages?.[didHero]; const age = cached?.lastStockTs ? now() - cached.lastStockTs : Infinity;
         if (age < ONE_HOUR_MS && cached.stock) { logI(`✅ Usando stock de cache (${Math.round(age/60000)} min)`); return cached.stock; }
-        const didDom = getCurrentDidFromDom();
-        if (didDom && didDom === didHero) { logI("✅ Usando stock de HTML"); const stock = parseStockBar(); updateVillageStockInState(didHero, stock); return stock; }
+        const didDom =  tscm.utils.getCurrentDidFromDom();
+        if (didDom && didDom === didHero) { logI("✅ Usando stock de HTML"); const stock = tscm.utils.parseStockBar(); updateVillageStockInState(didHero, stock); return stock; }
         logI(`⚠️ Cache de stock viejo. Usando GraphQL...`);
         const stock = await getHeroVillageStockViaGraphQL(didHero);
         if (stock) { updateVillageStockInState(didHero, stock); return stock; }
-        logI("❌ Fallback final: usando stockBar"); return parseStockBar();
+        logI("❌ Fallback final: usando stockBar"); return tscm.utils.parseStockBar();
     }
     async function autoBalanceIfNeeded(source = "unknown") {
         const st = loadState(); if (!st.autoMode) { return; }
@@ -267,7 +334,7 @@
         const post = await postAttributesAlwaysBoth(target, currentAttackBehaviour(data));
         if (post.ok) { const s2 = loadState(); s2.cooldowns.lastAutoChange = now(); saveState(s2); await fetchHeroJson(true, "auto-post-confirm"); await repaint(); }
     }
-    async function onSelectManual() { const st = loadState(); const val = parseInt((ui.selectResource.value||"0"),10); if (st.autoMode) return; const data = await fetchHeroJson(false,"manual-select") || st.lastJson?.data; const didDom = getCurrentDidFromDom(); const didHero = heroAssignedDid(data); if (!didDom || !didHero || didDom !== didHero) { logI("🚫 Select manual fuera de aldea del héroe."); await repaint(); return; } if (!data) return; const post = await postAttributesAlwaysBoth(val, currentAttackBehaviour(data)); if (post.ok) await fetchHeroJson(true,"manual-select-post"); await repaint(); }
+    async function onSelectManual() { const st = loadState(); const val = parseInt((ui.selectResource.value||"0"),10); if (st.autoMode) return; const data = await fetchHeroJson(false,"manual-select") || st.lastJson?.data; const didDom =  tscm.utils.getCurrentDidFromDom(); const didHero = heroAssignedDid(data); if (!didDom || !didHero || didDom !== didHero) { logI("🚫 Select manual fuera de aldea del héroe."); await repaint(); return; } if (!data) return; const post = await postAttributesAlwaysBoth(val, currentAttackBehaviour(data)); if (post.ok) await fetchHeroJson(true,"manual-select-post"); await repaint(); }
     const DQ_LOCK_KEY = "HH_DQ_LOCK", DQ_LOCK_TTL = 45000; function tryAcquireLock(key = DQ_LOCK_KEY, ttl = DQ_LOCK_TTL) { try { const last = parseInt(localStorage.getItem(key) || "0", 10); if (now() - last < ttl) return false; localStorage.setItem(key, String(now())); return true; } catch { return true; } }
     async function maybeClaimDailyAndReload(){ try{ if (!/!/.test($("a.dailyQuests .indicator")?.textContent || "")) return; if (!tryAcquireLock()) return; const q=`query{ownPlayer{dailyQuests{achievedPoints rewards{id awardRedeemed points}}}}`; const dq = (await(await fetch("/api/v1/graphql",{method:"POST",credentials:"include",headers:makeStdHeaders(),body:JSON.stringify({query:q})})).json())?.data?.ownPlayer?.dailyQuests; const pending = (dq.rewards||[]).filter(r => !r.awardRedeemed && (r.points|0) <= (dq.achievedPoints|0)); if (!pending.length) return; for (const r of pending){ await fetch("/api/v1/daily-quest/award",{method:"POST",credentials:"include",headers:makeStdHeaders(),body:JSON.stringify({action:"dailyQuest",questId:r.id})}); await sleep(400); } logI("✅ DQs cobrados → recargando..."); location.reload(); }catch(e){ logI("⚠️ Error daily quests:", e); } }
 
@@ -285,11 +352,15 @@
 
             // --- Cada 2h forzamos refresh completo del juego ---
             if (elapsed >= HARD_REFRESH_EVERY_MS) {
+                const ok = await tscm.utils.setwork(TASK, TTL); // espera hasta adquirir
+                if (!ok) {
+                    return;
+                }
+                tscm.utils.cleanwork(TASK); // siempre liberar
                 location.assign("/dorf1.php"); // full reload
                 return;
             }
 
-            const xv = guessXVersion();
             await fetch(URL, {
                 method: "POST",
                 credentials: "include",
@@ -316,6 +387,8 @@
     async function init() {
         buildUI();
         observeVillageList();
+        observeFreePointsIcon(); // ← activar watcher de free points por DOM
+
         await repaint();
         if (!loadState().lastJson) { await fetchHeroJson(true, "initial"); await repaint(); }
         setTimeout(autoAssignFreePointsIfAny, 1200);

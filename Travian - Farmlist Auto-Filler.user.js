@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🧭 Farm Finder & Farmlist Filler (GraphQL only)
+// @name         🧭 Farm Finder & Farmlist Filler
 // @namespace    https://edi.travian.tools
-// @version      1.1.2
-// @description  Escanea anillos/9-puntos desde la aldea activa, filtra Natares, aldeas (con GraphQL) y OASIS vacíos (≤5 animales), y llena farmlists. UI con STOP, logs y delays humanos.
+// @version      1.1.3
+// @description  Escanea anillos/9-puntos desde la aldea activa, filtra Natares, aldeas y OASIS vacíos (≤5 animales), y llena farmlists. UI con STOP, logs y delays humanos.
 // @author       Edi
 // @match        https://*/karte.php*
 // @run-at       document-idle

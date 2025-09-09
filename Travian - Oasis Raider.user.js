@@ -1,24 +1,30 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.0
+// @version      2.0.3
+// @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
-// @grant        none
 // @updateURL    https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
 // @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
+// @require      https://TU_HOST/tscm-work-utils.js
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
   "use strict";
+  const { tscm } = unsafeWindow;
+  const TASK = 'oasis_raider';
+  const TTL  = 5 * 60 * 1000;
+  const xv = tscm.utils.guessXVersion();
 
   /******************************************************************
    * Config por defecto (overrideables desde UI)
    ******************************************************************/
   const CFG = {
     QUEUE_SIZE: 50,
-    HERO_RETURN_SPEED_BONUS: 0.29,
+    HERO_RETURN_SPEED_BONUS: 0.1,
     EXTRA_BUFFER_SEC: 200,
 
     // Defaults de usuario (se guardan en LS)
@@ -30,8 +36,8 @@
     // Unidades útiles de raideo por tribu (sin scouts/def)
     UNITS_ATTACK: {
       GAUL:   { t1: 15, t2: 60, t4: 90,  t5: 45,  t6: 130 },   // Falange, Espada, TT, Druida, Haeduan
-      TEUTON: { t1: 40, t2: 70, t3: 90,              t6: 130 },// Porra, Lanza, Hacha, Cab. Teutón
-      ROMAN:  { t1: 20,           t3: 80,            t6: 140 },// Legionario, Imperano, Caesaris
+      TEUTON: { t1: 40, t2: 70, t3: 90, t6: 130 },// Porra, Lanza, Hacha, Cab. Teutón
+      ROMAN:  { t1: 20, t3: 80, t6: 140 },// Legionario, Imperano, Caesaris
     },
 
     // Prioridad por tribu (rápidas→lentas)
@@ -71,23 +77,8 @@
   };
 
   // Mapas auxiliares para parser de animales
-  const U3X_TO_BEAST = {
-    31:"Rat",32:"Spider",33:"Snake",34:"Bat",35:"Wild Boar",36:"Wolf",
-    37:"Bear",38:"Crocodile",39:"Tiger",40:"Elephant"
-  };
-  const NAME_TO_BEAST = {
-    "rat":"Rat","spider":"Spider","snake":"Snake","bat":"Bat","wild boar":"Wild Boar","boar":"Wild Boar",
-    "wolf":"Wolf","bear":"Bear","crocodile":"Crocodile","croco":"Crocodile","tiger":"Tiger","elephant":"Elephant",
-    // español
-    "rata":"Rat","araña":"Spider","serpiente":"Snake","murciélago":"Bat","jabalí":"Wild Boar",
-    "lobo":"Wolf","oso":"Bear","cocodrilo":"Crocodile","tigre":"Tiger","elefante":"Elephant",
-  };
-  const ANIMAL_CODE_BY_NAME = {
-    "rat":"u31","spider":"u32","snake":"u33","bat":"u34","wild boar":"u35","boar":"u35",
-    "wolf":"u36","bear":"u37","crocodile":"u38","croco":"u38","tiger":"u39","elephant":"u40",
-    "rata":"u31","araña":"u32","serpiente":"u33","murciélago":"u34","jabalí":"u35",
-    "lobo":"u36","oso":"u37","cocodrilo":"u38","tigre":"u39","elefante":"u40",
-  };
+
+
 
   /******************************************************************
    * Estado + LS
@@ -157,61 +148,24 @@
   }
 
   // Auto-weapon config
-    function getWeaponsCfg() {
-        USER_CONFIG.heroAutoWeapon = USER_CONFIG.heroAutoWeapon || {
-            enabled: false,
-            prefer: { infId: null, cavId: null }
-        };
-        return USER_CONFIG.heroAutoWeapon;
-    }
-    function saveWeaponsCfg(newCfg) {
-        USER_CONFIG.heroAutoWeapon = { ...getWeaponsCfg(), ...newCfg };
-        localStorage.setItem(LS.USER_CFG, JSON.stringify(USER_CONFIG));
-    }
+  function getWeaponsCfg() {
+      USER_CONFIG.heroAutoWeapon = USER_CONFIG.heroAutoWeapon || {
+          enabled: false,
+          prefer: { infId: null, cavId: null }
+      };
+      return USER_CONFIG.heroAutoWeapon;
+  }
+  function saveWeaponsCfg(newCfg) {
+      USER_CONFIG.heroAutoWeapon = { ...getWeaponsCfg(), ...newCfg };
+      localStorage.setItem(LS.USER_CFG, JSON.stringify(USER_CONFIG));
+  }
 
 
   /******************************************************************
    * Utils
    ******************************************************************/
-  const sleep = (ms)=> new Promise(r=>setTimeout(r,ms));
   const distFields = (a,b)=> Math.hypot(a.x-b.x,a.y-b.y);
   function decodeHtmlEntities(raw){ if(!raw) return ""; const t=document.createElement("textarea"); t.innerHTML=String(raw); return t.value; }
-
-  // gpack/x-version
-  function guessXVersion(){
-    const KEY="tscm_xversion";
-    let localVer = localStorage.getItem(KEY), gpackVer=null;
-    try{
-      const el=document.querySelector('link[href*="gpack"], script[src*="gpack"]');
-      if(el){
-        const url=el.href||el.src||"";
-        const m=url.match(/gpack\/([\d.]+)\//);
-        if(m) gpackVer=m[1];
-      }
-    }catch(e){}
-    if(gpackVer){ if(localVer!==gpackVer) localStorage.setItem(KEY,gpackVer); return gpackVer; }
-    if(localVer) return localVer;
-    return "228.2";
-  }
-  const xv = guessXVersion();
-
-  // Tribu (compartido entre scripts)
-  function getCurrentTribe(){
-    const key="tscm_tribe", keyNum="tscm_tribeId";
-    const map={1:"ROMAN",2:"TEUTON",3:"GAUL"};
-    let tribe = localStorage.getItem(key);
-    if(tribe && tribe.trim()) return tribe;
-    const el=document.querySelector("#resourceFieldContainer");
-    if(el){
-      const m=(el.className||"").match(/tribe(\d+)/);
-      if(m){
-        const num=parseInt(m[1],10);
-        tribe = map[num] || null;
-        if(tribe){ localStorage.setItem(key,tribe); localStorage.setItem(keyNum,num); return tribe; }
-      }
-    }
-    return null;
-  }
 
   function tribeUA(tribe){
     const BASE = CFG.UNITS_ATTACK || {};
@@ -223,28 +177,20 @@
     return (G[tribe] || G.GAUL || { cav:["t4","t6","t5"], inf:["t2","t1"] });
   }
 
-  // Animales
-  function normAnimalKey(k){
-    if(!k) return null;
-    const s=String(k).trim().toLowerCase();
-    const m=s.match(/^[tu](\d{2})$/); if(m) return "u"+m[1];
-    const name = s.replace(/\s+/g," ");
-    if(ANIMAL_CODE_BY_NAME[name]) return ANIMAL_CODE_BY_NAME[name];
-    const noAcc = name.normalize("NFD").replace(/\p{Diacritic}/gu,"");
-    return ANIMAL_CODE_BY_NAME[noAcc] || null;
-  }
   function sumDef(oasisCounts){
+    const PAD = 10; // +10 a inf y +10 a cav por animal (buffer conservador)
     let Dinf=0, Dcav=0;
     for(const [k,cntRaw] of Object.entries(oasisCounts||{})){
       const cnt=+cntRaw||0;
-      const code=normAnimalKey(k);
+      const code=tscm.utils.normAnimalKey(k);
       const row=code?NATURE_DEF[code]:null;
       if(!row) continue;
-      Dinf += row.inf * cnt;
-      Dcav += row.cav * cnt;
+      Dinf += (row.inf + PAD) * cnt;
+      Dcav += (row.cav + PAD) * cnt;
     }
     return { Dinf, Dcav };
   }
+
   function parseAnimalsFromMapText(text){
     if(!text) return 0;
     let total=0;
@@ -260,6 +206,7 @@
     if(/on its way to|to raid|camino a|yendo a/.test(s))          return "outbound";
     return null;
   }
+
   function extractBestTimerSeconds(decoded){
     if(!decoded) return null;
     let secs=null;
@@ -275,6 +222,7 @@
     }
     return secs;
   }
+
   function extractHeroMoveInfoFromHUD(raw){
     const decoded = decodeHtmlEntities(raw||"");
     const dir = detectHeroDirection(decoded);
@@ -372,6 +320,7 @@
     if(!res.ok) throw new Error(`RP form HTTP ${res.status}`);
     return await res.text();
   }
+
   function parseMaxOfType(html, tName){
     try{
       const doc = (html && typeof html.querySelector==="function")
@@ -433,57 +382,7 @@
     if(!res.ok) throw new Error(`Confirm HTTP ${res.status}`);
   }
 
-  async function fetchOasisDetails(x,y){
-    try{
-      const res = await fetch("/api/v1/map/tile-details", {
-        method:"POST", credentials:"include",
-        headers:{
-          "accept":"application/json, text/javascript, */*; q=0.01",
-          "content-type":"application/json; charset=UTF-8",
-          "x-requested-with":"XMLHttpRequest",
-          "x-version":xv
-        },
-        body: JSON.stringify({x,y})
-      });
-      if(!res.ok){ return { counts:{} }; }
-      const data = await res.json();
-      const html = data?.html || "";
-      const doc  = new DOMParser().parseFromString(html,"text/html");
-      const troopsTable = doc.querySelector('#map_details table#troop_info:not(.rep)');
-      if(!troopsTable) return { counts:{} };
 
-      const rows = troopsTable.querySelectorAll("tbody > tr");
-      const counts = {};
-      rows.forEach(tr=>{
-        const img = tr.querySelector("td.ico img") || tr.querySelector("td.ico i");
-        const valTd = tr.querySelector("td.val");
-        if(!img||!valTd) return;
-
-        let code=null;
-        if(img.classList){
-          const uClass = Array.from(img.classList).find(c=>/^u3\d+$/.test(c));
-          if(uClass) code=parseInt(uClass.replace("u3",""),10);
-        }
-        let beast = code!=null ? U3X_TO_BEAST[code] : undefined;
-
-        if(!beast){
-          const byText = (img.getAttribute?.("title")||img.getAttribute?.("alt")||"").trim().toLowerCase();
-          const descTd = tr.querySelector("td.desc");
-          const descTx = (descTd?.textContent||"").trim().toLowerCase();
-          const key = (byText||descTx).replace(/\s+/g," ");
-          if(key){
-            for(const k of Object.keys(NAME_TO_BEAST)){ if(key.includes(k)){ beast=NAME_TO_BEAST[k]; break; } }
-          }
-        }
-        const num = parseInt((valTd.textContent||"").replace(/[^\d]/g,""),10)||0;
-        if(!beast||!num) return;
-        counts[beast]=(counts[beast]||0)+num;
-      });
-      return { counts };
-    }catch(e){
-      return { counts:{} };
-    }
-  }
 
   /******************************************************************
    * UI
@@ -738,7 +637,7 @@
     const o={}; Object.keys(ua).forEach(k=>{ if(ua[k]>0) o[k]=true; });
     return o;
   }
-  function getSelectedUnits(tribe=(getCurrentTribe()||"GAUL").toUpperCase()){
+  function getSelectedUnits(tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase()){
     USER_CONFIG.unitsByTribe = USER_CONFIG.unitsByTribe || {};
     if(USER_CONFIG.units && !USER_CONFIG.unitsByTribe[tribe]){ // migración
       USER_CONFIG.unitsByTribe[tribe] = { ...USER_CONFIG.units };
@@ -752,13 +651,13 @@
     return USER_CONFIG.unitsByTribe[tribe];
   }
   function setSelectedUnitForTribe(tribe, unit, checked){
-    const t=(tribe||(getCurrentTribe()||"GAUL").toUpperCase());
+    const t=(tribe||(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase());
     const map=getSelectedUnits(t);
     map[unit]=!!checked;
     localStorage.setItem(LS.USER_CFG, JSON.stringify(USER_CONFIG));
   }
   function renderUnitsChecklist(){
-    const tribe=(getCurrentTribe()||"GAUL").toUpperCase();
+    const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
     const ua = tribeUA(tribe);
     const groups = tribeOrder(tribe);
     const order = [...(groups.cav||[]), ...(groups.inf||[])].filter(u=>ua[u]>0);
@@ -1030,16 +929,6 @@
   /******************************************************************
    * Build de colas
    ******************************************************************/
-    function recountQueues(){
-        const withQ = STATE.queueWith || [];
-        const empQ  = STATE.queueEmpty || [];
-        const withAtt = withQ.reduce((s,o)=> s + (o && o.attacked ? 1 : 0), 0);
-        const empAtt  = empQ.reduce((s,o)=> s + (o && o.attacked ? 1 : 0), 0);
-        const withRem = Math.max(0, withQ.length - withAtt);
-        const empRem  = Math.max(0, empQ.length - empAtt);
-        return { withAtt, withRem, empAtt, empRem };
-    }
-
   async function buildOasisQueue(force=false){
     if(!force && ((STATE.queueWith?.length||0)+(STATE.queueEmpty?.length||0))>0 && STATE.stats.remaining>0) return;
     if(!STATE.currentVillage.id || force){
@@ -1088,7 +977,7 @@
   function calcLossFromRatio(R){ return Math.pow(R,1.5)/(1+Math.pow(R,1.5)); }
 
   function smartBuildWave(oasisCounts, available, opts){
-    const tribe=(getCurrentTribe()||"GAUL").toUpperCase();
+    const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
     const p = Math.min(Math.max(opts.lossTarget,0.01),0.35);
     const heroAtk = (opts.heroAttack|0);
     const BASE = tribeUA(tribe);
@@ -1165,54 +1054,54 @@
   }
 
   // Inventario armas (simple: todas rightHand; balanceo sólo si user elige ambas)
-async function fetchHeroInventory(){
-  try{
-    const res = await fetch("/api/v1/hero/v2/screen/inventory", {
-      method:"GET", credentials:"include",
-      headers:{
-        "accept":"application/json, text/javascript, */*; q=0.01",
-        "content-type":"application/json; charset=UTF-8",
-        "x-requested-with":"XMLHttpRequest",
-        "x-version": xv
-      }
-    });
-    if(!res.ok) throw new Error(`inventory HTTP ${res.status}`);
-    const data = await res.json();
-    const inv = data?.viewData || {};
-    const itemsInventory = inv.itemsInventory||[];
-    const itemsEquipped  = inv.itemsEquipped||[];
+  async function fetchHeroInventory(){
+    try{
+      const res = await fetch("/api/v1/hero/v2/screen/inventory", {
+        method:"GET", credentials:"include",
+        headers:{
+          "accept":"application/json, text/javascript, */*; q=0.01",
+          "content-type":"application/json; charset=UTF-8",
+          "x-requested-with":"XMLHttpRequest",
+          "x-version": xv
+        }
+      });
+      if(!res.ok) throw new Error(`inventory HTTP ${res.status}`);
+      const data = await res.json();
+      const inv = data?.viewData || {};
+      const itemsInventory = inv.itemsInventory||[];
+      const itemsEquipped  = inv.itemsEquipped||[];
 
-    // Armas en inventario (mano derecha)
-    const invRight = itemsInventory
-      .filter(it => it.slot === "rightHand")
-      .map(it => ({ id:+it.id, name:String(it.name||""), tier:+(it.tier||0), equipped:false }));
+      // Armas en inventario (mano derecha)
+      const invRight = itemsInventory
+        .filter(it => it.slot === "rightHand")
+        .map(it => ({ id:+it.id, name:String(it.name||""), tier:+(it.tier||0), equipped:false }));
 
-    // Arma(s) equipadas en mano derecha
-    const eqRight = itemsEquipped
-      .filter(it => it.slot === "rightHand")
-      .map(it => ({ id:+it.id, name:String(it.name||""), tier:+(it.tier||0), equipped:true }));
+      // Arma(s) equipadas en mano derecha
+      const eqRight = itemsEquipped
+        .filter(it => it.slot === "rightHand")
+        .map(it => ({ id:+it.id, name:String(it.name||""), tier:+(it.tier||0), equipped:true }));
 
-    // Combine (evitar duplicados por id, por si acaso)
-    const byId = new Map();
-    [...invRight, ...eqRight].forEach(it => { byId.set(it.id, it); });
-    const rightHand = Array.from(byId.values());
+      // Combine (evitar duplicados por id, por si acaso)
+      const byId = new Map();
+      [...invRight, ...eqRight].forEach(it => { byId.set(it.id, it); });
+      const rightHand = Array.from(byId.values());
 
-    const equippedId = eqRight.length ? eqRight[0].id : null;
+      const equippedId = eqRight.length ? eqRight[0].id : null;
 
-    STATE.heroInv = { fetchedAt: Date.now(), rightHand, equippedId };
-    saveState(STATE);
-    renderWeaponSelectors(); // refresca UI
-    return STATE.heroInv;
-  }catch(e){
-    console.warn("fetchHeroInventory:", e);
-    STATE.heroInv = { fetchedAt:Date.now(), rightHand:[], equippedId:null };
-    saveState(STATE);
-    renderWeaponSelectors();
-    return STATE.heroInv;
+      STATE.heroInv = { fetchedAt: Date.now(), rightHand, equippedId };
+      saveState(STATE);
+      renderWeaponSelectors(); // refresca UI
+      return STATE.heroInv;
+    }catch(e){
+      console.warn("fetchHeroInventory:", e);
+      STATE.heroInv = { fetchedAt:Date.now(), rightHand:[], equippedId:null };
+      saveState(STATE);
+      renderWeaponSelectors();
+      return STATE.heroInv;
+    }
   }
-}
 
-    function renderWeaponSelectors(){
+  function renderWeaponSelectors(){
         const wrap  = document.getElementById(IDs.CFG_WEAPON_WRAP);
         const en    = document.getElementById(IDs.CFG_WEAPON_ENABLE);
         const selInf= document.getElementById(IDs.CFG_WEAPON_INF);
@@ -1245,7 +1134,7 @@ async function fetchHeroInventory(){
         // Setear valores previos del usuario (si existen)
         if(wcfg.prefer?.infId) selInf.value = String(wcfg.prefer.infId);
         if(wcfg.prefer?.cavId) selCav.value = String(wcfg.prefer.cavId);
-    }
+  }
   // Si hay exactamente 1 arma y la mano está vacía → auto-equip (cuando héroe en casa)
   async function maybeAutoEquipSingleWeapon(heroStatus){
     const list=(STATE.heroInv?.rightHand)||[];
@@ -1286,103 +1175,111 @@ async function fetchHeroInventory(){
   /******************************************************************
    * Vacíos: envío sin héroe
    ******************************************************************/
-  function pickUnitForEmpty(available, tribe){
-    const order = [...(tribeOrder(tribe).cav||[]), ...(tribeOrder(tribe).inf||[])];
-    for(const u of order){ if((available[u]||0)>0) return u; }
-    return null;
+  function pickUnitForEmpty(available, tribe, perTarget){
+      const ua    = tribeUA(tribe) || {}; // tX -> ataque > 0 si es “usable”
+      const order = [
+          ...((tribeOrder(tribe).cav)||[]),
+          ...((tribeOrder(tribe).inf)||[])
+      ].filter(u => (ua[u]||0) > 0); // <-- esto saca scouts automáticamente
+
+      for (const u of order) {
+          if ((available[u]||0) >= perTarget) return u;
+      }
+      return null;
   }
 
   function randBetween(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
 
-async function trySendEmpty(oasis){
-  const tag = `[${nowStr()}] [EMPTY]`;
-  const ec  = getEmptyCfg ? getEmptyCfg() : { perTarget:5, intMin:30, intMax:120, outOfStockCooldownMs: 30*60*1000 };
-  const { x, y } = oasis || {};
-  console.group(`${tag} Try (${x}|${y})`);
+  async function trySendEmpty(oasis){
+    const tag = `[${nowStr()}] [EMPTY]`;
+    const ec  = getEmptyCfg ? getEmptyCfg() : { perTarget:5, intMin:30, intMax:120, outOfStockCooldownMs: 30*60*1000 };
+    const { x, y } = oasis || {};
+    console.group(`${tag} Try (${x}|${y})`);
 
-  try {
-    // 1) Leer stock disponible
-    log(`${tag} Opening Rally Point...`);
-    const rp = await openRallyPointFor(x,y);
-    const available = {
-      t1: parseMaxOfType(rp,"t1"),
-      t2: parseMaxOfType(rp,"t2"),
-      t3: parseMaxOfType(rp,"t3"),
-      t4: parseMaxOfType(rp,"t4"),
-      t5: parseMaxOfType(rp,"t5"),
-      t6: parseMaxOfType(rp,"t6"),
-    };
-    console.log(`${tag} Available stock:`, JSON.stringify(available));
+    try {
+      // 1) Leer stock disponible
+      log(`${tag} Opening Rally Point...`);
+      const rp = await openRallyPointFor(x,y);
+      const available = {
+        t1: parseMaxOfType(rp,"t1"),
+        t2: parseMaxOfType(rp,"t2"),
+        t3: parseMaxOfType(rp,"t3"),
+        t4: parseMaxOfType(rp,"t4"),
+        t5: parseMaxOfType(rp,"t5"),
+        t6: parseMaxOfType(rp,"t6"),
+      };
+      console.log(`${tag} Available stock:`, JSON.stringify(available));
 
-    const perTarget = Math.max(1, ec.perTarget|0);
-    const totalStock = ["t1","t2","t3","t4","t5","t6"].reduce((s,k)=> s + (available[k]||0), 0);
-    log(`${tag} perTarget=${perTarget} | totalStock=${totalStock}`);
+      const perTarget = Math.max(1, ec.perTarget|0);
+      const totalStock = ["t1","t2","t3","t4","t5","t6"].reduce((s,k)=> s + (available[k]||0), 0);
+      log(`${tag} perTarget=${perTarget} | totalStock=${totalStock}`);
 
-    // 2) SIN TROPA → pausa 30min y NO marcar el oasis
-    if (totalStock < perTarget) {
-      const cd = (ec.outOfStockCooldownMs || 30*60*1000);
-      warn(`${tag} Out of stock (total ${totalStock} < perTarget ${perTarget}). Cooldown ${(cd/60000)|0}m`);
-      scheduleNext(cd, "empty: out of stock");
-      console.groupEnd();
-      return false;
-    }
-
-    // 3) Elegir unidad preferida (rápidas→lentas) con fallback si no alcanza
-    const tribe = (getCurrentTribe() || "GAUL").toUpperCase();
-    let unit = (typeof pickUnitForEmpty === "function") ? pickUnitForEmpty(available, tribe) : null;
-    log(`${tag} pickUnitForEmpty → ${unit||"null"}`);
-
-    // Fallback manual por preferencia (rápidas→lentas)
-    if (!unit || (available[unit]||0) < perTarget) {
-      const groups = (typeof TRIBE_UNIT_GROUPS !== "undefined" && TRIBE_UNIT_GROUPS[tribe])
-        ? TRIBE_UNIT_GROUPS[tribe]
-        : { cav:["t4","t6","t5"], inf:["t2","t1","t3"] }; // fallback genérico
-
-      const pref = [...(groups.cav||[]), ...(groups.inf||[])];
-      const prevUnit = unit;
-      unit = pref.find(u => (available[u]||0) >= perTarget) || null;
-      log(`${tag} fallback unit from ${prevUnit||"null"} → ${unit||"null"}`);
-    }
-
-    // 4) Ninguna unidad alcanza perTarget para este tile → marcar tile & avanzar
-    if (!unit) {
-      warn(`${tag} No unit meets perTarget=${perTarget}. Skip this tile and short retry.`);
-      if (oasis) {
-        oasis.attacked = true;                      // Consumimos solo este tile
-        STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
-        saveState(STATE); uiRender();
-      }
-      scheduleNext(1000, "empty: no unit fits perTarget");
-      console.groupEnd();
-      return false;
-    }
-
-    const send = {}; send[unit] = perTarget;
-
-      // 5) DRY-RUN
-      if (typeof getDryRun === "function" && getDryRun()) {
-          log(`${tag} [DRY] Would send:`, JSON.stringify(send));
-          if (oasis) {
-              oasis.attacked = true;                  // <-- solo marcamos el tile
-              STATE.lastTarget = { x, y };            // <-- opcional: mantiene “Atacando (x|y)”
-              saveState(STATE);
-              uiRender();
-          }
-          const waitSec = (typeof randBetween==="function" ? randBetween(ec.intMin, ec.intMax) : 20);
-          const waitMs  = Math.max(5, waitSec|0) * 1000;
-          log(`${tag} [DRY] scheduleNext = ${waitMs/1000}s`);
-          scheduleNext(waitMs, "empty DRY-RUN interval");
-          STATE.emptyLastSentEpoch = Date.now();
-          saveState(STATE);
-          console.groupEnd();
-          return true;
+      // 2) SIN TROPA → pausa 30min y NO marcar el oasis
+      if (totalStock < perTarget) {
+        const cd = (ec.outOfStockCooldownMs || 30*60*1000);
+        warn(`${tag} Out of stock (total ${totalStock} < perTarget ${perTarget}). Cooldown ${(cd/60000)|0}m`);
+        scheduleNext(cd, "empty: out of stock");
+        console.groupEnd();
+        return false;
       }
 
-    // 6) Envío real
-    log(`${tag} Sending ${perTarget} of ${unit} → (${x}|${y})`);
-    const preview = await postPreview(x,y,send);
-    await postConfirm(preview);
-    log(`${tag} Sent OK`);
+      // 3) Elegir unidad preferida (rápidas→lentas) con fallback si no alcanza
+      const tribe = (tscm.utils.getCurrentTribe() || "GAUL").toUpperCase();
+      let unit = (typeof pickUnitForEmpty === "function") ? pickUnitForEmpty(available, tribe, perTarget) : null;
+      log(`${tag} pickUnitForEmpty → ${unit||"null"}`);
+
+        // Fallback manual por preferencia (rápidas→lentas)
+        if (!unit || (available[unit]||0) < perTarget) {
+            const groups = tribeOrder(tribe); // respeta CFG.TRIBE_UNIT_GROUPS
+            const ua = tribeUA(tribe) || {};  // <-- ¡esta línea es clave!
+
+            const pref = [...(groups.cav||[]), ...(groups.inf||[])].filter(u => (ua[u]||0) > 0);   // evita scouts/def para esa tribu
+
+            const prevUnit = unit;
+            unit = pref.find(u => (available[u]||0) >= perTarget) || null;
+            log(`${tag} fallback unit from ${prevUnit||"null"} → ${unit||"null"}`);
+        }
+
+
+      // 4) Ninguna unidad alcanza perTarget para este tile → marcar tile & avanzar
+      if (!unit) {
+        warn(`${tag} No unit meets perTarget=${perTarget}. Skip this tile and short retry.`);
+        if (oasis) {
+          oasis.attacked = true;                      // Consumimos solo este tile
+          STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+          saveState(STATE); uiRender();
+        }
+        scheduleNext(1000, "empty: no unit fits perTarget");
+        console.groupEnd();
+        return false;
+      }
+
+      const send = {}; send[unit] = perTarget;
+
+        // 5) DRY-RUN
+        if (typeof getDryRun === "function" && getDryRun()) {
+            log(`${tag} [DRY] Would send:`, JSON.stringify(send));
+            if (oasis) {
+                oasis.attacked = true;                  // <-- solo marcamos el tile
+                STATE.lastTarget = { x, y };            // <-- opcional: mantiene “Atacando (x|y)”
+                saveState(STATE);
+                uiRender();
+            }
+            const waitSec = (typeof randBetween==="function" ? randBetween(ec.intMin, ec.intMax) : 20);
+            const waitMs  = Math.max(5, waitSec|0) * 1000;
+            log(`${tag} [DRY] scheduleNext = ${waitMs/1000}s`);
+            scheduleNext(waitMs, "empty DRY-RUN interval");
+            STATE.emptyLastSentEpoch = Date.now();
+            saveState(STATE);
+            console.groupEnd();
+            return true;
+        }
+
+      // 6) Envío real
+      log(`${tag} Sending ${perTarget} of ${unit} → (${x}|${y})`);
+      const preview = await postPreview(x,y,send);
+      await postConfirm(preview);
+      log(`${tag} Sent OK`);
 
       // 7) Marcar tile + programar intervalo humano
       if (oasis) {
@@ -1398,18 +1295,18 @@ async function trySendEmpty(oasis){
       STATE.emptyLastSentEpoch = Date.now();
       saveState(STATE);
 
-    console.groupEnd();
-    return true;
+      console.groupEnd();
+      return true;
 
-  } catch(e) {
-    error(`${tag} Exception:`, e);
-    const ms = (typeof getRetryMs==="function" ? getRetryMs() : 20*60*1000);
-    log(`${tag} scheduleNext (exception) = ${ms/1000}s`);
-    scheduleNext(ms, "empty exception");
-    console.groupEnd();
-    return false;
+    } catch(e) {
+      error(`${tag} Exception:`, e);
+      const ms = (typeof getRetryMs==="function" ? getRetryMs() : 20*60*1000);
+      log(`${tag} scheduleNext (exception) = ${ms/1000}s`);
+      scheduleNext(ms, "empty exception");
+      console.groupEnd();
+      return false;
+    }
   }
-}
 
   /******************************************************************
    * Con héroe: envío
@@ -1462,13 +1359,28 @@ async function trySendEmpty(oasis){
       t6:parseMaxOfType(rp,"t6"),
     };
 
-    const { counts } = await fetchOasisDetails(x,y);
+    const { counts } = await tscm.utils.fetchOasisDetails(x,y);
     const smartInput = {
       heroAttack: STATE.heroAttack,
       lossTarget: getLossTarget(),
       allowedUnits: getSelectedUnits(),
     };
     const { send, explain } = smartBuildWave(counts, available, smartInput);
+
+    // --- Nuevo filtro: no mandar si supera el objetivo de pérdidas (según config)
+    const maxLoss = getLossTarget(); // ej: 0.02 = 2%
+    if (explain && explain.loss_est > maxLoss) {
+      warn(`[WITH] loss_est=${(explain.loss_est*100).toFixed(2)}% > target=${(maxLoss*100).toFixed(2)}% → skip`);
+      // Marcamos este oasis como “consumido” para pasar al siguiente (igual que el skip suicida)
+      if (oasis) {
+        oasis.attacked = true;
+        STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+        saveState(STATE);
+        uiRender();
+      }
+      scheduleNext(1000, "loss_est > target skip");
+      return false;
+    }
 
     // Skip suicida >=30%
     if(explain && explain.loss_est>=0.30){
@@ -1479,7 +1391,7 @@ async function trySendEmpty(oasis){
     }
 
     // Auto-weapon: single weapon equip (si aplica) y balanceo por selección
-    const tribe=(getCurrentTribe()||"GAUL").toUpperCase();
+    const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
     const UA = tribeUA(tribe);
     await maybeAutoEquipSingleWeapon(heroStatus);
     await decideAndEquipWeaponIfNeeded(send, UA, heroStatus);
@@ -1609,60 +1521,89 @@ async function trySendEmpty(oasis){
   }
 
   async function mainLoopOnce(){
-    if(!STATE.running || RUN_LOCK) return;
-    RUN_LOCK=true;
-    try{
-      if((STATE.queueWith?.length||0)+(STATE.queueEmpty?.length||0)===0 || STATE.stats.remaining===0){
+    if (!STATE.running || RUN_LOCK) return;
+    RUN_LOCK = true;
+    try {
+      // 1) Preparación de colas si están vacías
+      if (((STATE.queueWith?.length||0) + (STATE.queueEmpty?.length||0)) === 0 || STATE.stats.remaining === 0) {
         await buildOasisQueue(true);
       }
 
+      // 2) Decisión de acción
       const heroStatus = await checkHeroStatus();
       const act = pickNextAction(heroStatus);
 
-      if(act.act==="REBUILD"){
+      if (act.act === "REBUILD") {
         await buildOasisQueue(true);
-        scheduleNext(1000,"rebuild");
-        return;
-      }
-      if(act.act==="WAIT"){
-        // Espera inteligente con HUD si existe
-        let ms=getRetryMs();
-        const mv=heroStatus.move;
-        if(mv && Number.isFinite(mv.secs) && mv.secs>0){
-          if(mv.dir==="outbound") ms=(mv.secs*2000)+15000;
-          else if(mv.dir==="inbound") ms=(mv.secs*1000)+randBetween(10,40)*1000;
-          else ms=(mv.secs*1000)+15000;
-        }
-        scheduleNext(ms, "wait");
-        return;
+        return scheduleNext(1000, "rebuild");
       }
 
-      if(act.act==="SEND_WITH_HERO"){
-        const qW=STATE.queueWith||[]; const i=act.idx;
-        if(i>=0 && i<qW.length){
-          STATE.idxWith=i; saveState(STATE); uiRender();
-          await trySendTo(qW[i]);
-        }else{
-          scheduleNext(1000,"no target with");
+      if (act.act === "WAIT") {
+        let ms = getRetryMs();
+        const mv = heroStatus.move;
+        if (mv && Number.isFinite(mv.secs) && mv.secs > 0) {
+          if (mv.dir === "outbound") ms = (mv.secs*2000) + 15000;
+          else if (mv.dir === "inbound") ms = (mv.secs*1000) + randBetween(10,40)*1000;
+          else ms = (mv.secs*1000) + 15000;
         }
-        return;
+        return scheduleNext(ms, "wait");
       }
 
-      if(act.act==="SEND_EMPTY"){
-        const qE=STATE.queueEmpty||[]; const i=act.idx;
-        if(i>=0 && i<qE.length){
-          STATE.idxEmpty=i; saveState(STATE); uiRender();
-          await trySendEmpty(qE[i]);
-        }else{
-          scheduleNext(1000,"no target empty");
-        }
-        return;
+      // 3) Solo MASTER ejecuta las acciones que pisan marketplace/aldea activa
+      if (!((unsafeWindow || window).tscm?.getIsMaster?.())) {
+        return scheduleNext(2000, "not master");
       }
 
-    }finally{
-      RUN_LOCK=false;
+      // 4) Lock global inter-script para no pisarse con otros módulos
+      const ok = await tscm.utils.setwork(TASK, TTL); // espera hasta adquirir
+      if (!ok) {
+        // (Por diseño tu setwork no sale hasta tener lock; este branch casi no ocurrirá)
+        return scheduleNext(2000, "lock wait");
+      }
+
+      // (Opcional) extender periódicamente por si tarda
+      const hb = setInterval(() => tscm.utils.extendwork(TASK, TTL), 45_000);
+
+      try {
+        if (act.act === "SEND_WITH_HERO") {
+          const qW = STATE.queueWith || [];
+          const i  = act.idx;
+          if (i>=0 && i<qW.length) {
+            STATE.idxWith = i; saveState(STATE); uiRender();
+            await trySendTo(qW[i]);                   // <-- aquí haces el POST real
+            return scheduleNext(1000, "sent with");   // agenda próximo ciclo
+          } else {
+            return scheduleNext(1000, "no target with");
+          }
+        }
+
+        if (act.act === "SEND_EMPTY") {
+          const qE = STATE.queueEmpty || [];
+          const i  = act.idx;
+          if (i>=0 && i<qE.length) {
+            STATE.idxEmpty = i; saveState(STATE); uiRender();
+            await trySendEmpty(qE[i]);                // <-- POST real para vacíos
+            return scheduleNext(1000, "sent empty");
+          } else {
+            return scheduleNext(1000, "no target empty");
+          }
+        }
+
+        // Sin acción conocida
+        return scheduleNext(1500, "no action");
+      } catch (err) {
+        console.error("[OasisRaider] Send error", err);
+        return scheduleNext(30000, "error");
+      } finally {
+        clearInterval(hb);
+        tscm.utils.cleanwork(TASK); // siempre liberar
+      }
+
+    } finally {
+      RUN_LOCK = false;
     }
   }
+
 
   function onToggleRun(forceStop=false){
     STATE.running = forceStop ? false : !STATE.running;
@@ -1687,32 +1628,86 @@ async function trySendEmpty(oasis){
   }
 
   async function onSendNow(){
-    if(RUN_LOCK) return;
-    const heroStatus = await checkHeroStatus();
-    const act = pickNextAction(heroStatus);
-    if(act.act==="SEND_WITH_HERO"){
-      const qW=STATE.queueWith||[]; const i=(STATE.idxWith||-1)+1;
-      let j=i; while(j<qW.length && qW[j].attacked) j++;
-      if(j>=qW.length){ await buildOasisQueue(true); j=0; }
-      STATE.idxWith=j; const t=qW[j]; if(t) await trySendTo(t);
+    if (RUN_LOCK) { scheduleNext(1000, "busy"); return; }
+
+    // Solo MASTER ejecuta lo que pisa la aldea activa/marketplace
+    if (!((unsafeWindow || window).tscm?.getIsMaster?.())) {
+      scheduleNext(2000, "not master");
       return;
     }
-    if(act.act==="SEND_EMPTY"){
-      const qE=STATE.queueEmpty||[]; const i=(STATE.idxEmpty||-1)+1;
-      let j=i; while(j<qE.length && qE[j].attacked) j++;
-      if(j>=qE.length){ await buildOasisQueue(true); j=0; }
-      STATE.idxEmpty=j; const t=qE[j]; if(t) await trySendEmpty(t);
-      return;
+
+    RUN_LOCK = true;
+    let hb = null;
+
+    try {
+      // Lock global inter-script (espera hasta adquirir)
+      const ok = await tscm.utils.setwork(TASK, TTL);
+      if (!ok) { scheduleNext(2000, "lock wait"); return; } // (por diseño casi no se da)
+
+      // Heartbeat para extender si se alarga el envío
+      hb = setInterval(() => tscm.utils.extendwork(TASK, TTL), 45_000);
+
+      const heroStatus = await checkHeroStatus();
+      const act = pickNextAction(heroStatus);
+
+      if (act.act === "SEND_WITH_HERO") {
+        const qW = STATE.queueWith || [];
+        let j = (STATE.idxWith ?? -1) + 1;
+        while (j < qW.length && qW[j].attacked) j++;
+        if (j >= qW.length) { await buildOasisQueue(true); j = 0; }
+
+        STATE.idxWith = j; saveState(STATE); uiRender();
+        const t = qW[j];
+        if (t) {
+          await trySendTo(t);                 // <-- POST real
+          scheduleNext(1000, "manual send with hero");
+        } else {
+          scheduleNext(1000, "no target with");
+        }
+        return;
+      }
+
+      if (act.act === "SEND_EMPTY") {
+        const qE = STATE.queueEmpty || [];
+        let j = (STATE.idxEmpty ?? -1) + 1;
+        while (j < qE.length && qE[j].attacked) j++;
+        if (j >= qE.length) { await buildOasisQueue(true); j = 0; }
+
+        STATE.idxEmpty = j; saveState(STATE); uiRender();
+        const t = qE[j];
+        if (t) {
+          await trySendEmpty(t);              // <-- POST real
+          scheduleNext(1000, "manual send empty");
+        } else {
+          scheduleNext(1000, "no target empty");
+        }
+        return;
+      }
+
+      if (act.act === "REBUILD") {
+        await buildOasisQueue(true);
+        scheduleNext(1000, "manual rebuild");
+        return;
+      }
+
+      scheduleNext(getRetryMs(), "sendNow wait");
+
+    } catch (err) {
+      console.error("[OasisRaider] onSendNow error", err);
+      scheduleNext(30000, "sendNow error");
+
+    } finally {
+      if (hb) clearInterval(hb);
+      try { tscm.utils.cleanwork(TASK); } catch {}
+      RUN_LOCK = false;
     }
-    if(act.act==="REBUILD"){ await buildOasisQueue(true); scheduleNext(1000,"manual rebuild"); return; }
-    scheduleNext(getRetryMs(), "sendNow wait");
   }
 
   /******************************************************************
    * Init
    ******************************************************************/
   (async function init(){
-    log("INIT Oasis Raider v2.0.0");
+    log("INIT Oasis Raider v2.0.1");
     ensureSidebar();
     if(STATE.running){
       if(!STATE.currentVillage.id) await updateActiveVillage();
