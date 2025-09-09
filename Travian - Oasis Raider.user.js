@@ -1515,7 +1515,8 @@
       setCountdownMs(Math.max(0,left));
       if(left<=0){
         clearUiTimer();
-        mainLoopOnce().catch(e=>{ error("mainLoopOnce:", e); scheduleNext(getRetryMs(), "loop exception"); });
+        mainLoopOnce().catch(e=>{ error("mainLoopOnce:", e); 
+        scheduleNext(getRetryMs(), "loop exception"); });
       }
     },1000);
   }

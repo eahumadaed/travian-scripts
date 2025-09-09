@@ -186,7 +186,7 @@
     const maxLbl = document.createElement("label");
     maxLbl.textContent = "Distancia máx:";
     const maxSel = document.createElement("select");
-    [50, 75, 100, 150, 200].forEach(n => {
+    [10,15,20,30,35,50, 75, 100, 150, 200].forEach(n => {
       const opt = document.createElement("option");
       opt.value = String(n); opt.textContent = String(n);
       if (n === DEFAULT_MAX_DISTANCE) opt.selected = true;
