@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.3
+// @version      2.0.4
 // @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
@@ -178,7 +178,7 @@
   }
 
   function sumDef(oasisCounts){
-    const PAD = 10; // +10 a inf y +10 a cav por animal (buffer conservador)
+    const PAD = 0; // (buffer conservador)
     let Dinf=0, Dcav=0;
     for(const [k,cntRaw] of Object.entries(oasisCounts||{})){
       const cnt=+cntRaw||0;
@@ -1515,8 +1515,7 @@
       setCountdownMs(Math.max(0,left));
       if(left<=0){
         clearUiTimer();
-        mainLoopOnce().catch(e=>{ error("mainLoopOnce:", e); 
-        scheduleNext(getRetryMs(), "loop exception"); });
+        mainLoopOnce().catch(e=>{ error("mainLoopOnce:", e); scheduleNext(getRetryMs(), "loop exception"); });
       }
     },1000);
   }

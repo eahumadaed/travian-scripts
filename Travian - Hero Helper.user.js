@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper
-// @version      1.8.1
+// @version      1.8.2
 // @namespace    tscm
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
 // @include      *://*.travian.*
@@ -377,6 +377,58 @@
         }
     }
 
+    /**************************************************************
+     * AUTO-RELOAD POR INACTIVIDAD (20 min)
+     * - Reinicia el contador con actividad del usuario
+     * - Si ya estás en /dorf1.php, NO recarga
+     * - Logs con timestamp
+     **************************************************************/
+    const IDLE_RELOAD_MS = 20 * 60 * 1000; // 20 minutos
+
+    // Fallback por si no existe nowStr() en tu entorno
+    const _nowStr = (typeof nowStr === "function")
+    ? nowStr
+    : () => new Date().toLocaleString();
+
+    /**
+     * Activa el auto-reload cuando no hay actividad por 20 minutos.
+     * Se debe llamar una vez en init().
+     */
+    function setupIdleAutoReload() {
+    let lastActivity = Date.now();
+
+    const markActivity = () => {
+        lastActivity = Date.now();
+        // console.debug(`[IdleReload] ${_nowStr()} activity ✓`);
+    };
+
+    // Eventos típicos de interacción del usuario
+    const events = ["click", "keydown", "mousemove", "scroll", "touchstart", "wheel", "focus"];
+    events.forEach(ev =>
+        window.addEventListener(ev, markActivity, { passive: true, capture: false })
+    );
+
+    // Al volver a la pestaña (de background a foreground) cuenta como actividad
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) markActivity();
+    });
+
+    // Chequeo periódico (cada 30s) del tiempo ocioso
+    setInterval(() => {
+        const idle = Date.now() - lastActivity;
+        if (idle >= IDLE_RELOAD_MS) {
+        const isDorf1 = location.pathname.includes("/dorf1.php");
+        if (!isDorf1) {
+            console.log(`[IdleReload] ${_nowStr()} idle=${Math.round(idle/1000)}s → redirect /dorf1.php?reload=auto`);
+            location.assign("/dorf1.php?reload=auto");
+        } else {
+            // Ya estamos en dorf1.php → no recargamos; reseteamos el contador
+            console.log(`[IdleReload] ${_nowStr()} idle=${Math.round(idle/1000)}s, en dorf1.php → skip`);
+            lastActivity = Date.now();
+        }
+        }
+    }, 30 * 1000);
+    }
 
 
 
@@ -396,7 +448,8 @@
         await autoBalanceIfNeeded("init");
         setInterval(() => autoBalanceIfNeeded("timer"), AUTO_MIN_INTERVAL_MS + 5000);
 
-          setInterval(keepAlive, 12 * 60 * 1000); //SISTEMA ANTICAIDAS
+        setInterval(keepAlive, 12 * 60 * 1000); //SISTEMA ANTICAIDAS
+        setupIdleAutoReload();
     }
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", init); } else { init(); }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.0.3
+// @version       2.0.4
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos, pausa manual por ataque (toggle), estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -58,6 +58,7 @@
     };
   }
 
+
   // ───────────────────────────────────────────────────────────────────
   // ENDPOINTS
   // ───────────────────────────────────────────────────────────────────
@@ -96,6 +97,38 @@
 
    // Distancia para elegir INF/CAV
   const DIST_INF_MAX = 10;
+    // ── Oasis cache (evita reconsultar seguido)
+    const KEY_OASIS_CACHE = KEY_ROOT + 'oasis_cache';  // { "x,y": { ts, hasAnimals, counts } }
+    const OASIS_TTL_H = 24;                             // horas de validez del cache
+
+    function getOasisCache(){ return LS.get(KEY_OASIS_CACHE, {}) || {}; }
+    function setOasisCache(m){ LS.set(KEY_OASIS_CACHE, m); }
+
+    // suma total de animales del objeto counts
+    function sumCounts(counts){
+        let s = 0; for (const k in (counts||{})) s += counts[k]|0; return s;
+    }
+
+    // devuelve {checked, hasAnimals, counts}; usa cache y si expira consulta a la API
+    async function getOasisVerdict(x, y){
+        const key = `${x},${y}`;
+        const cache = getOasisCache();
+        const rec = cache[key];
+        const fresh = rec && (Date.now() - (rec.ts||0) < OASIS_TTL_H*3600*1000);
+        if (fresh){
+            return { checked:true, hasAnimals: !!rec.hasAnimals, counts: rec.counts||{} };
+        }
+        try{
+            //const d = await tscm.utils.fetchOasisDetails(x, y);
+            //const has = sumCounts(d?.counts) > 0;
+            const has = false;
+            cache[key] = { ts: Date.now(), hasAnimals: has, counts: d?.counts||{} };
+            setOasisCache(cache);
+            return { checked:true, hasAnimals: has, counts: d?.counts||{} };
+        }catch{
+            return { checked:false, hasAnimals:false, counts:{} };
+        }
+    }
 
   // ───────────────────────────────────────────────────────────────────
   // MULTI-TRIBE PRIORITIES & UTILITIES
@@ -420,13 +453,39 @@
     };
 
     // Build candidate list
-    const candidates = [];
-    for (const sl of slots){
-      if (!sl?.id || !sl.isActive || sl.isRunning || sl.isSpying) continue;
-      const st = readSlotState(sl.id);
-      if (isBlocked(st)) continue;
-      candidates.push(sl);
-    }
+      const updates = [];
+
+      const candidates = [];
+      for (const sl of slots){
+          if (!sl?.id || !sl.isActive || sl.isRunning || sl.isSpying) continue;
+
+          const st = readSlotState(sl.id);
+          const curIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
+
+          // 3.1) Chequeo de oasis (usa cache; si tiene animales, desactiva el slot y sigue al próximo)
+          try{
+              const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
+              const verdict = await getOasisVerdict(tx, ty);
+              if (verdict.checked && verdict.hasAnimals){
+                  // desactivar el slot para no volver a incluirlo
+                  updates.push({ listId: flId, id: sl.id, x: tx, y: ty, active: false });
+                  // opcional: marca el estado para no reintentar en lógica interna
+                  writeSlotState(sl.id, { blockedUntil: now() + 12*3600*1000, permaUntil: now() + 12*3600*1000 });
+                  continue; // no va a candidatos
+              }
+          }catch(e){ /* si falla, sigue normal */ }
+
+          // 3.2) Si el icono actual es 1, limpia bloqueos heredados
+          if (curIcon === 1 && (st.blockedUntil > now() || st.permaUntil > now())) {
+              writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
+          }
+
+          // 3.3) Respeta bloqueo vigente (si no fue limpiado)
+          if (isBlocked(readSlotState(sl.id))) continue;
+
+          candidates.push(sl);
+      }
+
 
     // Priority ordering
     function priOrder(sl){
@@ -438,8 +497,8 @@
       const outScore  = (lo.outcome==='GOOD')?0 : (lo.outcome==='MID')?1 : (lo.outcome==='LOW')?2 : 3;
       const sinceLast = now() - (st.lastSentTs||0);
       const sinceGood = now() - (st.lastGoodTs||0);
-      // prefer icon1 GOOD, then icon2 GOOD, etc. Add tie-breakers
-      return [iconScore, outScore, -sinceGood, -sinceLast];
+      const bm = sl?.lastRaid?.bootyMax|0;
+      return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
     }
     candidates.sort((a,b)=>{
       const A=priOrder(a), B=priOrder(b);
@@ -448,7 +507,6 @@
     });
 
     // Plan
-    const updates = [];
     const chosenTargets = [];
     const burstsToSchedule = []; // [{slotId, bursts}]
 
@@ -476,7 +534,19 @@
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-          writeSlotState(slotId, { lastIcon:2, lastOutcome: 'GOOD', goodStreak:(st.goodStreak|0)+1, badStreak:0, desiredCount:planned, lastSentTs: now(), lastGoodTs: now() });
+            writeSlotState(slotId, {
+                lastIcon: 2,
+                lastOutcome: 'GOOD',
+                goodStreak: (st.goodStreak | 0) + 1,
+                badStreak: 0,
+                desiredCount: planned,
+                blockedUntil: 0,
+                permaUntil: 0,
+                probation: false,
+                lastSentTs: now(),
+                lastGoodTs: now()
+            });
+
         }else{
           // Icon2 MID/LOW/ZERO → perma decay H
           const decayMs = (cfg.icon2DecayH|0)*3600*1000;
@@ -497,7 +567,7 @@
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-          writeSlotState(slotId, { lastIcon:1, lastOutcome:'GOOD', desiredCount:planned, goodStreak:(st.goodStreak|0)+1, badStreak:0, probation:false, lastSentTs: now(), lastGoodTs: now() });
+          writeSlotState(slotId, {lastIcon:1, lastOutcome:'GOOD', desiredCount:planned,goodStreak:(st.goodStreak|0)+1, badStreak:0, probation:false,blockedUntil:0, permaUntil:0,lastSentTs: now(), lastGoodTs: now()});
 
           // quick-burst plan
           if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
@@ -575,8 +645,19 @@
           if (!farmList) return;
           const sl = (farmList.slots||[]).find(s=>s.id===slotId);
           if (!sl || !sl.isActive || sl.isRunning || sl.isSpying) return;
-          const st = readSlotState(slotId);
-          if (isBlocked(st)) return;
+            const st = readSlotState(slotId);
+            const curIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
+
+            // Válvula anti-zombie: si está bloqueado pero hoy es icon1, o si pasó mucho desde el último GOOD, limpiamos bloqueo
+            if (isBlocked(st)) {
+                const muchoTiempo = (now() - (st.lastGoodTs || 0)) > 6 * 3600 * 1000; // 6h, ajustable
+                if (curIcon === 1 || muchoTiempo) {
+                    writeSlotState(slotId, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: curIcon });
+                } else {
+                    return;
+                }
+            }
+
 
           // Evaluate again if still GOOD (or at least not terrible)
           const myHistory = getHistory();
