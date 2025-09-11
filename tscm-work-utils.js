@@ -309,6 +309,292 @@
     };
     }
 
+    // Travian Report Parser (HTML string -> JSON)
+    // - Standalone, sin dependencias. Pégalo en tu librería.
+    // - Clasifica unidades por tier (t1..tn) según columna (da igual el tipo).
+    // - Soporta múltiples defensores.
+    // - Devuelve rating/score, restantes, y recomendación (re-attack y tropas necesarias).
+
+    function parseTravianReportHTML(rawHtml, userOpts = {}) {
+    // ====== Helpers ======
+    const OPTS = {
+        // Pesos/umbrales (ajústalos a gusto)
+        HERO_DEAD_PENALTY: 40,
+        LOSS_RATE_BAD: 0.50,        // >50% pérdidas = malo
+        LOSS_RATE_OK: 0.05,         // <=5% pérdidas = excelente
+        FULL_LOOT_BONUS: 35,        // botín lleno
+        FILL_RATE_WEIGHT: 30,       // peso por fillRate si no hay icono lootFull
+        OFF_RATIO_STRONG: 3.0,      // attStr >= 3x defStr
+        OFF_RATIO_OK: 1.5,
+        SAFETY_VILLAGE: 1.25,       // multiplicador de seguridad
+        SAFETY_OASIS: 1.10,
+        SAFETY_NATARS: 1.40,
+        // Escala de rating por score
+        toVerdict(score){
+        if(score >= 80) return "muy bueno";
+        if(score >= 60) return "bueno";
+        if(score >= 40) return "regular";
+        if(score >= 20) return "malo";
+        return "muy malo";
+        },
+        ...userOpts
+    };
+
+    function ts(){ const d=new Date(); return d.toISOString().replace('T',' ').split('.')[0]; }
+    function logI(msg, extra){ console.log(`[${ts()}] [INFO] ${msg}`, extra ?? ""); }
+    function logW(msg, extra){ console.warn(`[${ts()}] [WARN] ${msg}`, extra ?? ""); }
+
+    function cleanNum(txt){
+        if (txt == null) return 0;
+        const s = String(txt).replace(/\u202D|\u202C|\u200E|\u200F/g,'').trim();
+        if (s === '?' || s === '') return NaN; // para distinguir "desconocido"
+        const m = s.match(/-?\d+/g);
+        return m ? parseInt(m.join(''),10) : NaN;
+    }
+    const sum = arr => arr.reduce((a,b)=>a + (Number.isFinite(b)?b:0), 0);
+
+    // Crea DOM seguro
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(rawHtml, 'text/html');
+    const wrapper = doc.querySelector('#reportWrapper');
+    if(!wrapper){ logW('reportWrapper not found'); return null; }
+
+    // ====== Lectores ======
+    function readMeta(){
+        const subject = wrapper.querySelector('.headline .subject')?.textContent?.trim() || '';
+        const timeTxt = wrapper.querySelector('.time .text')?.textContent?.trim() || '';
+        const xTxt = wrapper.querySelector('.headline .coordinates .coordinateX')?.textContent || '';
+        const yTxt = wrapper.querySelector('.headline .coordinates .coordinateY')?.textContent || '';
+        const x = cleanNum(xTxt); const y = cleanNum(yTxt);
+
+        const defPlayer = wrapper.querySelector('.role.defender .player')?.textContent?.trim() || '';
+        let kind = 'village';
+        if (/Nature/i.test(defPlayer) || /Unoccupied oasis/i.test(subject)) kind = 'oasis';
+        if (/Natar/i.test(defPlayer)) kind = 'natars';
+
+        return { subject, timeTxt, coords: { x: isNaN(x)?null:x, y: isNaN(y)?null:y }, kind };
+    }
+
+    function readBounty(){
+        const row = wrapper.querySelector('.additionalInformation .infos tr');
+        if(!row) return { lootTotal:0, carry:0, capacity:0, fillRate:0, lootFull:false, perRes:{wood:0,clay:0,iron:0,crop:0} };
+
+        const vals = [...row.querySelectorAll('.inlineIcon.resources .value')].map(n=>cleanNum(n?.textContent));
+        const [wood=0, clay=0, iron=0, crop=0] = vals.map(v=>Number.isFinite(v)?v:0);
+        const carrySpan = row.querySelector('.inlineIcon.carry .value');
+        let carry = 0, capacity = 0, fillRate = 0;
+        if(carrySpan){
+        const s = carrySpan.textContent.replace(/\u202D|\u202C/g,'');
+        const m = s.match(/(-?\d+)\s*\/\s*(-?\d+)/);
+        if(m){ carry = cleanNum(m[1]); capacity = cleanNum(m[2]); }
+        if(Number.isFinite(carry) && Number.isFinite(capacity) && capacity>0){
+            fillRate = Math.max(0, Math.min(1, carry/capacity));
+        }
+        }
+        const lootFull = !!row.querySelector('svg[icon="lootFull"], .carry .full');
+        return { lootTotal: wood+clay+iron+crop, carry, capacity, fillRate, lootFull, perRes:{wood,clay,iron,crop} };
+    }
+
+    function readCombatStats(){
+        const tbl = wrapper.querySelector('.combatStatistic');
+        if(!tbl) return { attStr:0, defStr:0, attSupplyBefore:0, attSupplyLost:0 };
+        let attStr=0, defStr=0, attSupplyBefore=0, attSupplyLost=0;
+        tbl.querySelectorAll('tbody tr').forEach(tr=>{
+        const key = tr.querySelector('th')?.textContent?.trim().toLowerCase();
+        const vals = tr.querySelectorAll('td .value');
+        const a = cleanNum(vals[0]?.textContent); const d = cleanNum(vals[1]?.textContent);
+        if(key?.includes('combat strength')){ attStr = Number.isFinite(a)?a:0; defStr = Number.isFinite(d)?d:0; }
+        if(key?.includes('supply before')) attSupplyBefore = Number.isFinite(a)?a:0;
+        if(key?.includes('supply lost'))   attSupplyLost   = Number.isFinite(a)?a:0;
+        });
+        return { attStr, defStr, attSupplyBefore, attSupplyLost };
+    }
+
+    function readUnitsFromRole(roleEl){
+        // Busca el primer <table> "de tropas" del bloque
+        const table = roleEl.querySelector('table');
+        if(!table) return null;
+        const blocks = table.querySelectorAll('tbody.units');
+        if(blocks.length < 2) return { sent:[], lost:[], tiers:{}, tiersLost:{}, tiersRemain:{} };
+
+        const sentRow = blocks[1].querySelectorAll('td.unit');
+        const lostRow = blocks[2]?.querySelectorAll('td.unit');
+        const sent = [...sentRow].map(td => cleanNum(td.textContent));
+        const lost = lostRow?.length ? [...lostRow].map(td => cleanNum(td.textContent)) : sent.map(()=>0);
+
+        // Hero es última col si existe; marcamos muerte si lost último >0
+        const hasHeroSent = sent.length>0 && Number.isFinite(sent[sent.length-1]) && sent[sent.length-1] > 0;
+        const hasHeroLost = lost.length>0 && Number.isFinite(lost[lost.length-1]) && lost[lost.length-1] > 0;
+
+        // Tiers t1..tn (ignoramos iconos/nombres)
+        const tiers = {};
+        const tiersLost = {};
+        const tiersRemain = {};
+        for(let i=0;i<sent.length;i++){
+        const key = `t${i+1}`;
+        const s = Number.isFinite(sent[i]) ? sent[i] : null;
+        const l = Number.isFinite(lost[i]) ? lost[i] : null;
+        const r = (s!=null && l!=null) ? Math.max(0, s - l) : null;
+        tiers[key] = s;
+        tiersLost[key] = l;
+        tiersRemain[key] = r;
+        }
+
+        return {
+        sent, lost,
+        tiers, tiersLost, tiersRemain,
+        hasHeroSent, hasHeroLost
+        };
+    }
+
+    function readDefenders(){
+        const roles = [...wrapper.querySelectorAll('.role.defender')];
+        // Algunos reportes tienen 1 sólo bloque con su tabla; si hubiese varios, iteramos
+        return roles.map(r => readUnitsFromRole(r)).filter(Boolean);
+    }
+
+    function readAttacker(){
+        const role = wrapper.querySelector('.role.attacker');
+        if(!role) return null;
+        return readUnitsFromRole(role);
+    }
+
+    // ====== Cálculo principal ======
+    const meta  = readMeta();
+    const stats = readCombatStats();
+    const bounty= readBounty();
+    const atk   = readAttacker() || { sent:[], lost:[], tiers:{}, tiersLost:{}, tiersRemain:{}, hasHeroLost:false };
+    const defs  = readDefenders();
+
+    const totalSent = sum(atk.sent.map(v => Number.isFinite(v)?v:0));
+    const totalLost = sum(atk.lost.map(v => Number.isFinite(v)?v:0));
+    const lossRate  = totalSent>0 ? (totalLost / totalSent) : 0;
+
+    // Score heurístico
+    let score = 50;
+
+    // pérdidas (de -30 a 0)
+    const lr = Math.max(0, Math.min(1, lossRate));
+    score += Math.round((1 - lr) * 30) - 30;
+
+    // supply lost (si viene)
+    if (stats.attSupplyBefore > 0) {
+        const suppLoss = stats.attSupplyLost / stats.attSupplyBefore;
+        score -= Math.min(20, Math.round(suppLoss * 20));
+    }
+
+    // botín
+    if (bounty.capacity > 0) {
+        if (bounty.lootFull) score += OPTS.FULL_LOOT_BONUS;
+        else score += Math.round(bounty.fillRate * OPTS.FILL_RATE_WEIGHT);
+    } else {
+        // fallback por lootTotal
+        score += Math.min(20, Math.floor(bounty.lootTotal / 100));
+    }
+
+    // relación atacante/defensa
+    if (stats.attStr > 0) {
+        const ratio = (stats.defStr === 0) ? OPTS.OFF_RATIO_STRONG : (stats.attStr / stats.defStr);
+        if (ratio >= OPTS.OFF_RATIO_STRONG) score += 10;
+        else if (ratio >= OPTS.OFF_RATIO_OK) score += 5;
+        else if (ratio < 1) score -= 10;
+    }
+
+    // héroe muerto
+    if (atk.hasHeroLost) score -= OPTS.HERO_DEAD_PENALTY;
+
+    // afinación por tipo
+    if (meta.kind === 'oasis') {
+        if (bounty.lootFull && totalLost === 0) score += 5;
+    } else if (meta.kind === 'natars') {
+        score += Math.round((1 - lr) * 10) - 5; // -5..+5
+    }
+
+    score = Math.max(0, Math.min(100, score));
+    const rating = OPTS.toVerdict(score);
+
+    // ====== Recomendaciones ======
+    // Estrategia:
+    // 1) Si tenemos attStr/defStr: recomendar multiplicador por seguridad según tipo.
+    // 2) Si no, heurística por pérdidas/llenado.
+    let safety = OPTS.SAFETY_VILLAGE;
+    if (meta.kind === 'oasis') safety = OPTS.SAFETY_OASIS;
+    if (meta.kind === 'natars') safety = OPTS.SAFETY_NATARS;
+
+    let suggestedMultiplier = 1.0;
+    if (stats.attStr > 0) {
+        const needed = Math.max(1, (stats.defStr || 0)) * safety;
+        suggestedMultiplier = Math.max(1, needed / stats.attStr);
+    } else {
+        // Heurístico sin stats:
+        if (lossRate > OPTS.LOSS_RATE_BAD) suggestedMultiplier = 1.5; // sube 50%
+        else if (lossRate <= OPTS.LOSS_RATE_OK && !bounty.lootFull) suggestedMultiplier = 0.8; // quizá bajar tropas
+        else suggestedMultiplier = 1.0;
+    }
+
+    // Ajuste por botín: si fuiste full y pérdidas muy bajas, puedes reducir tropas de combate y subir carretas (no medimos carretas: solo sugerimos)
+    let reAttack = true;
+    let recoMsg = "Re-attack with suggested multiplier.";
+    if (rating === "muy malo") { reAttack = false; recoMsg = "Do NOT re-attack until you increase force significantly or scout again."; }
+    else if (rating === "malo") { reAttack = true; recoMsg = "Re-attack only if you can increase troops (or siege) notably, consider scouting first."; }
+
+    // Cálculo por tier: suggested = ceil(sent_i * suggestedMultiplier)
+    const suggestedPerTier = {};
+    Object.keys(atk.tiers).forEach(k=>{
+        const s = atk.tiers[k];
+        if (s == null || !Number.isFinite(s)) { suggestedPerTier[k] = null; return; }
+        suggestedPerTier[k] = Math.max(0, Math.ceil(s * suggestedMultiplier));
+    });
+
+    // Tropas restantes (si se conoce, si no -> null)
+    const tiersRemain = {};
+    Object.keys(atk.tiersRemain || {}).forEach(k=>{
+        const r = atk.tiersRemain[k];
+        tiersRemain[k] = (r==null || !Number.isFinite(r)) ? null : r;
+    });
+
+    const out = {
+        meta,
+        bounty,
+        stats,
+        attacker: {
+        tiers: atk.tiers,
+        lost: atk.tiersLost,
+        remain: tiersRemain,
+        totalSent,
+        totalLost,
+        lossRate,
+        hasHeroLost: atk.hasHeroLost
+        },
+        defenders: defs.map(df => ({
+        tiers: df.tiers,
+        lost: df.tiersLost,
+        remain: df.tiersRemain,
+        totalSent: sum(df.sent.map(v=>Number.isFinite(v)?v:0)),
+        totalLost: sum(df.lost.map(v=>Number.isFinite(v)?v:0))
+        })),
+        rating,
+        score,
+        recommendations: {
+        reAttack,
+        reason: recoMsg,
+        suggested: {
+            multiplier: Number.isFinite(suggestedMultiplier) ? Number(suggestedMultiplier.toFixed(2)) : null,
+            perTier: suggestedPerTier,
+            notes: (bounty.lootFull && lossRate <= OPTS.LOSS_RATE_OK)
+            ? "Loot was full with minimal losses: consider adding more carry capacity next time."
+            : null
+        }
+        }
+    };
+
+    logI('Report parsed (function mode)', { rating: out.rating, score: out.score, lossRate: Number(lossRate.toFixed(3)) });
+    return out;
+    }
+
+
+
+
 
     // Exportar nombres en minúscula y camelCase por comodidad
     utils.setwork = setWork;
@@ -321,7 +607,7 @@
     utils.getCurrentDidFromDom = getCurrentDidFromDom;
     utils.parseStockBar = parseStockBar;
 
-
+    utils.parseTravianReportHTML = parseTravianReportHTML;
 
     // Duplicados camelCase (alias)
     utils.setWork = setWork;

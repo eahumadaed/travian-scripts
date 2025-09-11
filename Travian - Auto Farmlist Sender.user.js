@@ -101,7 +101,10 @@
     const KEY_OASIS_CACHE = KEY_ROOT + 'oasis_cache';  // { "x,y": { ts, hasAnimals, counts } }
     const OASIS_TTL_H = 24;                             // horas de validez del cache
 
-    function getOasisCache(){ return LS.get(KEY_OASIS_CACHE, {}) || {}; }
+    function getOasisCache(){
+        //return LS.get(KEY_OASIS_CACHE, {}) || {};
+        return {};
+    }
     function setOasisCache(m){ LS.set(KEY_OASIS_CACHE, m); }
 
     // suma total de animales del objeto counts
@@ -110,23 +113,48 @@
     }
 
     // devuelve {checked, hasAnimals, counts}; usa cache y si expira consulta a la API
-    async function getOasisVerdict(x, y){
-        const key = `${x},${y}`;
-        const cache = getOasisCache();
+    async function getOasisVerdict(flId, x, y){
+        const key = `${flId}:${x},${y}`;
+        const cache = getOasisCache() || {};
         const rec = cache[key];
-        const fresh = rec && (Date.now() - (rec.ts||0) < OASIS_TTL_H*3600*1000);
-        if (fresh){
-            return { checked:true, hasAnimals: !!rec.hasAnimals, counts: rec.counts||{} };
+        const nowTs = Date.now();
+
+        // 1) Si existe y aún no vence el nextCheckTs → devolver cache (optimista)
+        if (rec && (rec.nextCheckTs|0) > nowTs){
+            console.log(new Date().toISOString(), "getOasisVerdict cache-hit BEFORE nextCheck", { key, hasAnimals: !!rec.hasAnimals, nextInMs: (rec.nextCheckTs - nowTs) });
+            return { checked: true, hasAnimals: !!rec.hasAnimals, counts: rec.counts || {} };
         }
-        try{
-            //const d = await tscm.utils.fetchOasisDetails(x, y);
-            //const has = sumCounts(d?.counts) > 0;
-            const has = false;
-            cache[key] = { ts: Date.now(), hasAnimals: has, counts: d?.counts||{} };
+
+        // 2) Si no existe en cache → sembrar optimista: NO animales y nextCheck 1–3h
+        if (!rec){
+            const nextMs = (60 + Math.floor(Math.random() * 120)) * 60 * 1000; // 1h..3h
+            cache[key] = { ts: nowTs, hasAnimals: false, counts: {}, nextCheckTs: nowTs + nextMs };
             setOasisCache(cache);
-            return { checked:true, hasAnimals: has, counts: d?.counts||{} };
-        }catch{
-            return { checked:false, hasAnimals:false, counts:{} };
+            console.log(new Date().toISOString(), "getOasisVerdict prime optimistic (no animals)", { key, nextCheckMs: nextMs });
+            return { checked: true, hasAnimals: false, counts: {} };
+        }
+
+        // 3) Existe y venció el nextCheckTs → refrescar con datos reales
+        try{
+            const d = await tscm.utils.fetchOasisDetails(x, y);
+            const counts = d?.counts || {};
+            const total = Object.values(counts).reduce((a,b)=> a + (b|0), 0);
+            const has = total > 0;
+
+            // Si hay animales → próximo chequeo en 24h; si no → 1–3h
+            const nextMs = has ? 24 * 3600 * 1000 : (60 + Math.floor(Math.random() * 120)) * 60 * 1000;
+
+            cache[key] = { ts: nowTs, hasAnimals: has, counts, nextCheckTs: nowTs + nextMs };
+            setOasisCache(cache);
+
+            console.log(new Date().toISOString(), "getOasisVerdict refreshed", { key, hasAnimals: has, counts, nextCheckMs: nextMs });
+            return { checked: true, hasAnimals: has, counts };
+        }catch(e){
+            // En error: no tocamos cache y devolvemos último conocido (checked=false para que lo sepas)
+            console.log(new Date().toISOString(), "getOasisVerdict fetch error", { key, error: (e && e.message) || e });
+            const lastHas = !!(rec && rec.hasAnimals);
+            const lastCounts = (rec && rec.counts) || {};
+            return { checked: false, hasAnimals: lastHas, counts: lastCounts };
         }
     }
 
@@ -147,38 +175,51 @@
     return LS.get(KEY_CFG_WHITELIST, d) || d;
   }
 
-  function buildPack(desired, dx, tribe, budget, cfg){
-    // cfg: { whitelist, allowFallback, allowCrossGroupFallback }
-    const wl = cfg.whitelist || getWhitelist();
-    const g = TRIBE_UNIT_GROUPS[tribe] || TRIBE_UNIT_GROUPS.GAUL;
-    const prefer = (dx <= DIST_INF_MAX) ? 'inf' : 'cav';
-    const other  = (prefer === 'inf') ? 'cav' : 'inf';
+function buildPack(desired, dx, tribe, budget, cfg){
+  console.log(new Date().toISOString(), "[buildPack] START", { desired, dx, tribe, budget: { ...budget }, cfg });
 
-    const pack = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
-    let remaining = desired|0;
+  const wl = cfg.whitelist || getWhitelist();
+  const g = TRIBE_UNIT_GROUPS[tribe] || TRIBE_UNIT_GROUPS.GAUL;
+  const prefer = (dx <= DIST_INF_MAX) ? 'inf' : 'cav';
+  const other  = (prefer === 'inf') ? 'cav' : 'inf';
 
-    function takeFrom(list){
-      for (const k of list){
-        if (!wl[k]) continue; // respetar whitelist
-        if (!budget[k] || budget[k]<=0) continue;
-        if (remaining<=0) break;
-        const can = Math.min(remaining, budget[k]|0);
-        if (can>0){ pack[k]=(pack[k]|0)+can; budget[k]-=can; remaining-=can; }
+  const pack = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+  let remaining = desired|0;
+
+  console.log("[buildPack] groups:", g);
+  console.log("[buildPack] prefer:", prefer, "other:", other);
+  console.log("[buildPack] whitelist:", wl);
+
+  function takeFrom(list, label){
+    console.log("[buildPack] takeFrom", label, "list=", list, "remaining=", remaining);
+    for (const k of list){
+      if (!wl[k]) { console.log(" - skip", k, "→ not in whitelist"); continue; }
+      if (!budget[k] || budget[k]<=0) { console.log(" - skip", k, "→ no budget"); continue; }
+      if (remaining<=0) { console.log(" - stop, remaining=0"); break; }
+
+      const can = Math.min(remaining, budget[k]|0);
+      if (can>0){
+        pack[k] = (pack[k]|0)+can;
+        budget[k]-=can;
+        remaining-=can;
+        console.log(" - took", can, k, "→ pack:", pack, "remaining:", remaining, "budget:", budget[k]);
       }
     }
-
-    // 1) Prioriza grupo preferente
-    takeFrom(g[prefer]);
-
-    // 2) Si no alcanza y se permite fallback *del mismo grupo* (ya considerado arriba)
-    //    Nota: allowFallback en realidad solo habilita usar "toda la lista" del grupo (ya lo hacemos).
-    //    Aquí interpretamos allowCrossGroupFallback para permitir pasar al otro grupo:
-    if (remaining>0 && cfg.allowCrossGroupFallback){
-      takeFrom(g[other]);
-    }
-
-    return pack;
   }
+
+  // 1) Prioriza grupo preferente
+  takeFrom(g[prefer], "prefer");
+
+  // 2) Si sobra y se permite cross-fallback
+  if (remaining>0 && cfg.allowCrossGroupFallback){
+    console.log("[buildPack] fallback to", other);
+    takeFrom(g[other], "cross");
+  }
+
+  console.log(new Date().toISOString(), "[buildPack] END → pack:", pack, "remaining:", remaining);
+  return pack;
+}
+
 
   // ───────────────────────────────────────────────────────────────────
   // DATA ACCESS
@@ -430,85 +471,120 @@
   function cfgGetInt(key, def){ const v=LS.get(key, def); const n = parseInt(v,10); return Number.isFinite(n)?n:def; }
 
   async function planForList(flId, gqlData){
+    console.log(new Date().toISOString(), "[planForList] START flId=", flId);
+
     const farmList = gqlData?.farmList;
     const slots = farmList?.slots || [];
     const history = getHistory();
     const srcX = farmList?.ownerVillage?.x|0, srcY = farmList?.ownerVillage?.y|0;
     const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
 
-    // Budget = todo (sin reservas)
     const initialBudget = { ...(farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {}) };
     const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...initialBudget };
 
-    // Config
     const wl = getWhitelist();
     const cfg = {
       whitelist: wl,
-      allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),            // mismo grupo (ya lo cubrimos listando)
-      allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),    // cav<->inf (por defecto NO)
+      allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),
+      allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),
       icon2DecayH: cfgGetInt(KEY_CFG_ICON2DECAYH, ICON2_DECAY_H),
       burstN: cfgGetInt(KEY_CFG_BURST_N, BURST_DEFAULT.n),
       burstDMin: cfgGetInt(KEY_CFG_BURST_DMIN, BURST_DEFAULT.dmin),
       burstDMax: cfgGetInt(KEY_CFG_BURST_DMAX, BURST_DEFAULT.dmax),
     };
 
-    // Build candidate list
-      const updates = [];
+    console.log("[planForList] budget:", budget);
+    console.log("[planForList] cfg:", cfg);
+    console.log("[planForList] slots count:", slots.length);
 
-      const candidates = [];
+    const updates = [];
+    const candidates = [];
+
       for (const sl of slots){
-          if (!sl?.id || !sl.isActive || sl.isRunning || sl.isSpying) continue;
+          if (!sl?.id) { /* console.log("skip slot no id", sl);*/ continue; }
+          if (!sl.isActive) { /* console.log("skip slot inactive", sl.id);*/ continue; }
+          if (sl.isRunning) { /*console.log("skip slot running", sl.id);*/ continue; }
+          if (sl.isSpying) { /* console.log("skip slot spying", sl.id);*/ continue; }
 
           const st = readSlotState(sl.id);
           const curIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
 
-          // 3.1) Chequeo de oasis (usa cache; si tiene animales, desactiva el slot y sigue al próximo)
-          try{
-              const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
-              const verdict = await getOasisVerdict(tx, ty);
-              if (verdict.checked && verdict.hasAnimals){
-                  // desactivar el slot para no volver a incluirlo
-                  updates.push({ listId: flId, id: sl.id, x: tx, y: ty, active: false });
-                  // opcional: marca el estado para no reintentar en lógica interna
-                  writeSlotState(sl.id, { blockedUntil: now() + 12*3600*1000, permaUntil: now() + 12*3600*1000 });
-                  continue; // no va a candidatos
-              }
-          }catch(e){ /* si falla, sigue normal */ }
+          // Log rápido de reportes cuando el icono es 2 o 3 (para parsear luego)
+          if (curIcon === 2 || curIcon === 3) {
+              const lr = sl?.lastRaid || {};
+              console.log("curIcon is 2/3 → report info", sl.id, {
+                  curIcon,
+                  reportId: lr.reportId,
+                  authKey: lr.authKey,
+                  time: lr.time
+              });
+          }
 
-          // 3.2) Si el icono actual es 1, limpia bloqueos heredados
+          const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
+          const ttype = sl?.target?.type|0; // 0=normal, 1=capital, 2=oasis occupied, 3=oasis free
+
+          try{
+              // --- Tratamiento por tipo de target ---
+              if (ttype === 2){
+                  // 2: Oasis ocupado → NO se ataca (skip completo)
+                  console.log("occupied oasis → skip entirely", sl.id, { type: ttype, x: tx, y: ty });
+                  continue;
+              } else if (ttype === 3){
+                  // 3: Oasis libre → verificar animales con getOasisVerdict
+                  const verdict = await getOasisVerdict(flId, tx, ty);
+                  console.log("oasis (free) verdict", sl.id, { type: ttype, verdict, x: tx, y: ty });
+                  if (verdict.checked && verdict.hasAnimals){
+                      console.log("disable slot by animals", sl.id);
+                      updates.push({ listId: flId, id: sl.id, x: tx, y: ty, active: false });
+                      writeSlotState(sl.id, { blockedUntil: now() + 12*3600*1000, permaUntil: now() + 12*3600*1000 });
+                      continue;
+                  }
+              } else {
+                  // 0/1: Aldea normal/capital → NO llamar a getOasisVerdict
+                  console.log("village target → skip verdict", sl.id, { type: ttype, x: tx, y: ty });
+              }
+          }catch(e){
+              console.log("oasis verdict error", sl.id, e);
+          }
+
+          // Limpia bloqueos heredados cuando último icono fue 1
           if (curIcon === 1 && (st.blockedUntil > now() || st.permaUntil > now())) {
+              console.log("cleaning blocks slot", sl.id);
               writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
           }
 
-          // 3.3) Respeta bloqueo vigente (si no fue limpiado)
-          if (isBlocked(readSlotState(sl.id))) continue;
+          // Respeta bloqueo vigente
+          if (isBlocked(readSlotState(sl.id))) { console.log("slot is blocked", sl.id); continue; }
 
+          console.log("candidate slot", sl.id);
           candidates.push(sl);
       }
 
+    console.log("[planForList] candidates:", candidates.map(c=>c.id));
 
-    // Priority ordering
     function priOrder(sl){
       const st=readSlotState(sl.id);
       const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
       const mySent = history[sl.id]||0;
       const lo = lootOutcome(sl.lastRaid, mySent);
-      const iconScore = (icon===1)?0 : (icon===2)?1 : 2; // 0 best
-      const outScore  = (lo.outcome==='GOOD')?0 : (lo.outcome==='MID')?1 : (lo.outcome==='LOW')?2 : 3;
       const sinceLast = now() - (st.lastSentTs||0);
       const sinceGood = now() - (st.lastGoodTs||0);
       const bm = sl?.lastRaid?.bootyMax|0;
+      const iconScore = (icon===1)?0 : (icon===2)?1 : 2;
+      const outScore  = (lo.outcome==='GOOD')?0 : (lo.outcome==='MID')?1 : (lo.outcome==='LOW')?2 : 3;
       return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
     }
+
     candidates.sort((a,b)=>{
       const A=priOrder(a), B=priOrder(b);
       for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
       return 0;
     });
 
-    // Plan
+    console.log("[planForList] ordered candidates:", candidates.map(c=>c.id));
+
     const chosenTargets = [];
-    const burstsToSchedule = []; // [{slotId, bursts}]
+    const burstsToSchedule = [];
 
     for (const sl of candidates){
       const slotId = sl.id;
@@ -518,111 +594,86 @@
       const lo = lootOutcome(sl.lastRaid, mySent);
       const dx = dist(srcX, srcY, sl?.target?.x|0, sl?.target?.y|0);
 
-      // Icon rules
-      if (lastIcon===3){ // red never sends
+      console.log("processing slot", slotId, "lastIcon", lastIcon, "outcome", lo, "dx", dx);
+
+      if (lastIcon===3){
+        console.log("skip icon3", slotId);
         writeSlotState(slotId, { lastIcon:3 });
         continue;
       }
       if (lastIcon===2){
         if (lo.outcome==='GOOD'){
-          // Icon2 GOOD → big pack & send
+          console.log("icon2 GOOD", slotId);
           const desired = Math.max(st.desiredCount||5, 10);
           const pack = buildPack(desired, dx, tribe, budget, cfg);
+          console.log("pack", pack);
           const planned = sumUnits(pack);
-          if (planned<=0){ continue; }
+          if (planned<=0){ console.log("no troops for slot", slotId); continue; }
           if (unitDiffers(sl?.troop||{}, pack)){
+            console.log("update slot", slotId, "pack", pack);
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-            writeSlotState(slotId, {
-                lastIcon: 2,
-                lastOutcome: 'GOOD',
-                goodStreak: (st.goodStreak | 0) + 1,
-                badStreak: 0,
-                desiredCount: planned,
-                blockedUntil: 0,
-                permaUntil: 0,
-                probation: false,
-                lastSentTs: now(),
-                lastGoodTs: now()
-            });
-
+          writeSlotState(slotId, { lastIcon: 2, lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
         }else{
-          // Icon2 MID/LOW/ZERO → perma decay H
+          console.log("icon2 BAD outcome", slotId, lo.outcome);
           const decayMs = (cfg.icon2DecayH|0)*3600*1000;
-          writeSlotState(slotId, { lastIcon:2, lastOutcome: lo.outcome, badStreak:(st.badStreak|0)+1, blockedUntil:0, permaUntil: now()+decayMs, probation:false });
+          writeSlotState(slotId, { lastIcon:2, lastOutcome: lo.outcome, badStreak:(st.badStreak|0)+1, permaUntil: now()+decayMs });
           continue;
         }
-      } else { // icon 1 or unknown/default
-        if (lastIcon!==1 && lastIcon!==2) writeSlotState(slotId, { lastIcon: lastIcon });
-
+      } else {
         if (lo.outcome==='GOOD'){
-          // aggressive: bump desired, enqueue burst
+          console.log("icon1 GOOD", slotId);
           const desired = Math.max( (st.desiredCount|0)+2, 5 );
           const pack = buildPack(desired, dx, tribe, budget, cfg);
+          console.log("pack", pack);
           const planned = sumUnits(pack);
-          if (planned<=0) continue;
-
+          if (planned<=0){ console.log("no troops slot", slotId); continue; }
           if (unitDiffers(sl?.troop||{}, pack)){
+            console.log("update slot", slotId);
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-          writeSlotState(slotId, {lastIcon:1, lastOutcome:'GOOD', desiredCount:planned,goodStreak:(st.goodStreak|0)+1, badStreak:0, probation:false,blockedUntil:0, permaUntil:0,lastSentTs: now(), lastGoodTs: now()});
-
-          // quick-burst plan
           if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
-
         } else if (lo.outcome==='MID'){
-          const desired = Math.max(st.desiredCount||5, 6); // suave
+          console.log("icon1 MID", slotId);
+          const desired = Math.max(st.desiredCount||5, 6);
           const pack = buildPack(desired, dx, tribe, budget, cfg);
+          console.log("pack", pack);
           const planned = sumUnits(pack);
-          if (planned<=0) continue;
-
+          if (planned<=0){ console.log("no troops slot", slotId); continue; }
           if (unitDiffers(sl?.troop||{}, pack)){
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-          writeSlotState(slotId, { lastIcon:1, lastOutcome:'MID', desiredCount:planned, goodStreak:0, badStreak:0, probation:false, lastSentTs: now() });
-
         } else if (lo.outcome==='LOW' || lo.outcome==='ZERO'){
-          // no bloquear inmediato; si es persistente y venía GOOD reciente → 1h block + probation
-          const nb = (st.badStreak|0)+1;
-          let patch = { lastIcon:1, lastOutcome:lo.outcome, badStreak: nb, goodStreak:0 };
-          if (nb>=2 && (now() - (st.lastGoodTs||0) <= 2*3600*1000)){
-            patch.blockedUntil = now()+3600*1000; // 1h
-            patch.probation = true;
-            patch.desiredCount = Math.max(5, Math.floor((st.desiredCount||5)/2));
-            writeSlotState(slotId, patch);
-            continue;
-          }
-          // aún podemos testear un envío modesto si hay presupuesto:
+          console.log("icon1 LOW/ZERO", slotId);
           const desired = Math.max(5, Math.floor((st.desiredCount||5)));
           const pack = buildPack(desired, dx, tribe, budget, cfg);
+          console.log("pack", pack);
           const planned = sumUnits(pack);
-          if (planned<=0){ writeSlotState(slotId, patch); continue; }
-
+          if (planned<=0){ console.log("no troops slot", slotId); continue; }
           if (unitDiffers(sl?.troop||{}, pack)){
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-          patch.lastSentTs = now();
-          writeSlotState(slotId, patch);
         } else {
-          // Unknown outcome → prueba básica de 5
+          console.log("icon1 UNKNOWN outcome", slotId);
           const pack = buildPack(5, dx, tribe, budget, cfg);
+          console.log("pack", pack);
           const planned = sumUnits(pack);
-          if (planned<=0) continue;
+          if (planned<=0){ console.log("no troops slot", slotId); continue; }
           if (unitDiffers(sl?.troop||{}, pack)){
             updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
           }
           chosenTargets.push(slotId);
-          writeSlotState(slotId, { lastIcon: lastIcon===1?1:lastIcon, lastOutcome:'LOW', desiredCount:planned, lastSentTs: now() });
         }
       }
     }
 
+    console.log("[planForList] END updates:", updates, "chosenTargets:", chosenTargets, "burstsToSchedule:", burstsToSchedule);
     return { updates, chosenTargets, burstsToSchedule };
-  }
+}
 
   // ───────────────────────────────────────────────────────────────────
   // QUICK BURST (icon1 GOOD) - per slot
@@ -740,6 +791,7 @@
     let plan;
     try{
       plan = await planForList(flId, gql);
+      console.log("planForList",flId, gql);
     }catch(e){
       LOG('error','Plan exception',e);
       return;
