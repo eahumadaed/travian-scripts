@@ -655,8 +655,101 @@ function parseTravianReportHTML(rawHtml, userOpts = {}) {
     return out;
     }
 
+// Mini-evaluador remoto con cache localStorage (TTL 7 días)
+// Requiere: tscm.utils.parseTravianReportHTML ya cargado en la página.
 
+// Mini-evaluador remoto con cache localStorage (TTL 7 días) + flag "barrida"
+async function fetchReportMini({ reportId, authKey, origin = location.origin, forceRefresh = false, ttlDays = 7 }) {
+  const CACHE_PREFIX = 'tscm:reportMini:';
+  const now = Date.now();
+  const TTL = Math.max(1, ttlDays) * 24 * 60 * 60 * 1000;
 
+  function gcCache() {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(CACHE_PREFIX)) continue;
+      try {
+        const raw = localStorage.getItem(k);
+        const obj = raw ? JSON.parse(raw) : null;
+        if (!obj?.ts || (now - obj.ts) > TTL) localStorage.removeItem(k);
+      } catch {
+        localStorage.removeItem(k);
+      }
+    }
+  }
+
+  gcCache();
+
+  const cacheKey = `${CACHE_PREFIX}${reportId}`;
+  if (!forceRefresh) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(cacheKey) || '');
+      if (cached && (now - cached.ts) <= TTL) return cached.data;
+    } catch {}
+  }
+
+  // Construir URL: /report?id=<reportId>|<authKey>&s=1
+  const idParam = `${reportId}${authKey?.startsWith('|') ? authKey : ('|' + (authKey ?? ''))}`;
+  const base = origin.replace(/\/$/, '');
+  const url = `${base}/report?id=${encodeURIComponent(idParam)}&s=1`;
+
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { 'accept': 'text/html,*/*' },
+    referrer: `${base}/report`
+  });
+
+  if (!res.ok) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(cacheKey) || '');
+      if (cached && (now - cached.ts) <= TTL) return cached.data;
+    } catch {}
+    throw new Error(`HTTP ${res.status} fetching report ${reportId}`);
+  }
+
+  const html = await res.text();
+
+  const parser =
+    (typeof unsafeWindow !== 'undefined' && unsafeWindow.tscm?.utils?.parseTravianReportHTML) ||
+    (typeof window !== 'undefined' && window.tscm?.utils?.parseTravianReportHTML);
+
+  if (typeof parser !== 'function') {
+    throw new Error('parseTravianReportHTML not available on tscm.utils');
+  }
+
+  const parsed = parser(html);
+  if (!parsed) throw new Error('Failed to parse report');
+
+  // Barrida: hubo defensas y terminaron en 0, sin desconocidos
+  let barrida = false;
+  if (parsed?.enemies) {
+    barrida = !!(parsed.enemies.sentTotal > 0 &&
+                 parsed.enemies.remainTotal === 0 &&
+                 parsed.enemies.anyUnknown !== true);
+  } else if (Array.isArray(parsed?.defenders) && parsed.defenders.length) {
+    // Fallback por si usas un parser previo sin "enemies"
+    const sent = parsed.defenders.reduce((a,df)=> a + (df.totalSent || 0), 0);
+    const remain = parsed.defenders.reduce((a,df)=> a + (df.totalRemain || 0), 0);
+    barrida = sent > 0 && remain === 0;
+  }
+
+  const mini = {
+    reAttack: !!parsed?.recommendations?.reAttack,
+    multiplier: parsed?.recommendations?.suggested?.multiplier ?? null,
+    rating: parsed?.rating ?? null,
+    score: parsed?.score ?? null,
+    barrida
+  };
+
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify({ ts: now, data: mini }));
+  } catch {
+    // si falla el almacenamiento (cuota), seguimos devolviendo el resultado
+  }
+
+  return mini;
+}
 
 
     // Exportar nombres en minúscula y camelCase por comodidad
@@ -671,6 +764,7 @@ function parseTravianReportHTML(rawHtml, userOpts = {}) {
     utils.parseStockBar = parseStockBar;
 
     utils.parseTravianReportHTML = parseTravianReportHTML;
+    utils.fetchReportMini = fetchReportMini;
 
     // Duplicados camelCase (alias)
     utils.setWork = setWork;
