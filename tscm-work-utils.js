@@ -315,84 +315,89 @@
     // - Soporta múltiples defensores.
     // - Devuelve rating/score, restantes, y recomendación (re-attack y tropas necesarias).
 
-    function parseTravianReportHTML(rawHtml, userOpts = {}) {
-    // ====== Helpers ======
+// v1.1 - Travian Report Parser (HTML string -> JSON)
+// Cambios: wounded como pérdida, '?' enemigo => no re-attack, heroKillLoot en bounty, reglas de multiplier.
+
+function parseTravianReportHTML(rawHtml, userOpts = {}) {
     const OPTS = {
-        // Pesos/umbrales (ajústalos a gusto)
         HERO_DEAD_PENALTY: 40,
-        LOSS_RATE_BAD: 0.50,        // >50% pérdidas = malo
-        LOSS_RATE_OK: 0.05,         // <=5% pérdidas = excelente
-        FULL_LOOT_BONUS: 35,        // botín lleno
-        FILL_RATE_WEIGHT: 30,       // peso por fillRate si no hay icono lootFull
-        OFF_RATIO_STRONG: 3.0,      // attStr >= 3x defStr
+        LOSS_RATE_BAD: 0.50,
+        LOSS_RATE_OK: 0.05,
+        FULL_LOOT_BONUS: 35,
+        FILL_RATE_WEIGHT: 30,
+        OFF_RATIO_STRONG: 3.0,
         OFF_RATIO_OK: 1.5,
-        SAFETY_VILLAGE: 1.25,       // multiplicador de seguridad
+        SAFETY_VILLAGE: 1.25,
         SAFETY_OASIS: 1.10,
         SAFETY_NATARS: 1.40,
-        // Escala de rating por score
-        toVerdict(score){
-        if(score >= 80) return "muy bueno";
-        if(score >= 60) return "bueno";
-        if(score >= 40) return "regular";
-        if(score >= 20) return "malo";
-        return "muy malo";
-        },
+        toVerdict(score){ if(score>=80) return "muy bueno"; if(score>=60) return "bueno"; if(score>=40) return "regular"; if(score>=20) return "malo"; return "muy malo"; },
         ...userOpts
     };
 
     function ts(){ const d=new Date(); return d.toISOString().replace('T',' ').split('.')[0]; }
     function logI(msg, extra){ console.log(`[${ts()}] [INFO] ${msg}`, extra ?? ""); }
     function logW(msg, extra){ console.warn(`[${ts()}] [WARN] ${msg}`, extra ?? ""); }
-
     function cleanNum(txt){
-        if (txt == null) return 0;
+        if (txt == null) return NaN;
         const s = String(txt).replace(/\u202D|\u202C|\u200E|\u200F/g,'').trim();
-        if (s === '?' || s === '') return NaN; // para distinguir "desconocido"
+        if (s === '?' || s === '') return NaN;
         const m = s.match(/-?\d+/g);
         return m ? parseInt(m.join(''),10) : NaN;
     }
     const sum = arr => arr.reduce((a,b)=>a + (Number.isFinite(b)?b:0), 0);
 
-    // Crea DOM seguro
     const parser = new DOMParser();
     const doc = parser.parseFromString(rawHtml, 'text/html');
     const wrapper = doc.querySelector('#reportWrapper');
     if(!wrapper){ logW('reportWrapper not found'); return null; }
 
-    // ====== Lectores ======
     function readMeta(){
         const subject = wrapper.querySelector('.headline .subject')?.textContent?.trim() || '';
         const timeTxt = wrapper.querySelector('.time .text')?.textContent?.trim() || '';
         const xTxt = wrapper.querySelector('.headline .coordinates .coordinateX')?.textContent || '';
         const yTxt = wrapper.querySelector('.headline .coordinates .coordinateY')?.textContent || '';
-        const x = cleanNum(xTxt); const y = cleanNum(yTxt);
-
+        const x = cleanNum(xTxt), y = cleanNum(yTxt);
         const defPlayer = wrapper.querySelector('.role.defender .player')?.textContent?.trim() || '';
         let kind = 'village';
         if (/Nature/i.test(defPlayer) || /Unoccupied oasis/i.test(subject)) kind = 'oasis';
         if (/Natar/i.test(defPlayer)) kind = 'natars';
-
-        return { subject, timeTxt, coords: { x: isNaN(x)?null:x, y: isNaN(y)?null:y }, kind };
+        return { subject, timeTxt, coords:{ x: isNaN(x)?null:x, y: isNaN(y)?null:y }, kind };
     }
 
     function readBounty(){
         const row = wrapper.querySelector('.additionalInformation .infos tr');
-        if(!row) return { lootTotal:0, carry:0, capacity:0, fillRate:0, lootFull:false, perRes:{wood:0,clay:0,iron:0,crop:0} };
-
+        let wood=0,clay=0,iron=0,crop=0, carry=0, capacity=0, fillRate=0, lootFull=false, heroKillLoot=0;
+        if(row){
         const vals = [...row.querySelectorAll('.inlineIcon.resources .value')].map(n=>cleanNum(n?.textContent));
-        const [wood=0, clay=0, iron=0, crop=0] = vals.map(v=>Number.isFinite(v)?v:0);
+        if (vals.length>=4){ [wood,clay,iron,crop] = vals.slice(0,4).map(v=>Number.isFinite(v)?v:0); }
         const carrySpan = row.querySelector('.inlineIcon.carry .value');
-        let carry = 0, capacity = 0, fillRate = 0;
         if(carrySpan){
-        const s = carrySpan.textContent.replace(/\u202D|\u202C/g,'');
-        const m = s.match(/(-?\d+)\s*\/\s*(-?\d+)/);
-        if(m){ carry = cleanNum(m[1]); capacity = cleanNum(m[2]); }
-        if(Number.isFinite(carry) && Number.isFinite(capacity) && capacity>0){
+            const s = carrySpan.textContent.replace(/\u202D|\u202C/g,'');
+            const m = s.match(/(-?\d+)\s*\/\s*(-?\d+)/);
+            if(m){ carry = cleanNum(m[1]); capacity = cleanNum(m[2]); }
+            if(Number.isFinite(carry) && Number.isFinite(capacity) && capacity>0){
             fillRate = Math.max(0, Math.min(1, carry/capacity));
+            }
+        }
+        lootFull = !!row.querySelector('svg[icon="lootFull"], .carry .full');
+
+        // BONUS: "Additional resources were added to the hero's inventory for killing animals."
+        const bonusBlock = [...row.querySelectorAll('td div')].find(d => /Additional resources.*hero.*killing animals/i.test(d.textContent || ''));
+        if (bonusBlock){
+            const bVals = [...bonusBlock.querySelectorAll('.inlineIcon.resources .value')].map(n=>cleanNum(n?.textContent));
+            if (bVals.length>=4){
+            const [bw,bc,bi,br] = bVals.map(v=>Number.isFinite(v)?v:0);
+            heroKillLoot = bw+bc+bi+br;
+            }
         }
         }
-        const lootFull = !!row.querySelector('svg[icon="lootFull"], .carry .full');
-        return { lootTotal: wood+clay+iron+crop, carry, capacity, fillRate, lootFull, perRes:{wood,clay,iron,crop} };
+        return {
+        lootTotal: wood+clay+iron+crop,
+        carry, capacity, fillRate, lootFull,
+        heroKillLoot,
+        effectiveCarry: (Number.isFinite(carry)?carry:0) + (Number.isFinite(heroKillLoot)?heroKillLoot:0),
+        perRes:{wood,clay,iron,crop}
+        };
     }
 
     function readCombatStats(){
@@ -402,7 +407,7 @@
         tbl.querySelectorAll('tbody tr').forEach(tr=>{
         const key = tr.querySelector('th')?.textContent?.trim().toLowerCase();
         const vals = tr.querySelectorAll('td .value');
-        const a = cleanNum(vals[0]?.textContent); const d = cleanNum(vals[1]?.textContent);
+        const a = cleanNum(vals[0]?.textContent), d = cleanNum(vals[1]?.textContent);
         if(key?.includes('combat strength')){ attStr = Number.isFinite(a)?a:0; defStr = Number.isFinite(d)?d:0; }
         if(key?.includes('supply before')) attSupplyBefore = Number.isFinite(a)?a:0;
         if(key?.includes('supply lost'))   attSupplyLost   = Number.isFinite(a)?a:0;
@@ -411,146 +416,193 @@
     }
 
     function readUnitsFromRole(roleEl){
-        // Busca el primer <table> "de tropas" del bloque
         const table = roleEl.querySelector('table');
         if(!table) return null;
         const blocks = table.querySelectorAll('tbody.units');
-        if(blocks.length < 2) return { sent:[], lost:[], tiers:{}, tiersLost:{}, tiersRemain:{} };
-
-        const sentRow = blocks[1].querySelectorAll('td.unit');
-        const lostRow = blocks[2]?.querySelectorAll('td.unit');
-        const sent = [...sentRow].map(td => cleanNum(td.textContent));
-        const lost = lostRow?.length ? [...lostRow].map(td => cleanNum(td.textContent)) : sent.map(()=>0);
-
-        // Hero es última col si existe; marcamos muerte si lost último >0
-        const hasHeroSent = sent.length>0 && Number.isFinite(sent[sent.length-1]) && sent[sent.length-1] > 0;
-        const hasHeroLost = lost.length>0 && Number.isFinite(lost[lost.length-1]) && lost[lost.length-1] > 0;
-
-        // Tiers t1..tn (ignoramos iconos/nombres)
-        const tiers = {};
-        const tiersLost = {};
-        const tiersRemain = {};
-        for(let i=0;i<sent.length;i++){
-        const key = `t${i+1}`;
-        const s = Number.isFinite(sent[i]) ? sent[i] : null;
-        const l = Number.isFinite(lost[i]) ? lost[i] : null;
-        const r = (s!=null && l!=null) ? Math.max(0, s - l) : null;
-        tiers[key] = s;
-        tiersLost[key] = l;
-        tiersRemain[key] = r;
+        // filas: [icons], sent, dead, wounded? (opcional)
+        let sent=[], dead=[], wounded=[];
+        if (blocks.length >= 2){
+        sent = [...blocks[1].querySelectorAll('td.unit')].map(td => cleanNum(td.textContent));
         }
+        if (blocks.length >= 3){
+        // podría ser dead o wounded, pero en layout estándar es dead
+        const isDeadRow = !!blocks[2].querySelector('i.troopDead_small');
+        const isWoundRow= !!blocks[2].querySelector('i.troopWounded_small');
+        if (isDeadRow)   dead = [...blocks[2].querySelectorAll('td.unit')].map(td => cleanNum(td.textContent));
+        if (isWoundRow)  wounded = [...blocks[2].querySelectorAll('td.unit')].map(td => cleanNum(td.textContent));
+        }
+        if (blocks.length >= 4){
+        // cuarta fila si existe (wounded)
+        const isWoundRow= !!blocks[3].querySelector('i.troopWounded_small');
+        if (isWoundRow) wounded = [...blocks[3].querySelectorAll('td.unit')].map(td => cleanNum(td.textContent));
+        else if (!dead.length) dead = [...blocks[3].querySelectorAll('td.unit')].map(td => cleanNum(td.textContent));
+        }
+        // normaliza longitudes
+        const L = Math.max(sent.length, dead.length, wounded.length);
+        const z = (arr)=> Array.from({length:L}, (_,i)=> Number.isFinite(arr[i]) ? arr[i] : 0);
+        sent = z(sent); dead = z(dead); wounded = z(wounded);
 
+        const hasHeroSent = L>0 && sent[L-1] > 0;
+        const hasHeroLost = L>0 && (dead[L-1] + wounded[L-1]) > 0;
+
+        const tiers={}, tiersDead={}, tiersWounded={}, tiersRemain={};
+        for(let i=0;i<L;i++){
+        const key = `t${i+1}`;
+        const s = sent[i];
+        const d = dead[i];
+        const w = wounded[i];
+        const r = Math.max(0, s - d - w);
+        tiers[key] = Number.isFinite(s) ? s : null;
+        tiersDead[key] = Number.isFinite(d) ? d : null;
+        tiersWounded[key] = Number.isFinite(w) ? w : null;
+        tiersRemain[key] = Number.isFinite(r) ? r : null;
+        }
         return {
-        sent, lost,
-        tiers, tiersLost, tiersRemain,
+        sent, dead, wounded,
+        tiers, tiersDead, tiersWounded, tiersRemain,
         hasHeroSent, hasHeroLost
         };
     }
 
     function readDefenders(){
         const roles = [...wrapper.querySelectorAll('.role.defender')];
-        // Algunos reportes tienen 1 sólo bloque con su tabla; si hubiese varios, iteramos
         return roles.map(r => readUnitsFromRole(r)).filter(Boolean);
     }
-
     function readAttacker(){
         const role = wrapper.querySelector('.role.attacker');
-        if(!role) return null;
-        return readUnitsFromRole(role);
+        return role ? readUnitsFromRole(role) : null;
     }
 
-    // ====== Cálculo principal ======
     const meta  = readMeta();
     const stats = readCombatStats();
     const bounty= readBounty();
-    const atk   = readAttacker() || { sent:[], lost:[], tiers:{}, tiersLost:{}, tiersRemain:{}, hasHeroLost:false };
+    const atk   = readAttacker() || { sent:[], dead:[], wounded:[], tiers:{}, tiersDead:{}, tiersWounded:{}, tiersRemain:{}, hasHeroLost:false };
     const defs  = readDefenders();
 
-    const totalSent = sum(atk.sent.map(v => Number.isFinite(v)?v:0));
-    const totalLost = sum(atk.lost.map(v => Number.isFinite(v)?v:0));
-    const lossRate  = totalSent>0 ? (totalLost / totalSent) : 0;
+    const totalSent    = sum(atk.sent);
+    const totalDead    = sum(atk.dead);
+    const totalWounded = sum(atk.wounded);
+    const totalLost    = totalDead + totalWounded;  // << heridos cuentan como pérdida
+    const totalRemain  = Math.max(0, totalSent - totalLost);
+    const lossRate     = totalSent>0 ? (totalLost / totalSent) : 0;
 
-    // Score heurístico
+    // enemigos restantes (si hay datos)
+    const defendersRemain = defs.map(df => sum(df.tiersRemain ? Object.values(df.tiersRemain).map(v=>Number.isFinite(v)?v:0) : []))
+                                .reduce((a,b)=>a+b,0);
+    const defendersSent   = defs.map(df => sum(df.tiers ? Object.values(df.tiers).map(v=>Number.isFinite(v)?v:0) : []))
+                                .reduce((a,b)=>a+b,0);
+    const anyEnemyUnknown = defs.some(df => (df.sent||[]).some(v => !Number.isFinite(v))); // hay '?'
+
+    // ---- Score heurístico (igual base + wounded) ----
     let score = 50;
-
-    // pérdidas (de -30 a 0)
     const lr = Math.max(0, Math.min(1, lossRate));
-    score += Math.round((1 - lr) * 30) - 30;
-
-    // supply lost (si viene)
+    score += Math.round((1 - lr) * 30) - 30;               // pérdidas (de -30 a 0)
     if (stats.attSupplyBefore > 0) {
         const suppLoss = stats.attSupplyLost / stats.attSupplyBefore;
         score -= Math.min(20, Math.round(suppLoss * 20));
     }
-
-    // botín
-    if (bounty.capacity > 0) {
-        if (bounty.lootFull) score += OPTS.FULL_LOOT_BONUS;
-        else score += Math.round(bounty.fillRate * OPTS.FILL_RATE_WEIGHT);
+    // botín efectivo: carry + heroKillLoot
+    const effectiveFill = (bounty.capacity>0) ? Math.max(0, Math.min(1, bounty.effectiveCarry / bounty.capacity)) : 0;
+    if (bounty.capacity > 0){
+        if (bounty.lootFull || effectiveFill >= 0.999) score += OPTS.FULL_LOOT_BONUS;
+        else score += Math.round(effectiveFill * OPTS.FILL_RATE_WEIGHT);
     } else {
-        // fallback por lootTotal
-        score += Math.min(20, Math.floor(bounty.lootTotal / 100));
+        const effLoot = (bounty.lootTotal||0) + (bounty.heroKillLoot||0);
+        score += Math.min(20, Math.floor(effLoot / 100));
     }
-
-    // relación atacante/defensa
     if (stats.attStr > 0) {
         const ratio = (stats.defStr === 0) ? OPTS.OFF_RATIO_STRONG : (stats.attStr / stats.defStr);
         if (ratio >= OPTS.OFF_RATIO_STRONG) score += 10;
         else if (ratio >= OPTS.OFF_RATIO_OK) score += 5;
         else if (ratio < 1) score -= 10;
     }
-
-    // héroe muerto
     if (atk.hasHeroLost) score -= OPTS.HERO_DEAD_PENALTY;
-
-    // afinación por tipo
-    if (meta.kind === 'oasis') {
-        if (bounty.lootFull && totalLost === 0) score += 5;
-    } else if (meta.kind === 'natars') {
-        score += Math.round((1 - lr) * 10) - 5; // -5..+5
+    if (meta.kind === 'oasis'){
+        if ((bounty.lootFull || effectiveFill >= 0.999) && totalLost===0) score += 5;
+    } else if (meta.kind === 'natars'){
+        score += Math.round((1 - lr) * 10) - 5;
     }
-
     score = Math.max(0, Math.min(100, score));
     const rating = OPTS.toVerdict(score);
 
-    // ====== Recomendaciones ======
-    // Estrategia:
-    // 1) Si tenemos attStr/defStr: recomendar multiplicador por seguridad según tipo.
-    // 2) Si no, heurística por pérdidas/llenado.
+    // ---- Reglas de MULTIPLIER ----
+    // safety por tipo (lo dejamos para fallback si usamos att/defStr)
     let safety = OPTS.SAFETY_VILLAGE;
     if (meta.kind === 'oasis') safety = OPTS.SAFETY_OASIS;
     if (meta.kind === 'natars') safety = OPTS.SAFETY_NATARS;
 
+    let reAttack = true;
     let suggestedMultiplier = 1.0;
-    if (stats.attStr > 0) {
-        const needed = Math.max(1, (stats.defStr || 0)) * safety;
-        suggestedMultiplier = Math.max(1, needed / stats.attStr);
-    } else {
-        // Heurístico sin stats:
-        if (lossRate > OPTS.LOSS_RATE_BAD) suggestedMultiplier = 1.5; // sube 50%
-        else if (lossRate <= OPTS.LOSS_RATE_OK && !bounty.lootFull) suggestedMultiplier = 0.8; // quizá bajar tropas
+
+    const wiped = (totalSent > 0 && totalRemain === 0); // wipe total
+
+    if (wiped){
+        suggestedMultiplier = 0;
+        reAttack = false;
+    } else if (anyEnemyUnknown){
+        // si viene con reporte del enemigo "?" => NO atacar
+        suggestedMultiplier = 0;
+        reAttack = false;
+    } else if (totalLost === 0){
+        // sin pérdidas: 1 o menos en base al bounty efectivo
+        if (bounty.capacity > 0){
+        if (effectiveFill < 0.25) suggestedMultiplier = 0.8;
         else suggestedMultiplier = 1.0;
+        } else {
+        // sin capacity visible: si no hubo loot efectivo, baja un poco
+        const effLoot = (bounty.lootTotal||0) + (bounty.heroKillLoot||0);
+        suggestedMultiplier = effLoot ? 1.0 : 0.9;
+        }
+    } else {
+        // hubo pérdidas
+        if (defendersSent === 0 && defendersRemain === 0){
+        // no había enemigos y aun así hubo pérdidas (trampas/eventos) => x2
+        suggestedMultiplier = 2.0;
+        } else if (defendersRemain === 0){
+        // barrido completo => x1
+        suggestedMultiplier = 1.0;
+        } else {
+        // quedaron enemigos
+        if (defendersSent > 0){
+            const frac = defendersRemain / defendersSent; // proporción restante
+            if (frac > 0.5) suggestedMultiplier = 2.0;
+            else if (frac > 0.1) suggestedMultiplier = 1.5;
+            else suggestedMultiplier = 1.0;
+        } else {
+            // sin sent conocido: regla simple por absolutos
+            if (defendersRemain >= 10) suggestedMultiplier = 2.0;
+            else if (defendersRemain >= 2) suggestedMultiplier = 1.5;
+            else suggestedMultiplier = 1.0;
+        }
+        }
     }
 
-    // Ajuste por botín: si fuiste full y pérdidas muy bajas, puedes reducir tropas de combate y subir carretas (no medimos carretas: solo sugerimos)
-    let reAttack = true;
+    // fallback por att/defStr si no caímos en reglas anteriores y stats están
+    if (reAttack && stats.attStr > 0 && stats.defStr > 0){
+        const needed = Math.max(1, stats.defStr) * safety;
+        const multByStr = Math.max(1, needed / stats.attStr);
+        // no pisamos si ya era > multByStr (más conservador); sí subimos si era menor
+        if (suggestedMultiplier < multByStr) suggestedMultiplier = Number(multByStr.toFixed(2));
+    }
+
+    // mensaje y per-tier
     let recoMsg = "Re-attack with suggested multiplier.";
-    if (rating === "muy malo") { reAttack = false; recoMsg = "Do NOT re-attack until you increase force significantly or scout again."; }
-    else if (rating === "malo") { reAttack = true; recoMsg = "Re-attack only if you can increase troops (or siege) notably, consider scouting first."; }
+    if (!reAttack){
+        if (wiped) recoMsg = "Do NOT re-attack: wipe total. Refuerza o espía antes.";
+        else if (anyEnemyUnknown) recoMsg = "Do NOT re-attack: defender counts unknown (¿?). Espía primero.";
+        else recoMsg = "Do NOT re-attack until conditions improve.";
+    } else if (defendersRemain > 0){
+        recoMsg = "Re-attack posible, pero quedaron defensas: ajusta con el multiplicador sugerido.";
+    } else if (totalLost > 0){
+        recoMsg = "Re-attack OK (barrido) pero hubo pérdidas: mantén fuerza similar.";
+    } else {
+        recoMsg = "Re-attack OK: sin pérdidas. Considera optimizar carga.";
+    }
 
-    // Cálculo por tier: suggested = ceil(sent_i * suggestedMultiplier)
     const suggestedPerTier = {};
-    Object.keys(atk.tiers).forEach(k=>{
+    Object.keys(atk.tiers || {}).forEach(k=>{
         const s = atk.tiers[k];
-        if (s == null || !Number.isFinite(s)) { suggestedPerTier[k] = null; return; }
-        suggestedPerTier[k] = Math.max(0, Math.ceil(s * suggestedMultiplier));
-    });
-
-    // Tropas restantes (si se conoce, si no -> null)
-    const tiersRemain = {};
-    Object.keys(atk.tiersRemain || {}).forEach(k=>{
-        const r = atk.tiersRemain[k];
-        tiersRemain[k] = (r==null || !Number.isFinite(r)) ? null : r;
+        suggestedPerTier[k] = (Number.isFinite(s) ? Math.max(0, Math.ceil(s * suggestedMultiplier)) : null);
     });
 
     const out = {
@@ -559,20 +611,27 @@
         stats,
         attacker: {
         tiers: atk.tiers,
-        lost: atk.tiersLost,
-        remain: tiersRemain,
-        totalSent,
-        totalLost,
-        lossRate,
+        dead: atk.tiersDead,
+        wounded: atk.tiersWounded,
+        remain: atk.tiersRemain,
+        totalSent, totalDead, totalWounded, totalLost, totalRemain, lossRate,
         hasHeroLost: atk.hasHeroLost
         },
         defenders: defs.map(df => ({
         tiers: df.tiers,
-        lost: df.tiersLost,
+        dead: df.tiersDead,
+        wounded: df.tiersWounded,
         remain: df.tiersRemain,
-        totalSent: sum(df.sent.map(v=>Number.isFinite(v)?v:0)),
-        totalLost: sum(df.lost.map(v=>Number.isFinite(v)?v:0))
+        totalSent: sum(df.sent),
+        totalDead: sum(df.dead),
+        totalWounded: sum(df.wounded),
+        totalRemain: Math.max(0, sum(df.sent) - sum(df.dead) - sum(df.wounded))
         })),
+        enemies: {
+        anyUnknown: anyEnemyUnknown,
+        sentTotal: defendersSent,
+        remainTotal: defendersRemain
+        },
         rating,
         score,
         recommendations: {
@@ -581,14 +640,18 @@
         suggested: {
             multiplier: Number.isFinite(suggestedMultiplier) ? Number(suggestedMultiplier.toFixed(2)) : null,
             perTier: suggestedPerTier,
-            notes: (bounty.lootFull && lossRate <= OPTS.LOSS_RATE_OK)
-            ? "Loot was full with minimal losses: consider adding more carry capacity next time."
-            : null
+            notes: ((bounty.lootFull || effectiveFill>=0.999) && totalLost===0)
+            ? "Loot full y sin pérdidas: agrega más capacidad de carga la próxima."
+            : (bounty.heroKillLoot>0 && bounty.carry===0 ? "Sin carry pero el héroe recibió recursos por animales: cuenta como botín." : null)
         }
         }
     };
 
-    logI('Report parsed (function mode)', { rating: out.rating, score: out.score, lossRate: Number(lossRate.toFixed(3)) });
+    logI('Report parsed v1.1', {
+        rating: out.rating, score: out.score,
+        lossRate: Number(lossRate.toFixed(3)),
+        enemiesRemain: defendersRemain, anyEnemyUnknown
+    });
     return out;
     }
 
