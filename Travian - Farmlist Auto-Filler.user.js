@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🧭 Farm Finder & Farmlist Filler (Smart Oasis)
-// @version      2.0.0
+// @version      2.0.1
 // @description  Escanea anillos/9-puntos desde la aldea activa, cachea mapa (1h), filtra Aldeas/Natares/Oasis (con o sin animales), UI con modales, exclusión por alianza, orden visual; farmlist con bloque de tropas unificado y modo inteligente para Oasis (sin héroe) con 1 GQL por lista.
 // @match        https://*/karte.php*
 // @run-at       document-idle
@@ -45,20 +45,90 @@
   const ADD_SLOT_DELAY_MS    = [100, 500];
 
   const DEBUG_VERBOSE = true;
+  const _farmTroopsCache = new Map();
+  let __ADD_FL_RUN_LOCK = false;
 
   // GQL mínimo para tropas disponibles de la aldea activa
-  const TROOPS_AT_TOWN_QUERY = `
-    query MyTroopsAtTown($did: Int!) {
-      village(id: $did) {
-        id
-        troops {
-          ownTroopsAtTown {
-            units { t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 }
-          }
+  // Usa exactamente el query que ya usa el juego (y que tú pegaste)
+const FARM_LISTS_SNAPSHOT_QUERY = `
+  query($onlyExpanded: Boolean){
+    bootstrapData{timestamp}
+    weekendWarrior{isNightTruce}
+    ownPlayer{
+      isSitter isInVacationMode beginnersProtection
+      accessRights{sendRaids}
+      banInfo{type}
+      village{id tribeId}
+      villages{id name hasRallyPoint hasHarbour tribeId}
+      abandonedFarmLists{
+        id name slotsAmount runningRaidsAmount isExpanded sortIndex lastStartedTime
+        sortField sortDirection useShip onlyLosses
+        ownerVillage{id}
+        defaultTroop{t1 t2 t3 t4 t5 t6 t7 t8 t9 t10}
+        slotStates: slots{id isActive}
+        slots(onlyExpanded: $onlyExpanded){
+          id target{id mapId x y name type population}
+          troop{t1 t2 t3 t4 t5 t6 t7 t8 t9 t10}
+          distance isActive isRunning isSpying runningAttacks nextAttackAt
+          lastRaid{reportId authKey time raidedResources{lumber clay iron crop} bootyMax icon}
+          totalBooty{booty raids}
         }
       }
     }
-  `;
+    farmLists{
+      id name slotsAmount runningRaidsAmount isExpanded sortIndex lastStartedTime
+      sortField sortDirection useShip onlyLosses
+      ownerVillage{
+        id
+        troops{
+          ownTroopsAtTown{
+            units{ t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 }
+          }
+        }
+      }
+      defaultTroop{t1 t2 t3 t4 t5 t6 t7 t8 t9 t10}
+      slotStates: slots{id isActive}
+      slots(onlyExpanded: $onlyExpanded){
+        id target{id mapId x y name type population}
+        troop{t1 t2 t3 t4 t5 t6 t7 t8 t9 t10}
+        distance isActive isRunning isSpying runningAttacks nextAttackAt
+        lastRaid{reportId authKey time raidedResources{lumber clay iron crop} bootyMax icon}
+        totalBooty{booty raids}
+      }
+    }
+    deactivatedFarmListTargets{id mapId x y name type}
+  }
+`;
+// ⚠️ TAL CUAL (no lo toques para que sea 100% legítimo)
+const FARM_LIST_TROOPS_QUERY = `
+query($id: Int!, $onlyExpanded: Boolean){
+  bootstrapData{timestamp}
+  weekendWarrior{isNightTruce}
+  farmList(id: $id){
+    id name slotsAmount runningRaidsAmount isExpanded sortIndex lastStartedTime
+    sortField sortDirection useShip onlyLosses
+    ownerVillage{
+      id
+      troops{
+        ownTroopsAtTown{
+          units{ t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 }
+        }
+      }
+    }
+    defaultTroop{ t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 }
+    slotStates: slots{ id isActive }
+    slots(onlyExpanded: $onlyExpanded){
+      id
+      target{ id mapId x y name type population }
+      troop{ t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 }
+      distance isActive isRunning isSpying runningAttacks nextAttackAt
+      lastRaid{ reportId authKey time raidedResources{ lumber clay iron crop } bootyMax icon }
+      totalBooty{ booty raids }
+    }
+  }
+}
+`;
+
 
   // GQL para player (aldeas humanas)
   const PLAYER_PROFILE_QUERY = `
@@ -128,7 +198,10 @@
     const dd = String(d.getDate()).padStart(2, "0");
     const mm = String(d.getMonth() + 1).padStart(2, "0");
     const yyyy = d.getFullYear();
-    return `${dd}-${mm}-${yyyy}`;
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mmm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${dd}-${mm}-${yyyy}-${hh}:${mmm}`;
   };
   const ts = () => {
     const d = new Date();
@@ -229,7 +302,22 @@
     const items = json?.tiles || json?.data || json || [];
     return Array.isArray(items) ? items : [];
   };
+    const KEYS_UNITS = ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"];
 
+    function normalizeUnits(u){
+        const out = Object.create(null);
+        for (const k of KEYS_UNITS) out[k] = (u && u[k]|0) || 0;
+        return out;
+    }
+    function sumUnits(u){
+        let s = 0;
+        for (const k of KEYS_UNITS) s += (u && u[k]|0);
+        return s|0;
+    }
+    function subtractUnits(pool, send){
+        for (const k of KEYS_UNITS) pool[k] = Math.max(0, (pool[k]|0) - (send && send[k]|0));
+        return pool;
+    }
   /******************************************************************
    * MAP SCAN & PARSE
    ******************************************************************/
@@ -660,7 +748,7 @@
     if(!state.rows.length){ return; }
 
     const tribe = (tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
-    const groups = (tscm.TRIBE_UNIT_GROUPS && tscm.TRIBE_UNIT_GROUPS[tribe]) || { cav:["t4","t6","t5"], inf:["t3","t1"] };
+    const groups = (tscm.utils.TRIBE_UNIT_GROUPS && tscm.utils.TRIBE_UNIT_GROUPS[tribe]) || { cav:["t4","t6","t5"], inf:["t2","t1"] };
 
     const saved = lsGetJSON(LS.TROOPS_BY_TRIBE, {});
     const byTribe = saved[tribe] || {};
@@ -698,6 +786,7 @@
     `;
 
     UI.modalOk.onclick = async () => {
+        console.log("onclick modalOK");
       // recolectar selección
       const map = {};
       UI.modalBody.querySelectorAll(".ff_u_on").forEach(chk=>{
@@ -1064,17 +1153,52 @@
 
   async function getAvailableTroopsSnapshot(did){
     try{
-      const data = await gqlFetch(TROOPS_AT_TOWN_QUERY, { did: Number(did) });
-      const units = data?.village?.troops?.ownTroopsAtTown?.units;
-      if(!units) throw new Error("GQL tropas vacío");
-      // normaliza a t1..t10 ints
+      // Importantísimo: usar la misma query “oficial”
+      const data = await gqlFetch(FARM_LISTS_SNAPSHOT_QUERY, { onlyExpanded: true });
+
+      // Busca una farmlist cuyo ownerVillage.id sea la aldea activa (did)
+      const lists = data?.farmLists || [];
+      const match = lists.find(fl => Number(fl?.ownerVillage?.id) === Number(did));
+      const units = match?.ownerVillage?.troops?.ownTroopsAtTown?.units;
+
+      if(!units){
+        log(`Snapshot tropas: no encontré farmList con ownerVillage.id=${did}. Intentaré continuar en modo manual.`);
+        return null;
+      }
+
       const snap = {};
       for(const k of ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"]){
         snap[k] = Math.max(0, parseInt(units[k]||0,10)||0);
       }
       return snap;
     }catch(e){
-      warn("Snapshot tropas GQL falló:", e?.message||e);
+      warn("Snapshot tropas (via farmLists) falló:", e?.message||e);
+      return null;
+    }
+  }
+
+  async function getOwnerTroopsForFarmList(listId){
+    const lid = Number(listId);
+    if (_farmTroopsCache.has(lid)) return _farmTroopsCache.get(lid);
+
+    try{
+      const data = await gqlFetch(FARM_LIST_TROOPS_QUERY, { id: lid, onlyExpanded: false });
+      const units = data?.farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units;
+      if (!units) {
+        console.log(`[FF] No units snapshot for farmList #${lid}`);
+        _farmTroopsCache.set(lid, null);
+        return null;
+      }
+      // Normaliza a ints > 0
+      const snap = {};
+      for (const k of ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"]) {
+        snap[k] = Math.max(0, parseInt(units[k] || 0, 10) || 0);
+      }
+      _farmTroopsCache.set(lid, snap);
+      return snap;
+    }catch(e){
+      console.log(`[FF] farmList troops fetch failed: ${e?.message || e}`);
+      _farmTroopsCache.set(lid, null);
       return null;
     }
   }
@@ -1090,155 +1214,229 @@
     return out;
   }
 
-  async function addSelectedToFarmlists({ troopsByTribe, oasisSmartOverride=false }={}){
-    try {
-      ensureUI();
-      setBusy(true);
-      state.abort = false;
 
-      // 1) Filas seleccionadas (pero orden real por distancia base!)
-      const rows = Array.from(UI.tblBody.querySelectorAll("tr"));
-      const chosen = [];
-      rows.forEach((tr) => {
-        const chk = tr.querySelector(".ff_chk");
-        if (chk?.checked) {
-          const idxOriginal = parseInt(tr.dataset.idx, 10);
-          chosen.push({ tr, data: state.rows[idxOriginal] });
-        }
-      });
-      if (!chosen.length) { setBusy(false); return; }
+async function addSelectedToFarmlists({ troopsByTribe, oasisSmartOverride=false } = {}) {
+    console.log("addSelectedToFarmlists -> LLAMADO");
+  // ====== RUN-LOCK para evitar dobles ejecuciones ======
+  if (__ADD_FL_RUN_LOCK) {
+    console.log("[FF] addSelectedToFarmlists: RUN_LOCK activo → ignorando invocación duplicada.");
+    return;
+  }
+  __ADD_FL_RUN_LOCK = true;
 
-      // 2) Dedupe por XY + reorden por distancia base (siempre distancia asc)
-      const seenXY = new Set();
-      const baseOrder = state.baseRowsByDist; // lista base por distancia
-      const byKey = new Map(baseOrder.map((r,i)=>[`${r.x}|${r.y}`, {row:r, i}]));
-      const uniqueChosen = [];
-      for (const item of chosen) {
-        const k = `${item.data.x}|${item.data.y}`;
-        if (seenXY.has(k)) continue;
-        seenXY.add(k);
-        uniqueChosen.push(item);
+  try {
+    ensureUI();
+    setBusy(true);
+    state.abort = false;
+
+    // 1) Filas seleccionadas (pero orden real por distancia base!)
+    const rows = Array.from(UI.tblBody.querySelectorAll("tr"));
+    const chosen = [];
+    rows.forEach((tr) => {
+      const chk = tr.querySelector(".ff_chk");
+      if (chk?.checked) {
+        const idxOriginal = parseInt(tr.dataset.idx, 10);
+        chosen.push({ tr, data: state.rows[idxOriginal] });
       }
-      uniqueChosen.sort((a,b)=>{
-        const ka = `${a.data.x}|${a.data.y}`, kb = `${b.data.x}|${b.data.y}`;
-        const ia = byKey.get(ka)?.i ?? 1e9;
-        const ib = byKey.get(kb)?.i ?? 1e9;
-        return ia - ib;
-      });
+    });
+    if (!chosen.length) { setBusy(false); return; }
 
-      // 3) Default (manual) units según selección
-      const manualUnits = buildManualUnitsFromSelection(troopsByTribe);
+    // 2) Dedupe por XY + reorden por distancia base (siempre distancia asc)
+    const seenXY = new Set();
+    const baseOrder = state.baseRowsByDist || state.rows.slice().sort((a,b)=>a.dist-b.dist);
+    const byKey = new Map(baseOrder.map((r,i)=>[`${r.x}|${r.y}`, {row:r, i}]));
+    const uniqueChosen = [];
+    for (const item of chosen) {
+      const k = `${item.data.x}|${item.data.y}`;
+      if (seenXY.has(k)) continue;
+      seenXY.add(k);
+      uniqueChosen.push(item);
+    }
+    uniqueChosen.sort((a,b)=>{
+      const ka = `${a.data.x}|${a.data.y}`, kb = `${b.data.x}|${b.data.y}`;
+      const ia = byKey.get(ka)?.i ?? 1e9;
+      const ib = byKey.get(kb)?.i ?? 1e9;
+      return ia - ib;
+    });
 
-      // 4) Particionar en lotes de 100 (SLOTS_PER_LIST), máx MAX_LISTS
-      const pending = uniqueChosen.slice(0, state.maxLists * SLOTS_PER_LIST);
-      const dateStr = DATE_FMT();
-      const baseName = state.mode === "natars" ? "Natares"
-                       : state.mode === "oasis" ? "Oasis"
-                       : "Aldeas";
-      const flNames = [];
+    // 3) Default (manual) units según selección
+    const manualUnits = buildManualUnitsFromSelection(troopsByTribe);
+    console.log("[FF] manualUnits seleccionadas:", manualUnits);
 
-      let created = 0;
-      let totalDone = 0;
-      const totalToDo = pending.length;
+    // 4) Particionar en lotes de 100 (SLOTS_PER_LIST), máx state.maxLists
+    const pending = uniqueChosen.slice(0, state.maxLists * SLOTS_PER_LIST);
+    const dateStr = DATE_FMT();
+    const baseName = state.mode === "natars" ? "Natares"
+                     : state.mode === "oasis" ? "Oasis"
+                     : "Aldeas";
+    const flNames = [];
 
-      while (pending.length && created < state.maxLists) {
-        guardAbort();
-        created++;
-        const thisBatch = pending.splice(0, SLOTS_PER_LIST);
-        const fname = `${baseName} #${created} ${dateStr}`;
-        flNames.push(fname);
-        log(`Creating farmlist "${fname}" with ${thisBatch.length} slots...`);
+    let created = 0;
+    let totalDone = 0;
+    const totalToDo = pending.length;
 
-        const listId = await createFarmlist(fname, state.active.did, manualUnits, true);
-        await sleep(...CREATE_LIST_DELAY_MS);
+    console.log("[FF] addSelectedToFarmlists → total pending:", pending.length, "maxLists:", state.maxLists, "SLOTS_PER_LIST:", SLOTS_PER_LIST);
 
-        // 5) Si Oasis con modo inteligente → snapshot GQL una sola vez
+    while (pending.length && created < state.maxLists) {
+      guardAbort();
+      created++;
+
+      // splicear 0..SLOTS_PER_LIST garantiza vaciar pending si hay <100
+      const thisBatch = pending.splice(0, SLOTS_PER_LIST);
+      const fname = `${baseName} #${created} ${dateStr}`;
+      flNames.push(fname);
+      log(`Creating farmlist "${fname}" with ${thisBatch.length} slots...`);
+
+      // Crea UNA lista por batch
+      const listId = await createFarmlist(fname, state.active.did, manualUnits, true);
+      console.log(`[FF] createFarmlist OK → id=${listId}, batchSlots=${thisBatch.length}`);
+      await sleep(...CREATE_LIST_DELAY_MS);
+
+      // 5) Si Oasis con modo inteligente → snapshot GQL una sola vez
         let availableSnap = null;
         const mode = state.oasisPrefs?.mode ?? 0;
-        const oasisSmart = (state.mode==='oasis') && (mode!==0) && (!!(oasisSmartOverride ?? state.oasisPrefs.smart));
-        const lossTarget = Math.max(1, Math.min(35, parseInt(state.oasisPrefs?.lossTarget||2,10))) / 100;
+        const oasisSmart = (state.mode === 'oasis') && (mode !== 0) && (!!(oasisSmartOverride ?? state.oasisPrefs.smart));
 
         if (oasisSmart) {
-          availableSnap = await getAvailableTroopsSnapshot(state.active.did);
-          if (availableSnap) {
-            log(`GQL tropas snapshot OK para lista "${fname}"`);
-          } else {
-            warn(`No se pudo obtener snapshot tropas. Oasis inteligente degradará a manual.`);
-          }
+            availableSnap = await getOwnerTroopsForFarmList(listId);
+            console.log(`[FF] Troops snapshot list #${listId}:`, availableSnap);
+            if (availableSnap) log(`GQL tropas snapshot OK para lista "${fname}"`);
+            else warn(`No se pudo obtener snapshot tropas. Oasis inteligente ⇒ fallback a manual.`);
         }
 
-        // 6) Agregar slots
+        // === NUEVO: pool que se va consumiendo y se resetea si baja de 50 ===
+        const availableInitial = normalizeUnits(availableSnap || {});
+        let   availablePool    = { ...availableInitial };
+        const REPLENISH_THRESHOLD = 50;
+
+        // Define lossTarget (fracción). Default 2% = 0.02
+        const lossTarget = Number(state.lossTarget ?? 0.02);
+
+        // 6) Agregar slots (siempre en el orden por distancia base)
         for (let i = 0; i < thisBatch.length; i++) {
-          guardAbort();
-          const entry = thisBatch[i];
-          const data  = entry.data;
-          const tr    = entry.tr;
-          tr.querySelector(".ff_status").textContent = "…";
+            guardAbort();
+            const entry = thisBatch[i];
+            const data  = entry.data;
+            const tr    = entry.tr;
+            tr.querySelector(".ff_status").textContent = "…";
 
-          // Por defecto usar manual
-          let unitsForThisSlot = manualUnits;
+            let unitsForThisSlot = manualUnits; // por defecto
 
-          if (state.mode==='oasis') {
-            const animals = data.animals || { total:0, counts:{} };
-            if (animals.total === 0 || !oasisSmart || !availableSnap) {
-              // manual
-            } else {
-              // Inteligente: allowedUnits desde selección (true/false)
-              const allowedUnits = {};
-              Object.entries(troopsByTribe||{}).forEach(([u,obj])=>{
-                if(obj?.on) allowedUnits[u] = true;
-              });
-              // llamar smartBuildWaveNoHero
-              try{
-                const [send, ok] = (tscm.smartBuildWaveNoHero)
-                  ? tscm.smartBuildWaveNoHero(animals.counts, availableSnap, { lossTarget, allowedUnits })
-                  : [{}, false];
-                if(ok && send && Object.keys(send).length){
-                  unitsForThisSlot = Object.assign(
-                    {t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0},
-                    send
-                  );
-                  log(`Oasis (${data.x}|${data.y}) recomendado -> ${Object.entries(unitsForThisSlot).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(", ")}`);
-                }else{
-                  tr.querySelector(".ff_status").textContent = "omitido (recomendación)";
-                  continue; // NO agregamos este slot
+            // ====== OASIS: lógica inteligente + POOL ======
+            if (state.mode === 'oasis') {
+                const animals = data.animals || { total:0, counts:{} };
+
+                if (animals.total === 0 || !oasisSmart || !availableSnap) {
+                    // sin animales o sin inteligente: usamos manualUnits
+                    console.log(`[FF][OASIS] (${data.x}|${data.y}) modo manual. totalAnimals=${animals.total} oasisSmart=${oasisSmart} hasSnap=${!!availableSnap}`);
+                } else {
+                    // allowedUnits desde selección (true/false)
+                    const allowedUnits = {};
+                    Object.entries(troopsByTribe || {}).forEach(([u,obj])=>{
+                        if (obj?.on) allowedUnits[u] = true;
+                    });
+
+                    // Opcional: pesos de “dolor de pérdida”
+                    const lossWeights = { t1:1, t2:3, t4:8, t5:9, t6:14 };
+
+                    // DEBUG de entrada para smart
+                    console.log("[FF][smart-in] xy=", `${data.x}|${data.y}`,
+                                "counts=", animals.counts,
+                                "availablePool=", availablePool,
+                                "allowedUnits=", allowedUnits,
+                                "lossTarget=", lossTarget);
+
+                    try {
+                        // ⚠️ ahora pasamos el POOL (se va consumiendo slot a slot)
+                        const ret = (tscm?.utils?.smartBuildWaveNoHero)
+                        ? tscm.utils.smartBuildWaveNoHero(animals.counts, availablePool, { lossTarget, allowedUnits, lossWeights })
+                        : null;
+
+                        // Logs de salida
+                        console.log("[FF][smart-out] xy=", `${data.x}|${data.y}`, "ret=", ret);
+
+                        let send = null, ok = false;
+                        if (Array.isArray(ret) && ret.length >= 2) {
+                            send = ret[0]; ok = !!ret[1];
+                        } else if (ret && typeof ret === "object" && "send" in ret && "ok" in ret) {
+                            send = ret.send; ok = !!ret.ok;
+                        }
+
+                        if (ok && send && Object.keys(send).some(k => (send[k]|0) > 0)) {
+                            // Normaliza a {t1..t10}
+                            unitsForThisSlot = Object.assign(
+                                normalizeUnits(null),
+                                send
+                            );
+
+                            // 💥 Descontar del POOL
+                            subtractUnits(availablePool, unitsForThisSlot);
+
+                            const poolLeft = sumUnits(availablePool);
+                            console.log(`[FF][POOL] (${data.x}|${data.y}) asignado= ${
+                                        Object.entries(unitsForThisSlot).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(", ")
+                                        } | poolLeft=${poolLeft}`);
+
+                            // 🔁 Si queda poco stock, reponer desde snapshot inicial
+                            if (poolLeft < REPLENISH_THRESHOLD) {
+                                availablePool = { ...availableInitial };
+                                console.log(`[FF][POOL] pool < ${REPLENISH_THRESHOLD} → reset to initial snapshot`);
+                            }
+
+                            log(`Oasis (${data.x}|${data.y}) recomendado -> ${
+                                Object.entries(unitsForThisSlot).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(", ")
+                                }`);
+                        } else {
+                            tr.querySelector(".ff_status").textContent = "omitido (recomendación)";
+                            console.log("[FF][smart] skip slot por recomendación NO atacar:", { ok, send });
+                            continue; // NO agregamos este slot
+                        }
+                    } catch(e) {
+                        warn(`smartBuildWaveNoHero error @ (${data.x}|${data.y}): ${e?.message||e}`);
+                        // fallback manual
+                    }
                 }
-              }catch(e){
-                warn(`smartBuildWaveNoHero error @ (${data.x}|${data.y}):`, e?.message||e);
-                // fallback manual
-              }
             }
-          }
+            // ====== /OASIS ======
 
-          const payload = { x:data.x, y:data.y, units: unitsForThisSlot };
-          await addSlots(listId, [payload]);
-          totalDone++;
-          tr.querySelector(".ff_status").textContent = "✅";
-          UI.btnAdd.textContent = `➕ Agregar a farmlists (${totalDone}/${totalToDo})`;
-          await sleep(...ADD_SLOT_DELAY_MS);
+            const payload = { x:data.x, y:data.y, units: unitsForThisSlot };
+            await addSlots(listId, [payload]);
+            totalDone++;
+            tr.querySelector(".ff_status").textContent = "✅";
+            UI.btnAdd.textContent = `➕ Agregar a farmlists (${totalDone}/${totalToDo})`;
+            await sleep(...ADD_SLOT_DELAY_MS);
         }
-      }
-
+    } // ← cierra el while (FALTABA ESTA)
       // Modal resumen
-      const mdl = document.getElementById("FF_MODAL");
-      const body = document.getElementById("FF_MODAL_BODY");
-      body.innerHTML = `
-        <div style="margin-bottom:6px;"><strong>Proceso terminado</strong></div>
-        <div style="font-size:12px;">Listas creadas:</div>
-        <ul style="margin:6px 0 0 18px; font-size:12px;">${flNames.map((n) => `<li>${n}</li>`).join("")}</ul>
-      `;
-      mdl.style.display = "flex";
-      log(`Done. Created ${flNames.length} list(s).`);
-    } catch (e) {
-      if (e?.message !== "Canceled by user") {
-        log(`ERROR addSelected: ${e.message}`);
-        alert(`Farmlist: ${e.message}`);
+    const mdl = document.getElementById("FF_MODAL");
+    const body = document.getElementById("FF_MODAL_BODY");
+    body.innerHTML = `
+      <div style="margin-bottom:6px;"><strong>Proceso terminado</strong></div>
+      <div style="font-size:12px;">Listas creadas:</div>
+      <ul style="margin:6px 0 0 18px; font-size:12px;">${flNames.map((n) => `<li>${n}</li>`).join("")}</ul>
+    `;
+    mdl.style.display = "flex";
+      const okBtn = document.getElementById("FF_MODAL_OK");
+      if (okBtn) {
+          const okClone = okBtn.cloneNode(true);        // sin listeners previos
+          okBtn.replaceWith(okClone);
+          okClone.textContent = "Cerrar";
+          okClone.addEventListener("click", () => {
+              mdl.style.display = "none";
+          }, { once: true });
       }
-    } finally {
-      setBusy(false);
-      UI.btnAdd.textContent = "➕ Agregar a farmlists";
+    log(`Done. Created ${flNames.length} list(s).`);
+  } catch (e) {
+    if (e?.message !== "Canceled by user") {
+      log(`ERROR addSelected: ${e.message}`);
+      alert(`Farmlist: ${e.message}`);
     }
+  } finally {
+    setBusy(false);
+    UI.btnAdd.textContent = "➕ Agregar a farmlists";
+    __ADD_FL_RUN_LOCK = false; // libera el guard
   }
+}
 
   /******************************************************************
    * CANCEL

@@ -240,9 +240,9 @@
             u40:{inf:600, cav:440},  // Elephant
         };
         const UNITS_ATTACK = {
-            GAUL:   { t1: 15, t2: 60, t3: 0,  t4: 90,  t5: 45,  t6: 130 }, // Falange, Espada, - , TT, Druida, Haeduan
-            TEUTON: { t1: 40, t2: 10, t3: 60, t4: 0,   t5: 0,   t6: 130 }, // Porra, Lanza, Hacha, -, -, Cab. Teutón
-            ROMAN:  { t1: 30, t2: 0,  t3: 70, t4: 0,   t5: 0,   t6: 180 }, // Lego, -, Imperano, -, -, Caesaris
+            GAUL:   { t1: 15, t2: 60, t3: 0,  t4: 90,  t5: 45,  t6: 130 },
+            TEUTON: { t1: 40, t2: 10, t3: 60, t4: 0,   t5: 0,   t6: 130 },
+            ROMAN:  { t1: 30, t2: 0,  t3: 70, t4: 0,   t5: 0,   t6: 180 },
         };
 
         const TRIBE_UNIT_GROUPS = {
@@ -778,151 +778,150 @@
     }
 
     // (No hero wave builder) — returns [sendObj, true] or [{}, false]
+    // Preferencia "barata primero" (cost-aware) respetando allowedUnits y available.
     function smartBuildWaveNoHero(oasisCounts, available, smartInput={}, tribeGuess){
         const now = () => new Date().toISOString();
         console.log(now(), "[SMART_NO_HERO] start", { oasisCounts, available, smartInput, tribeGuess });
 
+        // ---- helpers ----
         const sumDef = (counts)=>{
             let Dinf=0, Dcav=0;
             for(const [k,v] of Object.entries(counts||{})){
-            const code = normAnimalKey(k);
-            const cnt  = +v || 0;
-            const row  = code ? NATURE_DEF[code] : null;
-            if(!row || cnt<=0) continue;
-            Dinf += row.inf * cnt;
-            Dcav += row.cav * cnt;
+                const code = normAnimalKey(k);
+                const cnt  = +v || 0;
+                const row  = code ? NATURE_DEF[code] : null;
+                if(!row || cnt<=0) continue;
+                Dinf += row.inf * cnt;
+                Dcav += row.cav * cnt;
             }
             return { Dinf, Dcav };
         };
-        
-        const calcLossFromRatio = (R)=> { // misma curva usada en tu otro script
-            const p = Math.pow(R, 1.5);
-            return p / (1 + p);
+        const calcLossFromRatio = (R)=>{ const p = Math.pow(Math.max(0,R), 1.5); return p/(1+p); };
+        const clamp = (x,a,b)=> Math.max(a, Math.min(b, x));
+
+        // ---- entradas ----
+        const lossTarget   = clamp( +smartInput.lossTarget || 0.02, 0.001, 0.5 ); // default 2%, [0.1%..50%]
+        const allowedUnits = (smartInput.allowedUnits && typeof smartInput.allowedUnits==="object") ? smartInput.allowedUnits : null;
+
+        // Tribu y tablas
+        const tribeAuto = (getCurrentTribe?.() || "GAUL").toUpperCase();
+        const tribe     = String(tribeGuess || tribeAuto || "GAUL").toUpperCase();
+        const UAfull    = UNITS_ATTACK[tribe] || UNITS_ATTACK.GAUL;
+        const groups    = TRIBE_UNIT_GROUPS[tribe] || TRIBE_UNIT_GROUPS.GAUL;
+        const cavSet    = new Set(["t4","t5","t6"]); // caballería
+
+        // Pesos (qué “duele” perder); ajusta si quieres
+        const DEFAULT_LOSS_WEIGHTS = {
+            GAUL:   { t1:1, t2:3, t3:4, t4:7, t5:8, t6:12 },
+            TEUTON: { t1:2, t2:2, t3:4, t4:6, t5:7, t6:10 },
+            ROMAN:  { t1:2, t2:3, t3:5, t4:6, t5:7, t6:11 },
         };
+        const lossWeights = Object.assign({}, DEFAULT_LOSS_WEIGHTS[tribe] || {});
 
-        // ---- Entradas ----
-        const lossTarget   = Math.min(Math.max(+smartInput.lossTarget || 0.02, 0.001), 0.5); // clamp
-        const allowedUnits = smartInput.allowedUnits && typeof smartInput.allowedUnits === "object" ? smartInput.allowedUnits : null;
-
-        // Tribu (intenta detectar, si no GAUL)
-        const tribeAuto = getCurrentTribe?.() || "GAUL";
-        const tribe = String(tribeGuess || tribeAuto || "GAUL").toUpperCase();
-        const UAfull = UNITS_ATTACK[tribe] || UNITS_ATTACK.GAUL;
-        const groups = TRIBE_UNIT_GROUPS[tribe] || TRIBE_UNIT_GROUPS.GAUL;
-
-        // Orden preferente: rápidas (cav) -> inf, filtrando solo unidades permitidas y con ataque>0
+        // Candidatas en orden base (cav -> inf), filtradas por ataque>0 y allowed
         const baseOrder = [...(groups.cav||[]), ...(groups.inf||[])];
-        const order = baseOrder.filter(u => (UAfull[u]||0)>0 && (!allowedUnits || allowedUnits[u]) );
+        const order = baseOrder.filter(u => (UAfull[u]|0)>0 && (!allowedUnits || allowedUnits[u]));
         if(order.length===0){
             console.log(now(), "[SMART_NO_HERO] No hay unidades permitidas con ataque > 0");
             return [{}, false];
         }
 
-        // Disponibilidad (normaliza a enteros >=0)
-        const stock = {};
-        ["t1","t2","t3","t4","t5","t6"].forEach(k => stock[k] = Math.max(0, +((available&&available[k])||0)));
-
-        // Defensa del oasis
-        const { Dinf, Dcav } = sumDef(oasisCounts||{});
-        const Deff0 = Dinf + Dcav;
-        if(Deff0<=0){
-            console.log(now(), "[SMART_NO_HERO] Oasis sin animales (Deff=0) → no recomendado por esta vía");
-            return [{}, false];
-        }
-
-        // Capacidad total de ataque posible con el stock y orden permitido
-        const A_cap = order.reduce((s,u)=> s + (stock[u]||0)*(UAfull[u]||0), 0);
-        if(A_cap<=0){
+        // Stock (sólo para unidades de 'order')
+        const cap = Object.fromEntries(order.map(u => [u, Math.max(0, +((available&&available[u])||0))]));
+        const totalCapA = order.reduce((s,u)=> s + cap[u]*(UAfull[u]||0), 0);
+        if(totalCapA<=0){
             console.log(now(), "[SMART_NO_HERO] Sin tropas disponibles para atacar");
             return [{}, false];
         }
 
-        // Elegimos mezcla inf/cav iterativamente, como en tu versión con héroe (pero sin héroe)
-        // Target A_total según lossTarget:
-        //   R = (p/(1-p))^(2/3)  =>  A_target = Deff / R  (donde Deff pondera cavPct)
-        let cavPct = 1.0;                      // arrancamos favoreciendo caballería
-        const send = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0 };
-        const cap  = Object.fromEntries(order.map(u => [u, stock[u]||0]));
+        // Defensa oasis
+        const { Dinf, Dcav } = sumDef(oasisCounts||{});
+        const Deff0 = Dinf + Dcav;
+        if(Deff0<=0){
+            // Este builder sólo se usa para oasis CON animales (los vacíos los maneja tu flujo manual)
+            console.log(now(), "[SMART_NO_HERO] Oasis sin animales (Deff=0) → no recomendado por esta vía");
+            return [{}, false];
+        }
 
-        // Pequeña función para (re)calcular el objetivo con cavPct actual
-        const RfromLoss = (p)=> Math.pow( p/(1-p), 2/3 );
-        const fillOnce = ()=>{
-            const Deff = cavPct*Dcav + (1-cavPct)*Dinf;
-            const R    = RfromLoss(lossTarget);
-            const A_target = Deff / (R || 1e-9);
-            const A_now = order.reduce((s,u)=> s + (send[u]||0)*(UAfull[u]||0), 0);
-
-            // Si ni con todo el stock llegamos al target, devolvemos fail
-            if (A_now < A_target){
-            const deficit = A_target - A_now;
-            // Greedy por orden preferente
-            for(const u of order){
-                if(cap[u]<=0) continue;
-                const per = UAfull[u]||0; if(per<=0) continue;
-                const need = Math.ceil(deficit / per);
-                if(need<=0) continue;
-                const take = Math.min(cap[u], need);
-                if(take>0){ send[u]+=take; cap[u]-=take; }
-                // recompute A_now aproximado
-                const A_now2 = order.reduce((s,w)=> s + (send[w]||0)*(UAfull[w]||0), 0);
-                if(A_now2 >= A_target) break;
-            }
-            }
-
-            // Actualiza cavPct según potencia enviada
-            const A_tot = order.reduce((s,u)=> s + (send[u]||0)*(UAfull[u]||0), 0);
-            const A_cav = (["t4","t5","t6"]).reduce((s,u)=> s + (send[u]||0)*(UAfull[u]||0), 0);
-            cavPct = A_tot>0 ? (A_cav / A_tot) : cavPct;
-
-            return { A_tot, Deff };
+        // Estado acumulado
+        const send = Object.fromEntries(order.map(u => [u,0]));
+        let A = 0;     // ataque total
+        let Acav = 0;  // ataque total de caballería
+        const estimate = (Acur, AcavCur)=>{
+            const cavPct = (Acur>0) ? (AcavCur/Acur) : 1;
+            const Deff   = cavPct*Dcav + (1-cavPct)*Dinf;
+            const R      = (Acur>0) ? (Deff/Acur) : Infinity;
+            const p      = calcLossFromRatio(R);
+            return { p, cavPct, Deff, R };
         };
 
-        // Dos o tres pasadas suelen bastar para estabilizar cavPct y cubrir A_target
-        let passes = 0, lastA = 0;
-        while(passes < 3){
-            const { A_tot } = fillOnce();
-            if(A_tot === lastA) break;
-            lastA = A_tot;
-            passes++;
+        // Selector “barata primero”: elige la unidad que minimiza el costo esperado de bajas
+        const chooseUnit = ()=>{
+            let best=null;
+            let bestScore=Infinity;
+            for(const u of order){
+                if(cap[u]<=0) continue;
+                const a = UAfull[u]||0; if(a<=0) continue;
+
+                const A1    = A + a;
+                const Acav1 = Acav + (cavSet.has(u)? a : 0);
+                const { p: p1 } = estimate(A1, Acav1);
+
+                // costo total ponderado si agrego 1 de 'u'
+                let costTotal=0;
+                for(const w of order){
+                    const cnt = (send[w] + (w===u?1:0))|0;
+                    if(cnt>0) costTotal += (lossWeights[w]||5) * cnt;
+                }
+                // score: costo esperado de bajas con la nueva composición
+                const score = p1 * costTotal;
+
+                if(score < bestScore){
+                    bestScore = score;
+                    best = { u, A1, Acav1, p1 };
+                }
+            }
+            return best; // {u, A1, Acav1, p1} o null
+        };
+
+        // Itera hasta cumplir pérdidas objetivo o agotar stock
+        let guard = 4000; // tope de iteraciones
+        while(guard-- > 0){
+            const { p } = estimate(A, Acav);
+            if(p <= lossTarget && A>0) break;
+
+            const choice = chooseUnit();
+            if(!choice) break;
+
+            const { u, A1, Acav1 } = choice;
+            send[u] += 1;
+            cap[u]  -= 1;
+            A = A1; Acav = Acav1;
         }
 
-        // Resultado final y verificación de pérdidas
-        const A_final = order.reduce((s,u)=> s + (send[u]||0)*(UAfull[u]||0), 0);
-        if(A_final<=0){
-            console.log(now(), "[SMART_NO_HERO] No se pudo armar ola (A_final=0)");
-            return [{}, false];
-        }
-        const Deff_final = cavPct*Dcav + (1-cavPct)*Dinf;
-        const R_final = Deff_final / Math.max(1, A_final);
-        const loss_est = calcLossFromRatio(R_final);
+        // Verificación final
+        const { p: pFinal, cavPct, Deff } = estimate(A, Acav);
+        const ok = (A>0) && (pFinal <= lossTarget);
+
+        // Compacta salida
+        const out={};
+        for(const u of order){ if((send[u]|0)>0) out[u]=send[u]|0; }
 
         console.log(now(), "[SMART_NO_HERO] check", {
-            tribe, cavPct: +cavPct.toFixed(3), Deff_final, A_final,
-            loss_est: +(loss_est*100).toFixed(2) + "%"
+            tribe, cavPct:+cavPct.toFixed(3), Deff_final:Deff, A_final:A,
+            loss_est: (pFinal*100).toFixed(2) + "%"
         });
 
-        if(loss_est > lossTarget){
-            console.log(now(), "[SMART_NO_HERO] Rechazado: pérdidas esperadas superan lossTarget", { loss_est, lossTarget });
-            return [{}, false];
-        }
-
-        // Limpia ceros y devuelve recomendado
-        const out = {};
-        for(const u of order){
-            if((send[u]||0)>0) out[u] = send[u]|0;
-        }
-        if(Object.keys(out).length===0){
-            console.log(now(), "[SMART_NO_HERO] Sin unidades en 'out' tras filtrado");
+        if(!ok || Object.keys(out).length===0){
+            console.log(now(), "[SMART_NO_HERO] Rechazado: pérdidas esperadas superan lossTarget o sin unidades", {
+                loss_est: pFinal, lossTarget
+            });
             return [{}, false];
         }
 
         console.log(now(), "[SMART_NO_HERO] OK", out);
         return [out, true];
     }
-
-
-
-
 
 
     // Exportar nombres en minúscula y camelCase por comodidad
