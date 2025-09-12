@@ -7,6 +7,8 @@
 // @grant        GM_addStyle
 // @grant        unsafeWindow
 // @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
+// @updateURL     https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Farmlist%20Auto-Filler.user.js
+// @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Farmlist%20Auto-Filler.user.js
 // ==/UserScript==
 
 (() => {
