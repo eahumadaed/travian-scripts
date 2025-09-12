@@ -626,6 +626,7 @@
     renderUnitsChecklist();
     uiRender();
   }
+  
     function updateToggleLabel() {
         const btn = document.getElementById(IDs.BTN_TOGGLE);
         if (btn) btn.textContent = STATE.running ? "Detener" : "Iniciar";
