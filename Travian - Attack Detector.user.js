@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart (dbg-heavy)
-// @version      2.2.5
+// @version      2.2.6
 // @description  Detecta ataques, consolida olas y ejecuta auto-evasión (vacío/umbral/natar). Incluye LOGS de depuración detallados y botón "Evadir ahora" (sin reintentos) para pruebas.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
@@ -25,7 +25,7 @@
   const TASK = 'oasis_raider';
   const TTL  = 5 * 60 * 1000;
   const xv = (unsafeWindow?.tscm?.utils?.guessXVersion?.() || null);
-  const SCRIPT_VERSION = "2.2.5";
+  const SCRIPT_VERSION = "2.2.6";
 
   // ────────────────────────────────────────────────────────────────────────────
   // Logger helpers (timestamps + niveles)
@@ -102,7 +102,8 @@
         updatedAt: now(),
         serverOffsetMs: 0,
         lastCompactionAt: 0,
-        ui: { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } }
+        ui: { modal: { anchor: "br", left: null, top: null, right: 24, bottom: 24, minimized: false } }
+
       },
       settings: {
         telegramToken: "",
@@ -120,8 +121,11 @@
       if (!raw) return makeEmpty();
       const s = JSON.parse(raw);
       s.version  ||= SCRIPT_VERSION;
-      s.meta     ||= {};
-      s.meta.ui  ||= { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } };
+      s.meta ||= {};
+      s.meta.ui ||= { modal: { anchor: "br", left: null, top: null, right: 24, bottom: 24, minimized: false } };
+      s.meta.ui.modal.anchor ||= "br";
+      if (typeof s.meta.ui.modal.right !== 'number') s.meta.ui.modal.right = 24;
+      if (typeof s.meta.ui.modal.bottom !== 'number') s.meta.ui.modal.bottom = 24;
       s.settings ||= { telegramToken:"", chatId:"", quietHours:null, autoEvade: AUTO_EVADE_DEFAULT };
       s.villages ||= {};
       return s;
@@ -351,6 +355,7 @@
   }
   // Llama esto en el tick (y al init si estás en dorf1)
   function processDorf1IncomingList(){
+
     if (!isOnDorf1()) return;
 
     const items = readIncomingAttacksFromDorf1();
@@ -1137,39 +1142,50 @@ async function sendAllTroopsRaid(villageId, target) {
     const m = document.getElementById(MODAL_ID);
     if (!m) return;
     const ui = getUi();
-    const { anchor, left, top, bottom, minimized } = ui.modal;
+    const { anchor, right, bottom, left, top, minimized } = ui.modal;
 
-    m.style.right = "auto";
-    if (anchor === "bottom") {
-      if (left != null) m.style.left = `${left}px`;
-      if (bottom != null) m.style.bottom = `${bottom}px`;
-      m.style.top = "auto";
+    if (anchor === 'br') {
+      m.style.left = 'auto';
+      m.style.top = 'auto';
+      m.style.right = `${Math.max(8, right ?? 24)}px`;
+      m.style.bottom = `${Math.max(8, bottom ?? 24)}px`;
     } else {
-      if (left != null) m.style.left = `${left}px`;
-      if (top != null) m.style.top = `${top}px`;
-      m.style.bottom = "auto";
+      // fallback TL si existiera algún estado viejo
+      m.style.right = 'auto';
+      m.style.bottom = 'auto';
+      m.style.left = `${Math.max(8, left ?? 24)}px`;
+      m.style.top = `${Math.max(8, top ?? 60)}px`;
     }
+
     if (minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
     updateModalMaxHeight();
   }
+
 
   function updateModalMaxHeight() {
     const m = document.getElementById(MODAL_ID);
     const body = m?.querySelector(".body");
     if (!m || !body) return;
     if (m.classList.contains('minimized')) return;
+
     const ui = getUi();
     const margin = 24;
+
     let maxH;
-    if (ui.modal.anchor === "bottom") {
-      const b = parseInt(m.style.bottom || "24", 10);
+    if (ui.modal.anchor === 'br') {
+      const b = parseInt(m.style.bottom || (ui.modal.bottom ?? 24), 10) || 24;
       maxH = window.innerHeight - b - margin;
     } else {
       const rect = m.getBoundingClientRect();
       maxH = window.innerHeight - rect.top - margin;
     }
+
     body.style.maxHeight = `${Math.max(120, Math.floor(maxH))}px`;
   }
+
+
+
+
   window.addEventListener("resize", updateModalMaxHeight);
 
   function getTotalAttacks(state) {
@@ -1219,54 +1235,88 @@ async function sendAllTroopsRaid(villageId, target) {
             const ui = getUi();
             ui.modal.minimized = !ui.modal.minimized;
             saveUi(ui, "modal:minToggle");
+            m.querySelector(".hdr")?.addEventListener("click", (e) => {
+              if (e.target && (e.target.closest('.gear'))) return;
+              const ui = getUi();
+              ui.modal.minimized = !ui.modal.minimized;
+              saveUi(ui, "modal:minToggle");
+              if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
+              applyModalPosition(); // ← asegura altura y anclaje
+            });
             if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
             updateModalMaxHeight();
         });
 
     // Drag
-    let dragging = false, ox = 0, oy = 0;
+    // Drag (con umbral para no “comerse” el click)
+    const DRAG_THRESHOLD = 4;
+    let dragging = false, ox = 0, oy = 0, startX = 0, startY = 0, moved = false;
+
     const onDown = (e) => {
       if (e.target && (e.target.closest('.gear') || e.target.closest('#aa-evadir-ahora'))) return;
-      dragging = true;
       const rect = m.getBoundingClientRect();
+      // offsets desde la esquina inferior derecha (anclaje BR)
       ox = e.clientX - rect.left;
       oy = e.clientY - rect.top;
-      e.preventDefault();
+      startX = e.clientX;
+      startY = e.clientY;
+      moved = false;
+      dragging = false; // aún NO estamos arrastrando hasta pasar el umbral
+      // ¡OJO!: no hagas preventDefault aquí para no matar el click
     };
+
     const onMove = (e) => {
-      if (!dragging) return;
-      const w = window.innerWidth, h = window.innerHeight;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!dragging) {
+        if (Math.hypot(dx, dy) > DRAG_THRESHOLD) dragging = true;
+        else return;
+      }
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+
+      // posición nueva (desde top/left)…
       const newL = clamp(e.clientX - ox, 8, w - m.offsetWidth - 8);
       const newT = clamp(e.clientY - oy, 8, h - m.offsetHeight - 8);
-      m.style.left = `${newL}px`;
-      m.style.top = `${newT}px`;
-      m.style.right = "auto";
-      m.style.bottom = "auto";
+
+      // …pero guardamos/mostramos como anclaje abajo-derecha:
+      const right = Math.max(8, w - (newL + m.offsetWidth));
+      const bottom = Math.max(8, h - (newT + m.offsetHeight));
+
+      // aplica estilo BR
+      m.style.left = 'auto';
+      m.style.top = 'auto';
+      m.style.right = `${right}px`;
+      m.style.bottom = `${bottom}px`;
+
+      moved = true;
       updateModalMaxHeight();
     };
+
     const onUp = () => {
+      // si nunca superó el umbral, dejemos que el click del header haga el toggle
       if (!dragging) return;
+
       dragging = false;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
       const rect = m.getBoundingClientRect();
-      const anchor = (rect.top + rect.height/2 > window.innerHeight/2) ? "bottom" : "top";
+
       const ui = getUi();
-      ui.modal.anchor = anchor;
-      ui.modal.left = rect.left;
-      if (anchor === "bottom") {
-        ui.modal.bottom = clamp(window.innerHeight - (rect.top + rect.height), 8, window.innerHeight - 80);
-        m.style.bottom = `${ui.modal.bottom}px`;
-        m.style.top = "auto";
-      } else {
-        ui.modal.top = clamp(rect.top, 8, window.innerHeight - rect.height - 8);
-        m.style.top = `${ui.modal.top}px`;
-        m.style.bottom = "auto";
-      }
+      ui.modal.anchor = 'br';
+      ui.modal.right = Math.max(8, Math.floor(w - (rect.left + rect.width)));
+      ui.modal.bottom = Math.max(8, Math.floor(h - (rect.top + rect.height)));
+      // limpieza de top/left antiguos para evitar inconsistencias
+      ui.modal.left = null;
+      ui.modal.top = null;
       saveUi(ui, "modal:drag");
       updateModalMaxHeight();
     };
+
     m.querySelector(".hdr")?.addEventListener("mousedown", onDown);
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+
 
     requestAnimationFrame(updateModalMaxHeight);
   }
