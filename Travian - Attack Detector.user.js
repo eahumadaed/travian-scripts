@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         ⚔️ Travian Attack Detector (Pro) + Auto-Evade Smart (dbg-heavy)
-// @version      2.2.6
+// @version      2.2.7
 // @description  Detecta ataques, consolida olas y ejecuta auto-evasión (vacío/umbral/natar). Incluye LOGS de depuración detallados y botón "Evadir ahora" (sin reintentos) para pruebas.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
@@ -1129,7 +1129,12 @@ async function sendAllTroopsRaid(villageId, target) {
   function getUi() {
     const st = loadState();
     st.meta.ui ||= {};
-    st.meta.ui.modal ||= { anchor: "top", left: null, top: null, bottom: 24, minimized: false };
+    st.meta.ui.modal ||= { anchor: "br", left: null, top: null, right: 24, bottom: 24, minimized: false };
+    // sanea por si vienen estados viejos
+    const m = st.meta.ui.modal;
+    m.anchor ||= "br";
+    if (typeof m.right !== 'number') m.right = 24;
+    if (typeof m.bottom !== 'number') m.bottom = 24;
     return st.meta.ui;
   }
   function saveUi(ui, reason="ui") {
@@ -1231,73 +1236,62 @@ async function sendAllTroopsRaid(villageId, target) {
         });
         m.querySelector(".gear")?.addEventListener("click", (e) => { e.stopPropagation(); toggleSettings(); });
         m.querySelector(".hdr")?.addEventListener("click", (e) => {
-            if (e.target && (e.target.closest('.gear'))) return;
-            const ui = getUi();
-            ui.modal.minimized = !ui.modal.minimized;
-            saveUi(ui, "modal:minToggle");
-            m.querySelector(".hdr")?.addEventListener("click", (e) => {
-              if (e.target && (e.target.closest('.gear'))) return;
-              const ui = getUi();
-              ui.modal.minimized = !ui.modal.minimized;
-              saveUi(ui, "modal:minToggle");
-              if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
-              applyModalPosition(); // ← asegura altura y anclaje
-            });
-            if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
-            updateModalMaxHeight();
+          if (e.target && (e.target.closest('.gear') || e.target.closest('#aa-evadir-ahora'))) return;
+          const ui = getUi();
+          ui.modal.minimized = !ui.modal.minimized;
+          saveUi(ui, "modal:minToggle");
+          if (ui.modal.minimized) m.classList.add('minimized'); else m.classList.remove('minimized');
+          applyModalPosition(); // asegura altura y anclaje tras el toggle
         });
 
     // Drag
-    // Drag (con umbral para no “comerse” el click)
     const DRAG_THRESHOLD = 4;
-    let dragging = false, ox = 0, oy = 0, startX = 0, startY = 0, moved = false;
+    let pressed = false, dragging = false, ox = 0, oy = 0, startX = 0, startY = 0;
 
     const onDown = (e) => {
       if (e.target && (e.target.closest('.gear') || e.target.closest('#aa-evadir-ahora'))) return;
       const rect = m.getBoundingClientRect();
-      // offsets desde la esquina inferior derecha (anclaje BR)
       ox = e.clientX - rect.left;
       oy = e.clientY - rect.top;
       startX = e.clientX;
       startY = e.clientY;
-      moved = false;
-      dragging = false; // aún NO estamos arrastrando hasta pasar el umbral
-      // ¡OJO!: no hagas preventDefault aquí para no matar el click
+      pressed = true;
+      dragging = false; // hasta pasar el umbral no “arrastramos”
     };
 
     const onMove = (e) => {
+      if (!pressed) return;                 // ← clave: ignora movimientos sin mousedown previo
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
       if (!dragging) {
-        if (Math.hypot(dx, dy) > DRAG_THRESHOLD) dragging = true;
-        else return;
+        if (Math.hypot(dx, dy) <= DRAG_THRESHOLD) return;
+        dragging = true;
       }
+
       const w = window.innerWidth;
       const h = window.innerHeight;
 
-      // posición nueva (desde top/left)…
       const newL = clamp(e.clientX - ox, 8, w - m.offsetWidth - 8);
       const newT = clamp(e.clientY - oy, 8, h - m.offsetHeight - 8);
 
-      // …pero guardamos/mostramos como anclaje abajo-derecha:
       const right = Math.max(8, w - (newL + m.offsetWidth));
       const bottom = Math.max(8, h - (newT + m.offsetHeight));
 
-      // aplica estilo BR
       m.style.left = 'auto';
       m.style.top = 'auto';
       m.style.right = `${right}px`;
       m.style.bottom = `${bottom}px`;
 
-      moved = true;
       updateModalMaxHeight();
     };
 
     const onUp = () => {
-      // si nunca superó el umbral, dejemos que el click del header haga el toggle
-      if (!dragging) return;
+      if (!pressed) return;
+      pressed = false;
 
+      if (!dragging) return; // fue solo click (el handler de click hace el toggle)
       dragging = false;
+
       const w = window.innerWidth;
       const h = window.innerHeight;
       const rect = m.getBoundingClientRect();
@@ -1306,7 +1300,6 @@ async function sendAllTroopsRaid(villageId, target) {
       ui.modal.anchor = 'br';
       ui.modal.right = Math.max(8, Math.floor(w - (rect.left + rect.width)));
       ui.modal.bottom = Math.max(8, Math.floor(h - (rect.top + rect.height)));
-      // limpieza de top/left antiguos para evitar inconsistencias
       ui.modal.left = null;
       ui.modal.top = null;
       saveUi(ui, "modal:drag");
@@ -1316,6 +1309,7 @@ async function sendAllTroopsRaid(villageId, target) {
     m.querySelector(".hdr")?.addEventListener("mousedown", onDown);
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+
 
 
     requestAnimationFrame(updateModalMaxHeight);
@@ -2063,7 +2057,7 @@ async function sendAllTroopsRaid(villageId, target) {
   // Boot
   // ────────────────────────────────────────────────────────────────────────────
   (function init() {
-    L.info(`Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.2.5`);
+    L.info(`Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.2.7`);
     observeSidebar();
     hookNavigation();
 
