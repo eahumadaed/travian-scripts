@@ -1,18 +1,16 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.4
+// @version      2.0.6
 // @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
-// @downloadURL  https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/Travian%20-%20Oasis%20Raider.user.js
 // @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
 // @grant        unsafeWindow
 // ==/UserScript==
 
-(function () {
+(() => {
   "use strict";
   const { tscm } = unsafeWindow;
   const TASK = 'oasis_raider';
@@ -56,6 +54,14 @@
       POST_OUTBOUND_DELAY_SEC: 20,     // tras mandar héroe, inicio vacíos
       INBOUND_PAUSE_LT_SEC: 3600,      // si ETA < 1h, pausar vacíos
       OUT_OF_STOCK_COOLDOWN_MS: 30 * 60 * 1000, // sin tropas suficientes → 30 min
+    },
+
+    SWEEP: {
+      ENABLED: true,                 // puedes activarlo/desactivarlo si quieres
+      DELAY_MIN_MS: 1000,            // pausa humana entre barridos
+      DELAY_MAX_MS: 5000,
+      REPLENISH_THRESHOLD: 50,       // si el pool baja de esto, se repone al snapshot inicial
+      LOSS_WEIGHTS: { t1:1, t2:3, t4:8, t5:9, t6:14 } // “dolor” relativo por pérdidas (ajusta a gusto)
     },
 
     // Prioridad: con héroe primero o vacíos primero
@@ -132,6 +138,8 @@
   const getDistance          = ()=> USER_CONFIG.dist ?? 20;
   const getPriorityMode      = ()=> USER_CONFIG.priorityMode ?? CFG.PRIORITY_DEFAULT;  // "WITH_HERO" | "EMPTY_FIRST"
   const getDryRun            = ()=> !!USER_CONFIG.dryRun;
+  const getMaxAnimals      = ()=> Math.max(0, +(USER_CONFIG.maxAnimals ?? 0));
+  const getSweepEnabled = () => (USER_CONFIG.sweepEnabled ?? CFG.SWEEP.ENABLED);
 
   // Oasis vacíos config
   function getEmptyCfg(){
@@ -394,6 +402,9 @@
     DOT:"or-dot", ALERT_WRAP:"or-alert", TOGGLE_TAB:"or-sidebar-toggle", MINI_TIMER:"or-mini-timer",
     CFG_TOGGLE:"or-cfg-toggle", CFG_PANEL:"or-cfg-panel",
 
+      // + NUEVOS
+      EMPTY_BLOCK:"or-empty-block",
+      CFG_MAX_ANIMALS:"or-max-animals",
     // Vacíos: estado
     STATS_EMPTY:"or-stats-empty", NEXT_EMPTY:"or-nexts-empty",
 
@@ -407,12 +418,14 @@
 
     CFG_PRIORITY:"or-priority",
     CFG_DRYRUN:"or-dryrun",
+    CFG_SWEEP_ENABLE:"or-sweep-enable",
 
     // Armas
     CFG_WEAPON_ENABLE:"or-weapon-enable",
     CFG_WEAPON_INF:"or-weapon-inf",
     CFG_WEAPON_CAV:"or-weapon-cav",
     CFG_WEAPON_WRAP:"or-weapon-wrap",
+
   };
 
   function ensureSidebar(){
@@ -447,6 +460,8 @@
           </div>
 
           <div class="or-separator"></div>
+          <div id="${IDs.EMPTY_BLOCK}">
+
           <div><b>Oasis vacíos (sin héroe)</b></div>
           <div class="status-grid">
             <span><b>Cola (vacíos):</b></span> <span id="${IDs.STATS_EMPTY}">—</span>
@@ -455,11 +470,12 @@
             <b>Siguientes (vacíos):</b>
             <div id="${IDs.NEXT_EMPTY}"></div>
           </div>
+         </div>
 
           <div class="or-separator"></div>
           <div id="${IDs.CFG_TOGGLE}" class="or-cfg-header">► Configuración</div>
           <div id="${IDs.CFG_PANEL}" style="display:none;">
-<div id="or-cfg-scroll">
+              <div id="or-cfg-scroll">
             <div class="cfg-row">
               <label for="or-dist-select">Distancia ≤</label>
               <select id="or-dist-select">
@@ -474,7 +490,14 @@
               <select id="or-sort-select">
                 <option value="animals">Más Animales</option>
                 <option value="efficiency">Más Eficiente</option>
+                      <option value="animalsAsc">Menos Animales</option> <!-- NUEVO -->
+
               </select>
+            </div>
+              <!-- NUEVO: Máx. Animales -->
+            <div class="cfg-row">
+                <label for="${IDs.CFG_MAX_ANIMALS}">Máx. animales (0 = ∞)</label>
+                <input type="number" id="${IDs.CFG_MAX_ANIMALS}" min="0" step="1" value="0">
             </div>
 
             <div class="cfg-row units">
@@ -509,6 +532,11 @@
             <div class="cfg-row">
               <label for="${IDs.CFG_DRYRUN}">DRY-RUN (no enviar)</label>
               <input type="checkbox" id="${IDs.CFG_DRYRUN}">
+            </div>
+
+            <div class="cfg-row">
+              <label for="${IDs.CFG_SWEEP_ENABLE}">Barridos sin héroe (SWEEP)</label>
+              <input type="checkbox" id="${IDs.CFG_SWEEP_ENABLE}">
             </div>
 
             <div class="or-separator"></div>
@@ -626,7 +654,6 @@
     renderUnitsChecklist();
     uiRender();
   }
-  
     function updateToggleLabel() {
         const btn = document.getElementById(IDs.BTN_TOGGLE);
         if (btn) btn.textContent = STATE.running ? "Detener" : "Iniciar";
@@ -699,90 +726,95 @@
       return { attacked, remaining, total: list.length };
   }
 
+  function uiRender(){
+      if (!document.getElementById(SIDEBAR_ID)) ensureSidebar();
 
-    function uiRender(){
-        if (!document.getElementById(SIDEBAR_ID)) ensureSidebar();
+      // Estado visual (dot + label del botón)
+      setDotRunning(STATE.running);
+      if (typeof updateToggleLabel === "function") updateToggleLabel();
 
-        // Estado visual (dot + label del botón)
-        setDotRunning(STATE.running);
-        if (typeof updateToggleLabel === "function") updateToggleLabel();
+      // Colas e índices
+      const qW = STATE.queueWith  || [];
+      const qE = STATE.queueEmpty || [];
+      const idxW = Number.isFinite(STATE.idxWith)  ? STATE.idxWith  : -1;
+      const idxE = Number.isFinite(STATE.idxEmpty) ? STATE.idxEmpty : -1;
 
-        // Colas e índices
-        const qW = STATE.queueWith  || [];
-        const qE = STATE.queueEmpty || [];
-        const idxW = Number.isFinite(STATE.idxWith)  ? STATE.idxWith  : -1;
-        const idxE = Number.isFinite(STATE.idxEmpty) ? STATE.idxEmpty : -1;
+      // Próximos (con animales)
+      const nextsW = qW.slice(Math.max(idxW, -1) + 1, Math.max(idxW, -1) + 4);
+      // Próximos (vacíos)
+      const nextsE = qE.slice(Math.max(idxE, -1) + 1, Math.max(idxE, -1) + 4);
 
-        // Próximos (con animales)
-        const nextsW = qW.slice(Math.max(idxW, -1) + 1, Math.max(idxW, -1) + 4);
-        // Próximos (vacíos)
-        const nextsE = qE.slice(Math.max(idxE, -1) + 1, Math.max(idxE, -1) + 4);
+      // Línea de estado
+      let stateLine = STATE.running ? "Activo" : "Detenido";
+      if (STATE.currentVillage?.name) {
+          stateLine += ` (${STATE.currentVillage.name})`;
+      }
+      if (STATE.lastTarget) {
+          const { x, y } = STATE.lastTarget;
+          stateLine += ` — Atacando <a href="/karte.php?x=${x}&y=${y}" target="_blank">(${x}|${y})</a>`;
+      }
+      const statusEl = document.getElementById(IDs.STATUS);
+      if (statusEl) statusEl.innerHTML = stateLine;
 
-        // Línea de estado
-        let stateLine = STATE.running ? "Activo" : "Detenido";
-        if (STATE.currentVillage?.name) {
-            stateLine += ` (${STATE.currentVillage.name})`;
-        }
-        if (STATE.lastTarget) {
-            const { x, y } = STATE.lastTarget;
-            stateLine += ` — Atacando <a href="/karte.php?x=${x}&y=${y}" target="_blank">(${x}|${y})</a>`;
-        }
-        const statusEl = document.getElementById(IDs.STATUS);
-        if (statusEl) statusEl.innerHTML = stateLine;
+      // === Contadores por cola (recuento real, sin STATE.stats) ===
+      const withCounts = countQueue(qW);
+      const emptyCounts = countQueue(qE);
+      const totalCounts = {
+          attacked:  withCounts.attacked + emptyCounts.attacked,
+          remaining: withCounts.remaining + emptyCounts.remaining,
+          total:     withCounts.total     + emptyCounts.total,
+      };
 
-        // === Contadores por cola (recuento real, sin STATE.stats) ===
-        const withCounts = countQueue(qW);
-        const emptyCounts = countQueue(qE);
-        const totalCounts = {
-            attacked:  withCounts.attacked + emptyCounts.attacked,
-            remaining: withCounts.remaining + emptyCounts.remaining,
-            total:     withCounts.total     + emptyCounts.total,
-        };
+      // (A) Si tienes un span “global” en la cabecera (antes usabas STATE.stats), píntalo con el total:
+      const statsGlobal = document.getElementById(IDs.STATS);
+      if (statsGlobal) {
+          statsGlobal.textContent = `${totalCounts.attacked} atacados / ${totalCounts.remaining} restantes`;
+      }
 
-        // (A) Si tienes un span “global” en la cabecera (antes usabas STATE.stats), píntalo con el total:
-        const statsGlobal = document.getElementById(IDs.STATS);
-        if (statsGlobal) {
-            statsGlobal.textContent = `${totalCounts.attacked} atacados / ${totalCounts.remaining} restantes`;
-        }
+      // (B) Cola CON ANIMALES (si tienes un span específico úsalo; si no, reutiliza IDs.STATS)
+      const statsWithEl = document.getElementById(IDs.STATS_WITH) || document.getElementById(IDs.STATS);
+      if (statsWithEl) {
+          statsWithEl.textContent = `${withCounts.attacked} atacados / ${withCounts.remaining} restantes`;
+      }
 
-        // (B) Cola CON ANIMALES (si tienes un span específico úsalo; si no, reutiliza IDs.STATS)
-        const statsWithEl = document.getElementById(IDs.STATS_WITH) || document.getElementById(IDs.STATS);
-        if (statsWithEl) {
-            statsWithEl.textContent = `${withCounts.attacked} atacados / ${withCounts.remaining} restantes`;
-        }
+      // (C) Cola VACÍOS
+      const statsEmptyEl = document.getElementById(IDs.STATS_EMPTY);
+      if (statsEmptyEl) {
+          statsEmptyEl.textContent = `${emptyCounts.attacked} atacados / ${emptyCounts.remaining} restantes`;
+      }
 
-        // (C) Cola VACÍOS
-        const statsEmptyEl = document.getElementById(IDs.STATS_EMPTY);
-        if (statsEmptyEl) {
-            statsEmptyEl.textContent = `${emptyCounts.attacked} atacados / ${emptyCounts.remaining} restantes`;
-        }
+      // === Listas “Siguientes” ===
+      // Con animales
+      const nextWithEl = document.getElementById(IDs.NEXT_LIST);
+      if (nextWithEl) {
+          nextWithEl.innerHTML = nextsW.length
+              ? nextsW.map(o =>
+                            `• <a href="/karte.php?x=${o.x}&y=${o.y}" target="_blank">(${o.x}|${o.y})</a> ${o.animals} mobs, ${o.dist?.toFixed(1)}c`
+                          ).join("<br>")
+          : "<i>— sin próximos —</i>";
+      }
 
-        // === Listas “Siguientes” ===
-        // Con animales
-        const nextWithEl = document.getElementById(IDs.NEXT_LIST);
-        if (nextWithEl) {
-            nextWithEl.innerHTML = nextsW.length
-                ? nextsW.map(o =>
-                             `• <a href="/karte.php?x=${o.x}&y=${o.y}" target="_blank">(${o.x}|${o.y})</a> ${o.animals} mobs, ${o.dist?.toFixed(1)}c`
-                            ).join("<br>")
-            : "<i>— sin próximos —</i>";
-        }
+      // Vacíos
+      const nextEmptyEl = document.getElementById(IDs.NEXT_EMPTY);
+      if (nextEmptyEl) {
+          nextEmptyEl.innerHTML = nextsE.length
+              ? nextsE.map(o =>
+                            `• <a href="/karte.php?x=${o.x}&y=${o.y}" target="_blank">(${o.x}|${o.y})</a> ${o.dist?.toFixed(1)}c`
+                          ).join("<br>")
+          : "<i>— sin próximos —</i>";
+      }
+      // Mostrar/ocultar bloque "Oasis vacíos (sin héroe)" según toggle
+      const emptyBlock = document.getElementById(IDs.EMPTY_BLOCK);
+      if (emptyBlock) {
+          const ec = getEmptyCfg();
+          emptyBlock.style.display = ec.enabled ? '' : 'none';
+      }
 
-        // Vacíos
-        const nextEmptyEl = document.getElementById(IDs.NEXT_EMPTY);
-        if (nextEmptyEl) {
-            nextEmptyEl.innerHTML = nextsE.length
-                ? nextsE.map(o =>
-                             `• <a href="/karte.php?x=${o.x}&y=${o.y}" target="_blank">(${o.x}|${o.y})</a> ${o.dist?.toFixed(1)}c`
-                            ).join("<br>")
-            : "<i>— sin próximos —</i>";
-        }
-
-        // Countdown + alertas
-        const left = (STATE.nextAttemptEpoch || 0) - Date.now();
-        setCountdownMs(Math.max(0, left));
-        showAlert(STATE.alert?.text || "");
-    }
+      // Countdown + alertas
+      const left = (STATE.nextAttemptEpoch || 0) - Date.now();
+      setCountdownMs(Math.max(0, left));
+      showAlert(STATE.alert?.text || "");
+  }
 
 
   function handleTabInteraction(){
@@ -825,6 +857,10 @@
       e.target.textContent = (open ? "▼" : "►") + " Configuración";
     };
 
+    const maxAni = document.getElementById(IDs.CFG_MAX_ANIMALS);
+    if (maxAni) maxAni.onchange = ()=>{ USER_CONFIG.maxAnimals = Math.max(0, +maxAni.value||0); persistCfg(); };
+
+
     const distSelect=document.getElementById("or-dist-select");
     distSelect.onchange = ()=>{ USER_CONFIG.dist=parseInt(distSelect.value,10); persistCfg(); };
 
@@ -845,6 +881,14 @@
 
     const dry=document.getElementById(IDs.CFG_DRYRUN);
     dry.onchange = ()=>{ USER_CONFIG.dryRun=!!dry.checked; persistCfg(); };
+
+    const sweep = document.getElementById(IDs.CFG_SWEEP_ENABLE);
+    if (sweep) sweep.onchange = () => {
+      USER_CONFIG.sweepEnabled = !!sweep.checked;
+      persistCfg();
+    };
+
+
 
     // Empty
     const eEn=document.getElementById(IDs.CFG_EMPTY_ENABLE);
@@ -869,28 +913,28 @@
     wEn.onchange  = ()=>{ USER_CONFIG.weapons=USER_CONFIG.weapons||{}; USER_CONFIG.weapons.enabled=!!wEn.checked; persistCfg(); };
     wInf.onchange = ()=>{ USER_CONFIG.weapons=USER_CONFIG.weapons||{}; USER_CONFIG.weapons.prefer=USER_CONFIG.weapons.prefer||{}; USER_CONFIG.weapons.prefer.infId = wInf.value? +wInf.value : null; persistCfg(); };
     wCav.onchange = ()=>{ USER_CONFIG.weapons=USER_CONFIG.weapons||{}; USER_CONFIG.weapons.prefer=USER_CONFIG.weapons.prefer||{}; USER_CONFIG.weapons.prefer.cavId = wCav.value? +wCav.value : null; persistCfg(); };
-      // --- Hero auto-weapon bindings ---
-      const en     = document.getElementById(IDs.CFG_WEAPON_ENABLE);
-      const selInf = document.getElementById(IDs.CFG_WEAPON_INF);
-      const selCav = document.getElementById(IDs.CFG_WEAPON_CAV);
+    // --- Hero auto-weapon bindings ---
+    const en     = document.getElementById(IDs.CFG_WEAPON_ENABLE);
+    const selInf = document.getElementById(IDs.CFG_WEAPON_INF);
+    const selCav = document.getElementById(IDs.CFG_WEAPON_CAV);
 
-      if (en) en.onchange = () => {
-          const cfg = getWeaponsCfg();
-          cfg.enabled = !!en.checked;
-          saveWeaponsCfg(cfg);
-      };
+    if (en) en.onchange = () => {
+        const cfg = getWeaponsCfg();
+        cfg.enabled = !!en.checked;
+        saveWeaponsCfg(cfg);
+    };
 
-      if (selInf) selInf.onchange = () => {
-          const cfg = getWeaponsCfg();
-          cfg.prefer.infId = selInf.value ? +selInf.value : null;
-          saveWeaponsCfg(cfg);
-      };
+    if (selInf) selInf.onchange = () => {
+        const cfg = getWeaponsCfg();
+        cfg.prefer.infId = selInf.value ? +selInf.value : null;
+        saveWeaponsCfg(cfg);
+    };
 
-      if (selCav) selCav.onchange = () => {
-          const cfg = getWeaponsCfg();
-          cfg.prefer.cavId = selCav.value ? +selCav.value : null;
-          saveWeaponsCfg(cfg);
-      };
+    if (selCav) selCav.onchange = () => {
+        const cfg = getWeaponsCfg();
+        cfg.prefer.cavId = selCav.value ? +selCav.value : null;
+        saveWeaponsCfg(cfg);
+    };
 
   }
 
@@ -911,6 +955,9 @@
 
     const prio=document.getElementById(IDs.CFG_PRIORITY); if(prio) prio.value=getPriorityMode();
     const dry=document.getElementById(IDs.CFG_DRYRUN); if(dry) dry.checked=getDryRun();
+    const sweep = document.getElementById(IDs.CFG_SWEEP_ENABLE);
+    if (sweep) sweep.checked = getSweepEnabled();
+
 
     const ec=getEmptyCfg();
     const eEn=document.getElementById(IDs.CFG_EMPTY_ENABLE); if(eEn) eEn.checked=ec.enabled;
@@ -919,6 +966,10 @@
     const eMax=document.getElementById(IDs.CFG_EMPTY_INT_MAX); if(eMax) eMax.value=String(ec.intMax);
     const eDelay=document.getElementById(IDs.CFG_EMPTY_OUTBOUND_DELAY); if(eDelay) eDelay.value=String(ec.postOutboundDelaySec);
     const ePause=document.getElementById(IDs.CFG_EMPTY_INBOUND_PAUSE); if(ePause) ePause.value=String(ec.inboundPauseLtSec);
+
+      const maxAni = document.getElementById(IDs.CFG_MAX_ANIMALS);
+      if (maxAni) maxAni.value = String(getMaxAnimals());
+
       renderWeaponSelectors();
       updateToggleLabel();
 
@@ -936,6 +987,8 @@
       if(!await updateActiveVillage()){ error("buildOasisQueue: no aldea activa."); return; }
     }
     const center=STATE.currentVillage, sortMethod=getSortMethod(), distLimit=getDistance();
+    const maxAnimals = getMaxAnimals(); // NUEVO
+
     const mp = await fetchMapTiles(center.x, center.y, 3);
     const tiles = (mp.tiles||[]).map(t=>{
       const obj = {
@@ -952,12 +1005,18 @@
       attacked:false
     })).filter(o=>o.dist<=distLimit);
 
-    const withAnimals = all.filter(o=>o.animals>0);
+    let  withAnimals = all.filter(o=>o.animals>0);
     const empty       = all.filter(o=>o.animals<=0);
-
-    withAnimals.sort((a,b)=> sortMethod==='efficiency'
-      ? (b.animals/(b.dist||.1)) - (a.animals/(a.dist||.1)) || a.dist-b.dist
-      : (b.animals - a.animals) || (a.dist - b.dist));
+      if (maxAnimals > 0) {
+          withAnimals = withAnimals.filter(o => o.animals <= maxAnimals);
+      }
+      if (sortMethod === 'efficiency') {
+          withAnimals.sort((a,b)=> (b.animals/(b.dist||.1)) - (a.animals/(a.dist||.1)) || a.dist-b.dist);
+      } else if (sortMethod === 'animalsAsc') { // NUEVO: Menos animales
+          withAnimals.sort((a,b)=> (a.animals - b.animals) || (a.dist - b.dist));
+      } else { // 'animals' (por defecto: Más animales)
+          withAnimals.sort((a,b)=> (b.animals - a.animals) || (a.dist - b.dist));
+      }
 
     empty.sort((a,b)=> a.dist - b.dist);
 
@@ -1309,6 +1368,44 @@
     }
   }
 
+  function normalizeUnits(u){
+    const base = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0 };
+    if (!u) return { ...base };
+    const out = { ...base };
+    for (const k of Object.keys(out)) out[k] = +u[k]||0;
+    return out;
+  }
+  function subtractUnits(pool, used){
+    for (const k of Object.keys(pool)) pool[k] = Math.max(0, (pool[k]|0) - ((used[k]|0)));
+  }
+  function sumUnits(u){ return Object.values(u||{}).reduce((s,v)=>s+(+v||0),0); }
+
+  async function getAvailableTroopsSnapshotFor(x,y){
+    // abrimos el RP para algún (x,y) y leemos máximos; sirve como snapshot inicial
+    const rp = await openRallyPointFor(x,y);
+    return normalizeUnits({
+      t1: parseMaxOfType(rp,"t1"),
+      t2: parseMaxOfType(rp,"t2"),
+      t3: parseMaxOfType(rp,"t3"),
+      t4: parseMaxOfType(rp,"t4"),
+      t5: parseMaxOfType(rp,"t5"),
+      t6: parseMaxOfType(rp,"t6"),
+      t7: parseMaxOfType(rp,"t7"),
+      t8: parseMaxOfType(rp,"t8"),
+      t9: parseMaxOfType(rp,"t9"),
+      t10: parseMaxOfType(rp,"t10"),
+    });
+  }
+
+  async function sendTroopsNoHero(x,y,send){
+    const payload = Object.assign({}, send);
+    delete payload.t11; // aseguramos sin héroe
+    const preview = await postPreview(x,y,payload);
+    await postConfirm(preview);
+  }
+
+
+
   /******************************************************************
    * Con héroe: envío
    ******************************************************************/
@@ -1326,6 +1423,15 @@
     if(cur===0 || ts<cur){ STATE.nextAttemptEpoch=ts; saveState(STATE); uiTick(); }
   }
 
+  function animalsTotalFromCounts(counts){
+    let tot = 0;
+    if (!counts || typeof counts !== "object") return 0;
+    for (const k of Object.keys(counts)) tot += (+counts[k]||0);
+    return tot|0;
+  }
+
+
+
   async function trySendTo(oasis){
     const { x,y } = oasis||{};
     const heroStatus = await checkHeroStatus();
@@ -1338,7 +1444,6 @@
       return false;
     }
     if(!heroStatus.available){
-      // heroe ocupado → el *scheduler* decidirá vacíos si procede; aquí sólo programamos un wait
       let ms;
       const mv=heroStatus.move;
       if(mv && Number.isFinite(mv.secs) && mv.secs>0){
@@ -1361,6 +1466,19 @@
     };
 
     const { counts } = await tscm.utils.fetchOasisDetails(x,y);
+
+
+    if (animalsTotalFromCounts(counts) === 0) {
+      warn(`[WITH] (${x}|${y}) vacío (0 animales) → skip héroe`);
+      if (oasis) {
+        oasis.attacked = true;
+        STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+        saveState(STATE); uiRender();
+      }
+      scheduleNext(1000, "skip no animals");
+      return false;
+    }
+
     const smartInput = {
       heroAttack: STATE.heroAttack,
       lossTarget: getLossTarget(),
@@ -1417,6 +1535,8 @@
     const goSec = parseTravelSecondsFromPreview(preview);
     await postConfirm(preview);
 
+    runSweepsAfterHero({ x, y }).catch(err => warn("[SWEEP] async error:", err));
+
     oasis.attacked=true;
     STATE.lastTarget={x,y};
     saveState(STATE);
@@ -1435,6 +1555,163 @@
     }
     return true;
   }
+
+  async function runSweepsAfterHero(sentXY){
+    try{
+      let sweepFailCount = 0;
+
+      if (!getSweepEnabled()) return;
+
+      const qW = (STATE.queueWith||[]).filter(o => !o.attacked);
+      const candidates = qW.filter(o => !(o.x===sentXY.x && o.y===sentXY.y));
+      if (!candidates.length) return;
+
+      const snapForRP = candidates[0] || sentXY;
+      let availableInitial = await getAvailableTroopsSnapshotFor(snapForRP.x, snapForRP.y);
+      let availablePool    = { ...availableInitial };
+
+      const allowedUnits = getSelectedUnits((tscm.utils.getCurrentTribe()||"GAUL").toUpperCase());
+      const lossTarget   = getLossTarget();
+      const lossWeights  = CFG.SWEEP.LOSS_WEIGHTS || { t1:1, t2:3, t4:8, t5:9, t6:14 };
+
+      for (const o of candidates){
+        if (!getSweepEnabled()) break;
+        const det = await tscm.utils.fetchOasisDetails(o.x, o.y);
+        const counts = det?.counts || {};
+
+        if (animalsTotalFromCounts(counts) === 0) {
+          o.attacked = true;
+          STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+          saveState(STATE); uiRender();
+          continue;
+        }
+
+        let ret = null;
+        try{
+          ret = (tscm?.utils?.smartBuildWaveNoHero)
+            ? tscm.utils.smartBuildWaveNoHero(counts, availablePool, { lossTarget, allowedUnits, lossWeights })
+            : null;
+        }catch(e){
+          warn(`[SWEEP] smartBuildWaveNoHero error @ (${o.x}|${o.y}):`, e);
+          ret = null;
+        }
+
+        let send = null, ok = false;
+        if (Array.isArray(ret) && ret.length>=2) { send = ret[0]; ok = !!ret[1]; }
+        else if (ret && typeof ret==="object" && "send" in ret && "ok" in ret){ send = ret.send; ok = !!ret.ok; }
+
+        if (!ok || !send || !Object.keys(send).some(k => (send[k]|0)>0)) {
+          log(`[SWEEP] (${o.x}|${o.y}) omitido (recomendación)`);
+          o.attacked = true;
+          STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+          saveState(STATE); uiRender();
+          continue;
+        }
+
+        // Nunca mandar menos que lo recomendado
+        if (Object.keys(send).some(k => (send[k]|0) > (availablePool[k]|0))) {
+          warn(`[SWEEP] Pool insuficiente para (${o.x}|${o.y}) → skip`);
+          continue;
+        }
+
+        // 🔒 Lock por envío (subtarea)
+        const SUBTASK = TASK + ":sweep";
+        const okLock = await tscm.utils.setwork(SUBTASK, TTL);
+        if (!okLock) { warn("[SWEEP] no lock, retry luego"); continue; }
+        const hb = setInterval(() => tscm.utils.extendwork(SUBTASK, TTL), 45_000);
+
+        try{
+          const live = await getAvailableTroopsSnapshotFor(o.x, o.y);
+          let reallyEnough = true;
+          for (const k of Object.keys(send)) {
+            if (!/^t\d+$/.test(k)) continue;
+            if ((send[k]|0) > (live[k]|0)) { reallyEnough = false; break; }
+          }
+          if (!reallyEnough) {
+            log(`[SWEEP] Reality-check falló: RP < send → skip y cortar barrido`);
+            const waitMs = Math.max(
+              5_000,
+              (STATE.heroReturnEpoch && STATE.heroReturnEpoch > Date.now())
+                ? (STATE.heroReturnEpoch - Date.now())
+                : getRetryMs()
+            );
+            scheduleNext(waitMs, "sweep: reality-check insufficient");
+            break;
+          }
+          await sendTroopsNoHero(o.x, o.y, send);
+          subtractUnits(availablePool, send);
+
+          const left = sumUnits(availablePool);
+          log(`[SWEEP] Sent to (${o.x}|${o.y}) -> ${
+            Object.entries(send).filter(([k,v])=> (v|0)>0).map(([k,v])=>`${k}:${v}`).join(", ")
+          } | poolLeft=${left}`);
+
+          o.attacked = true;
+          STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+          saveState(STATE); uiRender();
+
+        // Reponer si pool quedó bajo → tomar snapshot FRESCO del RP
+        if (left < (CFG.SWEEP.REPLENISH_THRESHOLD|0)) {
+          availablePool = await getAvailableTroopsSnapshotFor(o.x, o.y);
+          log(`[SWEEP] Pool bajo → snapshot fresco`, availablePool);
+          if (sumUnits(availablePool) === 0) {
+            log(`[SWEEP] Pool=0 → cortar barrido y esperar siguiente ciclo`);
+            break; // cortamos el for de barridos
+          }
+        }
+
+        } catch(e) {
+            error(`[SWEEP] Error enviando a (${o.x}|${o.y})`, e);
+
+            // 1) Vuelve a leer el stock REAL del RP para esta aldea
+            const live = await getAvailableTroopsSnapshotFor(o.x, o.y);
+
+            // 2) Si lo que queríamos mandar ya no alcanza con el stock real → cortar barrido
+            let insufficient = false;
+            for (const k of Object.keys(send||{})) {
+              if (!/^t\d+$/.test(k)) continue;
+              if ((send[k]|0) > (live[k]|0)) { insufficient = true; break; }
+            }
+
+            if (insufficient) {
+              log(`[SWEEP] Stock insuficiente según RP → terminar barrido y esperar al próximo ciclo`);
+              const waitMs = Math.max(
+                5_000,
+                (STATE.heroReturnEpoch && STATE.heroReturnEpoch > Date.now())
+                  ? (STATE.heroReturnEpoch - Date.now())
+                  : getRetryMs()
+              );
+              scheduleNext(waitMs, "sweep: out of stock");
+              break; // <- corta el for de barridos
+            }
+
+            // 3) Si no es por stock, cuenta fallos transitorios y corta para no ciclar
+            sweepFailCount++;
+            if (sweepFailCount >= 2) {
+              scheduleNext(getRetryMs(), "sweep: repeated error");
+              break;
+            }
+
+            // Pausa pequeña y seguimos al próximo candidato
+            await new Promise(r => setTimeout(r, randBetween(1500, 3000)));
+
+
+        } finally {
+          clearInterval(hb);
+          tscm.utils.cleanwork(SUBTASK);
+        }
+
+        // Pausa humana
+        const wait = randBetween(CFG.SWEEP.DELAY_MIN_MS, CFG.SWEEP.DELAY_MAX_MS);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }catch(e){
+      error("[SWEEP] runSweepsAfterHero:", e);
+    }
+  }
+
+
+
 
   /******************************************************************
    * Scheduler: decide próximo paso
@@ -1708,7 +1985,7 @@
    * Init
    ******************************************************************/
   (async function init(){
-    log("INIT Oasis Raider v2.0.1");
+    log("INIT Oasis Raider v2.0.6");
     ensureSidebar();
     if(STATE.running){
       if(!STATE.currentVillage.id) await updateActiveVillage();

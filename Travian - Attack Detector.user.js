@@ -15,10 +15,17 @@
 // @connect      api.telegram.org
 // @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Attack%20Detector.user.js
 // @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Attack%20Detector.user.js
+// @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
   "use strict";
+  const { tscm } = (unsafeWindow || {});
+  const TASK = 'oasis_raider';
+  const TTL  = 5 * 60 * 1000;
+  const xv = (unsafeWindow?.tscm?.utils?.guessXVersion?.() || null);
+  const SCRIPT_VERSION = "2.2.5";
 
   // ────────────────────────────────────────────────────────────────────────────
   // Logger helpers (timestamps + niveles)
@@ -56,13 +63,12 @@
   const JITTER_MIN = 400, JITTER_MAX = 1200;
 
   // Auto-evade
+  const API_VERSION        = xv || "228.2";
   const AUTO_EVADE_DEFAULT = true;
   const EVADE_SEARCH_RADIUS = 3;                  // zoomLevel para /map/position
-  const T10_WINDOW_MS      = 10 * 60 * 1000;     // T-10m plan
-  const T60_WINDOW_MS      = 60 * 1000;          // T-60s envío total
-  const T10s_WINDOW_MS     = 10 * 1000;          // T-10s reintento
-  const API_VERSION        = "228.2";
-
+  const PLAN_WINDOW_MS = 10 * 60 * 1000;
+  const RETRY_OFFSETS_T60 = [30000, 25000, 20000, 15000]; // esto se compara con (arrival - now)
+  const RETRY_OFFSETS_T10 = [10000, 8000, 5000, 3000];    // T-10 and retries 8/5/3
   // ────────────────────────────────────────────────────────────────────────────
   // Utils generales
   // ────────────────────────────────────────────────────────────────────────────
@@ -72,13 +78,24 @@
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const clamp = (n, min, max)=> Math.max(min, Math.min(max, n));
   const isOnDorf1 = () => /\/dorf1\.php$/.test(location.pathname);
+  GM_addStyle(`
+    /* Fuerza visibilidad del ícono de ataque cuando marcamos la entrada */
+    #sidebarBoxVillageList .listEntry.village.aa-force-attack-icon .iconAndNameWrapper svg.attack {
+      visibility: visible !important;
+      opacity: 1 !important;
+    }
+    /* (Opcional) un highlight sutil en el nombre */
+    #sidebarBoxVillageList .listEntry.village.aa-force-attack-icon .name {
+      font-weight: 700;
+    }
+  `);
 
   // ────────────────────────────────────────────────────────────────────────────
   // Estado
   // ────────────────────────────────────────────────────────────────────────────
   function makeEmpty() {
     return {
-      version: "2.2.0",
+      version: SCRIPT_VERSION,
       suffix: SUFFIX,
       meta: {
         createdAt: now(),
@@ -102,7 +119,7 @@
       const raw = localStorage.getItem(LS_KEY);
       if (!raw) return makeEmpty();
       const s = JSON.parse(raw);
-      s.version  ||= "2.2.0";
+      s.version  ||= SCRIPT_VERSION;
       s.meta     ||= {};
       s.meta.ui  ||= { modal: { anchor: "top", left: null, top: null, bottom: 24, minimized: false } };
       s.settings ||= { telegramToken:"", chatId:"", quietHours:null, autoEvade: AUTO_EVADE_DEFAULT };
@@ -130,23 +147,62 @@
       if (v.totalCount <= 0) delete state.villages[vid];
     }
   }
+  let __saveCooldownUntil = 0;
+  function saveState(state, reason = "") {
+    const t = Date.now();
+    if (t < __saveCooldownUntil) return; // throttle
+    __saveCooldownUntil = t + 500;
 
-    function saveState(state, reason = "") {
-        compactState(state);
-        state.meta.updatedAt = now();
-        localStorage.setItem(LS_KEY, JSON.stringify(state));
-        //if (reason) console.log(`[${nowTs()}] [AA] state saved: ${reason}`);
-
-        // auto-limpieza del modal
-        if (!shouldShowModal(state)) {
-            document.getElementById(MODAL_ID)?.remove();
-        }
-    }
+    compactState(state);
+    state.meta.updatedAt = t;
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    if (!shouldShowModal(state)) document.getElementById(MODAL_ID)?.remove();
+  }
 
 
   // ────────────────────────────────────────────────────────────────────────────
   // DOM helpers
   // ────────────────────────────────────────────────────────────────────────────
+
+  function applySidebarAttackIconsFromDorf1(){
+    try{
+      const items = readIncomingAttacksFromDorf1();
+      if (!items.length) return;
+
+      const root = document.getElementById('sidebarBoxVillageList');
+      if (!root) return;
+
+      const counts = new Map(items.map(i => [String(i.did), Number(i.count || 0)]));
+
+      const entries = root.querySelectorAll('.listEntry.village');
+      entries.forEach(el => {
+        // Resuelve did desde varios lugares (tu helper extractDidFrom ya existe)
+        const did = el.getAttribute('data-did')
+          || el.querySelector('.name[data-did]')?.getAttribute('data-did')
+          || extractDidFrom(el)
+          || null;
+        if (!did) return;
+
+        const c = counts.get(String(did)) || 0;
+        const svg = el.querySelector('.iconAndNameWrapper svg.attack');
+        if (!svg) return;
+
+        if (c > 0){
+          el.classList.add('aa-force-attack-icon');
+          // Cinturón y tirantes por si el !important no gana:
+          svg.style.visibility = 'visible';
+        } else {
+          el.classList.remove('aa-force-attack-icon');
+          svg.style.visibility = ''; // vuelve al estilo por defecto
+        }
+      });
+    }catch(e){
+      L.warn("[AA] applySidebarAttackIconsFromDorf1 failed:", e);
+    }
+  }
+
+
+
   const $  = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
     function shouldShowModal(state) {
@@ -219,35 +275,215 @@
   }
 
   function parseInfoboxCount() {
-    const box = $(".villageInfobox.movements");
+    const box = $(".villageInfobox.movements") || $(".villageInfobox");
     if (!box) return null;
-    const a1 = box.querySelector("span.a1");
-    if (!a1) return null;
-    const m = a1.textContent.match(/(\d+)/);
+    const el = box.querySelector("span.a1, .a1, .movements .a1, .value");
+    if (!el) return null;
+    const m = (el.textContent || "").match(/(\d+)/);
     return m ? parseInt(m[1], 10) : null;
   }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // dorf1 bootstrap: leer incomingAttacksAmount por aldea (sin Travian Plus)
+  // ────────────────────────────────────────────────────────────────────────────
+
+  // Extrae un bloque JSON que empieza en la primera "{" luego de `startIdx`,
+  // respetando comillas/escapes para machear llaves correctamente.
+  function extractBalancedJsonObject(text, startIdx){
+    let i = startIdx|0;
+    // salta espacios y dos puntos
+    while (i < text.length && /[\s:]/.test(text[i])) i++;
+    if (text[i] !== "{") return null;
+
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < text.length; j++){
+      const ch = text[j];
+      if (esc){ esc = false; continue; }
+      if (inStr){
+        if (ch === "\\") { esc = true; }
+        else if (ch === "\"") { inStr = false; }
+        continue;
+      }
+      if (ch === "\""){ inStr = true; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}"){
+        depth--;
+        if (depth === 0){
+          // incluye la llave de cierre
+          return text.slice(i, j + 1);
+        }
+      }
+    }
+    return null;
+  }
+
+  // Busca el script con "Travian.React.VillageBoxes.render" y parsea viewData
+  function readIncomingAttacksFromDorf1(){
+    try{
+      const scripts = Array.from(document.scripts || []);
+      for (const s of scripts){
+        const txt = s.textContent || "";
+        if (!txt || !/Travian\.React\.VillageBoxes\.render/.test(txt)) continue;
+
+        const idx = txt.indexOf("viewData:");
+        if (idx === -1) continue;
+
+        const jsonStr = extractBalancedJsonObject(txt, idx + "viewData:".length);
+        if (!jsonStr) continue;
+
+        const viewData = JSON.parse(jsonStr);
+        const list = viewData?.ownPlayer?.villageList;
+        if (!Array.isArray(list)) continue;
+
+        // normaliza salida
+        return list.map(v => ({
+          did: String(v.id),
+          name: String(v.name || `Village ${v.id}`),
+          count: Number(v.incomingAttacksAmount || 0),
+          x: Number(v.x), y: Number(v.y),
+          coords: `(${v.x}|${v.y})`
+        }));
+      }
+    } catch(e){
+      L.warn("[AA][WARN] dorf1 incoming parser failed:", e);
+    }
+    return [];
+  }
+  // Llama esto en el tick (y al init si estás en dorf1)
+  function processDorf1IncomingList(){
+    if (!isOnDorf1()) return;
+
+    const items = readIncomingAttacksFromDorf1();
+    if (!items.length) return;
+
+    const st = loadState();
+    let changed = false;
+
+    for (const it of items){
+      const prev = st.villages[it.did]?.totalCount || 0;
+
+      if (it.count <= 0){
+        if (prev > 0){
+          delete st.villages[it.did];
+          changed = true;
+          L.info("[AA] dorf1 sync → cleared village", it.did);
+        }
+        continue;
+      }
+
+      // Si subió o no existe, dispara lectura de RP para consolidar waves
+      if (prev < it.count){
+        // pone un placeholder para que el modal muestre algo mientras llega el fetch
+        if (!st.villages[it.did]){
+          st.villages[it.did] = {
+            name: it.name,
+            coords: it.coords,
+            attackers: {},
+            totalCount: it.count,
+            lastChangeAt: now()
+          };
+          changed = true;
+        }
+        // lectura detallada (no navega la UI; usa fetch con newdid)
+        refreshVillageDetailsIfNeeded({ did: it.did, name: it.name, coords: it.coords }).catch(()=>{});
+      } else if (!st.villages[it.did]){
+        // mismo conteo pero no estaba en state → crea marcador
+        st.villages[it.did] = {
+          name: it.name,
+          coords: it.coords,
+          attackers: {},
+          totalCount: it.count,
+          lastChangeAt: now()
+        };
+        changed = true;
+      }
+    }
+
+    if (changed){
+      saveState(st, "dorf1:list-sync");
+      ensureModal();
+      renderModal(loadState());
+    }
+  }
+
+
     // ────────────────────────────────────────────────────────────────────────────
     // Helper: restaurar la aldea activa tras un envío exitoso (contranavegación)
     // ────────────────────────────────────────────────────────────────────────────
-    function restoreActiveVillageAfterSend(vid, delayMs = 2000) {
-        try {
-            const url = `/dorf1.php?newdid=${encodeURIComponent(vid)}`;
-            // Espera un poco para dejar que localStorage/estado quede persistido y logs salgan
-            setTimeout(() => {
-                // Si ya estamos en esa aldea, no hagas nada
-                const u = new URL(location.href);
-                if (u.pathname === "/dorf1.php" && u.searchParams.get("newdid") === String(vid)) {
-                    console.log("[AA][INFO] Aldea ya activa, no se contranavega.", { vid });
-                    return;
-                }
-                console.log("[AA][INFO] Contranavegando a aldea original tras envío…", { vid, url });
-                // Usa assign (no replace) por si quieres volver con back; cambia a replace si prefieres ocultar en el historial
-                location.replace(url);
-            }, Math.max(0, delayMs|0));
-        } catch (e) {
-            console.warn("[AA][WARN] No se pudo programar contranavegación:", e);
+  function restoreActiveVillageAfterSend(vid, delayMs = 2000) {
+    try {
+      const url = `/dorf1.php?newdid=${encodeURIComponent(vid)}`;
+      setTimeout(() => {
+        const u = new URL(location.href, location.origin);
+        if (u.pathname === "/dorf1.php" && (u.searchParams.get("newdid") === String(vid))) {
+          L.info("Aldea ya activa; no se contranavega.", { vid });
+          return;
         }
+        L.info("Contranavegando a aldea original tras envío…", { vid, url });
+        location.assign(url); // ← si prefieres ocultar en historial: replace(url)
+      }, Math.max(0, delayMs|0));
+    } catch (e) {
+      L.warn("No se pudo programar contranavegación:", e);
     }
+  }
+
+  function hasAttempted(ev, offset, type) {
+    if (type === "t60") return (ev.attemptsT60 || []).includes(offset);
+    return (ev.attemptsT10 || []).includes(offset);
+  }
+  function markAttempted(ev, offset, type) {
+    if (type === "t60") { ev.attemptsT60 = ev.attemptsT60 || []; if (!ev.attemptsT60.includes(offset)) ev.attemptsT60.push(offset); }
+    else { ev.attemptsT10 = ev.attemptsT10 || []; if (!ev.attemptsT10.includes(offset)) ev.attemptsT10.push(offset); }
+  }
+
+  // Buscar recall URLs en build.php?gid=16&tt=1 (vista de "overview" del RP)
+  async function findRecallUrls(villageId) {
+    try {
+      const url = `/build.php?newdid=${encodeURIComponent(villageId)}&gid=16&tt=1`;
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) return [];
+      const html = await res.text();
+
+      const urls = new Set();
+      let m;
+
+      // href="...recall=123..."  (decodifica &amp; y absolutiza)
+      const reHref = /href=["']([^"']*?recall=(\d+)[^"']*)["']/gi;
+      while ((m = reHref.exec(html)) !== null) {
+        const raw = decodeHtmlEntities(m[1]); // &amp; -> &
+        const abs = raw.startsWith("http") ? raw : new URL(raw, location.origin).href;
+        urls.add(abs);
+      }
+
+      // onclick="...recall=123..." (sin depender de &amp;)
+      const reOn = /recall\s*=\s*(\d+)/gi;
+      while ((m = reOn.exec(html)) !== null) {
+        const abs = new URL(`/build.php?gid=16&tt=1&recall=${m[1]}`, location.origin).href;
+        urls.add(abs);
+      }
+
+      return Array.from(urls);
+    } catch (e) {
+      L.warn("findRecallUrls failed", e);
+      return [];
+    }
+  }
+
+
+  async function execRecallUrl(url) {
+    try {
+      L.info("Executing recall:", url);
+      // fetch GET con credentials
+      const res = await fetch(url, { credentials: "include", method: "GET" });
+      L.dbg("Recall HTTP", res.status, url);
+      return res.ok;
+    } catch (e) {
+      L.warn("Recall fetch error", e, url);
+      return false;
+    }
+  }
+
+
 
   // ────────────────────────────────────────────────────────────────────────────
   // Rally Point (detalle)
@@ -376,16 +612,6 @@ function isNatarNonWW(t) {
 
     //-------------------------------------------------------------------------
 
-  function parseAnimalsFromMapText(text) {
-    if (!text) return 0;
-    let total = 0;
-    const re = /class="unit u3\d+"[\s\S]*?<span class="value[^>]*>\s*(\d+)\s*<\/span>/gi;
-    let m;
-    while ((m = re.exec(text)) !== null) total += parseInt(m[1], 10) || 0;
-    return total;
-  }
-
-
   // ✅ Reemplazo robusto de coordsFromVillageText (tu versión refinada)
   function coordsFromVillageText(txt) {
     let s = String(txt || "").normalize("NFKC")
@@ -405,65 +631,95 @@ function isNatarNonWW(t) {
     return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
   }
 
-async function findTargetForEvade(village, maxAnimals) {
-  console.group("[AA] findTargetForEvade");
-  console.log("input village:", village);
-  console.log("maxAnimals:", maxAnimals);
+  async function findTargetForEvade(village, maxAnimals) {
+    L.group("[AA] findTargetForEvade (with fallback)");
+    L.dbg("input village:", village);
+    L.dbg("maxAnimals:", maxAnimals);
 
-  const c = coordsFromVillageText(village.coords || "");
-  if (!c) { console.warn("No village coords found for evade."); console.groupEnd(); return null; }
+    const c = coordsFromVillageText(village.coords || "");
+    if (!c) { L.warn("No village coords found for evade."); L.groupEnd(); return null; }
 
-  const mp = await fetchMapTiles(c.x, c.y, EVADE_SEARCH_RADIUS);
-  const tiles = Array.isArray(mp?.tiles) ? mp.tiles : [];
-  console.log("tiles count:", tiles.length);
+    const mp = await fetchMapTiles(c.x, c.y, EVADE_SEARCH_RADIUS);
+    const tiles = Array.isArray(mp?.tiles) ? mp.tiles : [];
+    L.dbg("tiles count:", tiles.length);
 
-  // Solo tiles con position válida
-  const valid = tiles.filter(t => t && t.position && Number.isFinite(t.position.x) && Number.isFinite(t.position.y));
+    const valid = tiles.filter(t => t && t.position && Number.isFinite(t.position.x) && Number.isFinite(t.position.y));
 
-  // --- ¡OJO! Declarar primero, loguear después (para evitar el ReferenceError) ---
-  const empties = valid
-    .filter(t => isEmptyOasis(t))
-    .map(t => ({ x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "oasis_empty" }))
-    .sort((a,b)=>a.dist-b.dist);
+    const empties = valid
+      .filter(t => isEmptyOasis(t))
+      .map(t => ({ t, x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "oasis_empty" }))
+      .sort((a,b)=>a.dist-b.dist);
 
-  const lows = valid
-    .filter(t => isLowAnimalOasis(t, maxAnimals))
-    .map(t => ({ x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "oasis_low" }))
-    .sort((a,b)=>a.dist-b.dist);
+    const lows = valid
+      .filter(t => isLowAnimalOasis(t, maxAnimals))
+      .map(t => ({ t, x: t.position.x, y: t.position.y, animals: countAnimalsFromText(t.text||""), dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "oasis_low" }))
+      .sort((a,b)=>a.dist-b.dist);
 
-  const natars = valid
-    .filter(t => isNatarNonWW(t))
-    .map(t => ({ x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "natar" }))
-    .sort((a,b)=>a.dist-b.dist);
+    const natars = valid
+      .filter(t => isNatarNonWW(t))
+      .map(t => ({ t, x: t.position.x, y: t.position.y, dist: Math.hypot(c.x - t.position.x, c.y - t.position.y), kind: "natar" }))
+      .sort((a,b)=>a.dist-b.dist);
 
-  console.log("[AA][DBG] filtro tiles →", {
-    total: tiles.length, valid: valid.length,
-    empties: empties.length, lowOasis: lows.length, natars: natars.length
-  });
+    L.dbg("filters", { empties: empties.length, lows: lows.length, natars: natars.length });
 
-  if (empties[0]) {
-    const best = empties[0];
-    console.info(`Evade target: empty oasis (${best.x}|${best.y}) d=${best.dist.toFixed(1)}`);
-    console.groupEnd();
-    return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_empty' };
+    if (empties.length) {
+      const best = empties[0];
+      L.info(`Evade target: empty oasis (${best.x}|${best.y})`);
+      L.groupEnd();
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_empty' };
+    }
+
+    if (lows.length) {
+      const best = lows[0];
+      L.info(`Evade target: low-animal oasis (${best.x}|${best.y}) animals=${best.animals}`);
+      L.groupEnd();
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_low' };
+    }
+
+    if (natars.length) {
+      const best = natars[0];
+      L.info(`Evade target: Natar (${best.x}|${best.y})`);
+      L.groupEnd();
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'natar' };
+    }
+
+    // --- FALLBACK: si tengo más aldeas propias, enviar a la aldea más cercana ---
+    const st = loadState();
+    const ownVids = Object.keys(st.villages || {}).filter(id => id !== String(village.did));
+    if (ownVids.length > 0) {
+      // calcula la aldea propia más cercana (por coords parseadas)
+      let best = null;
+      for (const id of ownVids) {
+        const v2 = st.villages[id];
+        const c2 = coordsFromVillageText(v2?.coords || "");
+        if (!c2) continue;
+        const d = Math.hypot(c.x - c2.x, c.y - c2.y);
+        if (!best || d < best.d) best = { id, x: c2.x, y: c2.y, d };
+      }
+      if (best) {
+        L.info("Fallback target: nearest own village", best);
+        L.groupEnd();
+        return { x: best.x, y: best.y, link: `/dorf1.php?newdid=${best.id}`, dist: best.d, kind: 'village_fallback' };
+      }
+    }
+
+    // --- último fallback: elegimos oasis con MENOS animales (si existe algún oasis con animales)
+    const anyAnimals = valid
+      .map(t => ({ t, x: t.position.x, y: t.position.y, animals: countAnimalsFromText(t.text||"") }))
+      .filter(x => x.animals > 0)
+      .sort((a,b)=> a.animals - b.animals || a.dist - b.dist);
+
+    if (anyAnimals.length) {
+      const best = anyAnimals[0];
+      L.warn("Fallback: sending to oasis with least animals", best);
+      L.groupEnd();
+      return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: Math.hypot(c.x - best.x, c.y - best.y), kind: 'oasis_minanimals' };
+    }
+
+    L.warn("No evade target found at all (empties/lows/natars/own/anyAnimals).");
+    L.groupEnd();
+    return null;
   }
-  if (lows[0]) {
-    const best = lows[0];
-    console.info(`Evade target: low-animal oasis (${best.x}|${best.y}) ≤ ${maxAnimals} d=${best.dist.toFixed(1)}`);
-    console.groupEnd();
-    return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'oasis_low' };
-  }
-  if (natars[0]) {
-    const best = natars[0];
-    console.info(`Evade target: Natar non-WW (${best.x}|${best.y}) d=${best.dist.toFixed(1)} [fallback]`);
-    console.groupEnd();
-    return { x: best.x, y: best.y, link: `/karte.php?x=${best.x}&y=${best.y}`, dist: best.dist, kind: 'natar' };
-  }
-
-  console.warn("No evade target found (empty/low/natar).");
-  console.groupEnd();
-  return null;
-}
 
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -566,6 +822,16 @@ async function findTargetForEvade(village, maxAnimals) {
                 }
             }
 
+            if (max === 0 && td) {
+              const txt = cleanNumberText(td.textContent || "");
+              // busca el último número del patrón " / 123"
+              const m4 = txt.match(/\/\s*([0-9]{1,7})/);
+              if (m4) {
+                const n = toIntSafe(m4[1]);
+                if (n > 0) max = n;
+              }
+            }
+
             // (4) Respeta maxlength (típico 6 dígitos)
             const maxLen = parseInt(inp.getAttribute("maxlength") || "6", 10);
             const hardCap = Math.min(10**maxLen - 1, 2_000_000); // cinturón
@@ -591,7 +857,7 @@ async function findTargetForEvade(village, maxAnimals) {
 
     L.group("postPreviewRaid");
     L.dbg("POST", url);
-    L.table && console.table([{ x, y, eventType: 4, hero, troops_count: Object.values(troops).reduce((a,b)=>a+b,0) }]);
+    try { console.table([{ x, y, eventType: 4, hero, troops_count: Object.values(troops).reduce((a,b)=>a+b,0) }]); } catch {}
     const res = await fetch(url, {
       method: "POST", credentials: "include",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -749,6 +1015,44 @@ async function sendAllTroopsRaid(villageId, target) {
     const preview = await postPreviewRaid(villageId, x, y, troops, /* hero flag ya no se usa */ false);
     await confirmSendFromPreview(villageId, preview);
 
+    // buscar recalls y programarlos: intenta traer tropas ~30s después del envío
+    try {
+      const recallUrls = await findRecallUrls(villageId);
+      if (Array.isArray(recallUrls) && recallUrls.length) {
+        L.info("Recalls found:", recallUrls);
+        // guarda en state para visibilidad
+        try {
+          const st = loadState();
+          (st.villages[villageId].attackers || {});
+          // set recallUrls en la ola más reciente (si existe)
+          // Buscamos la ola cuya arrivalEpoch > now() - smallWindow y que no tenga recalls
+          const ag = st.villages[villageId];
+          if (ag) {
+            for (const akey of Object.keys(ag.attackers || {})) {
+              const atk = ag.attackers[akey];
+              for (let w of atk.waves || []) {
+                if ((w.arrivalEpoch - now()) > -60_000 && !w.evade?.recallUrls?.length) {
+                  w.evade = w.evade || {};
+                  w.evade.recallUrls = recallUrls;
+                  saveState(st, "evade:recall:stored");
+                  break;
+                }
+              }
+            }
+          }
+        } catch (e) { L.warn("store recall urls error", e); }
+        // programar ejecución en ~30s (usuario dijo esperar 30s para recall)
+        setTimeout(() => {
+          recallUrls.forEach(u => execRecallUrl(u).catch(()=>{}));
+        }, 30_000);
+      } else {
+        L.dbg("No recalls found after send.");
+      }
+    } catch (e) {
+      L.warn("recall scheduling failed", e);
+    }
+
+
     // restaurar aldea
     try { restoreActiveVillageAfterSend(villageId, 2000); } catch {}
 
@@ -807,6 +1111,14 @@ async function sendAllTroopsRaid(villageId, target) {
     #${SETTINGS_ID} .btns { display:flex; gap:8px; justify-content:flex-end; }
     #${SETTINGS_ID} button { background:#2d7; color:#000; font-weight:700; border:none; border-radius:8px; padding:8px 12px; cursor:pointer; }
     #${SETTINGS_ID} button.secondary { background:#333; color:#fff; }
+    #${MODAL_ID} .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+    #${MODAL_ID} .chip { font-size:11px; line-height:1; padding:4px 6px; border-radius:999px; border:1px solid #2a2a2a; background:#0d0d0d; }
+    #${MODAL_ID} .chip.done { border-color:#1f6; background:#103; color:#9f9; }
+    #${MODAL_ID} .chip.pending { opacity:.75; }
+    #${MODAL_ID} .chip.t10 { border-color:#ffda79; background:#2a2305; color:#ffd54f; }
+    #${MODAL_ID} .actions { margin-top:6px; display:flex; gap:8px; }
+    #${MODAL_ID} .btn.tryNow { background:#ffd54f; color:#000; }
+    #${MODAL_ID} .subtle { opacity:.7; font-size:11px; }
   `);
 
   function getUi() {
@@ -884,19 +1196,23 @@ async function sendAllTroopsRaid(villageId, target) {
         const m = document.createElement("div");
         m.id = MODAL_ID;
         m.innerHTML = `
-    <div class="hdr" title="Arrastra para mover. Click para minimizar/maximizar.">
-      <div class="dot"></div>
-      <div class="title">Ataques detectados</div>
-      <div class="total">0</div>
-      <div class="gear" title="Configurar / Auto-evadir">⚙️</div>
-    </div>
-    <div class="body"></div>
-  `;
+          <div class="hdr" title="Arrastra para mover. Click para minimizar/maximizar.">
+            <div class="dot"></div>
+            <div class="title">Ataques detectados</div>
+            <div class="total">0</div>
+            <button id="aa-evadir-ahora" class="btn debug" title="Envia TODO ahora (sin reintentos)">Evadir ahora</button>
+            <div class="gear" title="Configurar / Auto-evadir">⚙️</div>
+          </div>
+          <div class="body"></div>
+        `;
         document.body.appendChild(m);
 
         applyModalPosition();
         updateHeaderTotalBadge();
-
+        m.querySelector("#aa-evadir-ahora")?.addEventListener("click", (e)=>{
+          e.stopPropagation();
+          onEvadirAhoraClicked();
+        });
         m.querySelector(".gear")?.addEventListener("click", (e) => { e.stopPropagation(); toggleSettings(); });
         m.querySelector(".hdr")?.addEventListener("click", (e) => {
             if (e.target && (e.target.closest('.gear'))) return;
@@ -1013,36 +1329,46 @@ async function sendAllTroopsRaid(villageId, target) {
 
       if (attackers.length === 0) continue;
 
-      const items = attackers.map(({atk, waves}) => {
-        const next = waves[0];
-        const etaMs = next.arrivalEpoch - tNow;
-        const etaTxt = fmtEta(etaMs);
-        const atTxt = next.atText || "";
+      const items = attackers.map(({ akey, atk, waves }) => {
 
-        const ev = next.evade || {};
-        const tgtLine = ev.target
-          ? `🎯 <a href="${escapeAttr(ev.target.link)}" target="_blank">(${ev.target.x}|${ev.target.y})</a> <span class="meta">[${ev.kind||'oasis'}]</span>`
-          : "🎯 (pendiente)";
-        const t60 = Math.max(0, (next.arrivalEpoch - tNow) - T60_WINDOW_MS);
-        const t10s = Math.max(0, (next.arrivalEpoch - tNow) - T10s_WINDOW_MS);
+        const lis = waves.map((wave, idx) => {
+          const etaMs = wave.arrivalEpoch - tNow;
+          const etaTxt = fmtEta(etaMs);
+          const atTxt = wave.atText || "";
 
-        return `<li>
-          <span class="atk">${escapeHtml(atk.attackerName || "")}</span>
-          — ${atk.type === "raid" ? "Raid" : "Attack"} × ${waves.length}
-          <div class="meta">⏳ ${etaTxt} — 🕒 ${escapeHtml(atTxt)}</div>
-          <div class="meta">${tgtLine} — T-60: ${fmtEta(t60)} — T-10s: ${fmtEta(t10s)}</div>
-        </li>`;
+          const ev = wave.evade || {};
+          const tgtLine = ev.target
+            ? `🎯 <a href="${escapeAttr(ev.target.link)}" target="_blank">(${ev.target.x}|${ev.target.y})</a> <span class="meta">[${ev.kind||'oasis'}]</span>`
+            : "🎯 (pendiente)";
+
+          // chips de intentos + acciones
+          const chips = fmtAttemptChips(ev);
+
+          return `<li class="wave" data-w="${idx}">
+            <div><span class="atk">${escapeHtml(atk.attackerName || "")}</span> — ${atk.type === "raid" ? "Raid" : "Attack"}</div>
+            <div class="meta">⏳ ${etaTxt} — 🕒 ${escapeHtml(atTxt)}</div>
+            <div class="meta">${tgtLine}</div>
+            ${chips}
+            <div class="actions">
+              <button class="btn tryNow" data-vid="${escapeAttr(vid)}" data-akey="${escapeAttr(akey)}" data-widx="${idx}">Forzar intento ahora</button>
+            </div>
+          </li>`;
+        }).join("");
+
+        return lis;
       });
 
       parts.push(`
-        <div class="vbox" data-vid="${vid}">
-          <div class="vrow">
-            <div>🏰 ${escapeHtml(v.name || `Village ${vid}`)} <span class="meta">${escapeHtml(v.coords || "")}</span></div>
-            <div class="badge">${v.totalCount}</div>
-          </div>
-          <ul class="alist">${items.join("")}</ul>
+      <div class="vbox" data-vid="${vid}">
+        <div class="vrow">
+          <div>🏰 ${escapeHtml(v.name || `Village ${vid}`)} <span class="meta">${escapeHtml(v.coords || "")}</span></div>
+          <div class="badge">${v.totalCount}</div>
         </div>
-      `);
+        <ul class="alist">${items.join("")}</ul>
+      </div>
+    `);
+
+
     }
 
     body.innerHTML = parts.join("") || `<div class="meta">Sin ataques activos.</div>`;
@@ -1116,6 +1442,106 @@ async function sendAllTroopsRaid(villageId, target) {
       setTimeout(()=> box.classList.remove('flash'), 950);
     }
   }
+  function fmtAttemptChips(ev){
+    const t60 = (ev.attemptsT60||[]);
+    const t10 = (ev.attemptsT10||[]);
+    const chips60 = RETRY_OFFSETS_T60.map(ms=>{
+      const done = t60.includes(ms);
+      return `<span class="chip ${done?'done':'pending'}">T60 ${Math.round(ms/1000)}s ${done?'✓':'•'}</span>`;
+    }).join("");
+    const chips10 = RETRY_OFFSETS_T10.map(ms=>{
+      const done = t10.includes(ms);
+      return `<span class="chip t10 ${done?'done':'pending'}">T10 ${Math.round(ms/1000)}s ${done?'✓':'•'}</span>`;
+    }).join("");
+    const last = ev.lastSendAt ? `últ envío: ${fmtEta(now() - ev.lastSendAt).replace(/^0:/,'')} atrás` : `sin envíos`;
+    return `
+      <div class="chips">${chips60}${chips10}</div>
+      <div class="subtle">${last}${ev.terminal?' — <b>terminal</b>':''}</div>
+    `;
+  }
+
+  // Forzar envío inmediato: usa target existente o intenta planificar “al vuelo”
+  async function forceEvadeAttempt(vid, akey, widx){
+    const st = loadState();
+    const v = st.villages[vid];
+    if (!v) return;
+
+    const atk = v.attackers[akey];
+    if (!atk) return;
+    const w = (atk.waves||[])[widx];
+    if (!w) return;
+
+    const ev = (w.evade ||= { target:null, plannedAt:0, firstSent:false, secondSent:false, sendingLock:false, lastErrorAt:0, terminal:false, kind:null, attemptsT60:[], attemptsT10:[], lastSendAt:0, recallUrls:[] });
+
+    if (ev.sendingLock || ev.terminal) return;
+    ev.sendingLock = true;
+    saveState(st, "ui:manual-send:lock");
+
+    try{
+      // si no hay target, intenta planificar “on-demand”
+      if (!ev.target){
+        let totalTroops = 0;
+        try {
+          const rpHtml = await openRallyFor(vid, 0, 0).catch(()=>null);
+          if (rpHtml) {
+            const maxMap = parseMaxForAllTypes(rpHtml);
+            totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
+          }
+        } catch {}
+        const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
+        const target = await findTargetForEvade(v, maxAnimals);
+        if (target){
+          ev.target = { x: target.x, y: target.y, link: target.link };
+          ev.kind = target.kind || "oasis";
+          ev.plannedAt = now();
+          saveState(st, "ui:manual-send:planned");
+        } else {
+          ev.lastErrorAt = now();
+          saveState(st, "ui:manual-send:no-target");
+          L.warn("[manual] no se pudo planificar target on-demand");
+          ensureModal(); renderModal(loadState());
+          return;
+        }
+      }
+
+      // enviar
+      const res = await sendAllTroopsRaid(vid, ev.target);
+      ev.lastSendAt = now();
+      if (res.ok){
+        ev.terminal = true; // marcado terminal tras envío válido
+        saveState(st, "ui:manual-send:ok");
+        L.info("[manual] envío OK");
+      } else {
+        if (res.terminal){
+          ev.terminal = true;
+          saveState(st, "ui:manual-send:terminal");
+        } else {
+          saveState(st, "ui:manual-send:recoverable");
+        }
+        L.warn("[manual] envío falló", res);
+      }
+    } catch(e){
+      L.warn("[manual] throw", e);
+    } finally {
+      ev.sendingLock = false;
+      saveState(loadState(), "ui:manual-send:unlock");
+      ensureModal(); renderModal(loadState());
+    }
+  }
+
+  // Delegación: botón "Forzar intento ahora"
+  document.addEventListener("click", (e)=>{
+    const btn = e.target && e.target.closest?.(".btn.tryNow");
+    if (!btn) return;
+    e.preventDefault();
+    const vid  = btn.getAttribute("data-vid");
+    const akey = btn.getAttribute("data-akey");
+    const widx = parseInt(btn.getAttribute("data-widx")||"0",10);
+    forceEvadeAttempt(vid, akey, widx);
+  });
+
+
+
 
   // ────────────────────────────────────────────────────────────────────────────
   // Telegram
@@ -1191,14 +1617,19 @@ async function sendAllTroopsRaid(villageId, target) {
           notified_initial: false,
           notified_T10: false,
           evade: {
-              target: null,
-              plannedAt: 0,
-              firstSent: false,
-              secondSent: false,
-              sendingLock: false,        // ← evita reentradas mientras hay un envío en curso
-              lastErrorAt: 0,
-              terminal: false,           // ← marca que esta ola ya no debe intentar más
-              kind: null
+            target: null,
+            plannedAt: 0,
+            firstSent: false,
+            secondSent: false,
+            sendingLock: false,
+            lastErrorAt: 0,
+            terminal: false,
+            kind: null,
+            // nuevos
+            attemptsT60: [],   // offsets (ms) ya intentados en la serie T60
+            attemptsT10: [],   // offsets (ms) ya intentados en la serie T10
+            lastSendAt: 0,     // timestamp del último intento OK/FAIL para scheduling recall
+            recallUrls: []     // almacena URLs de recall encontradas tras el envío
           }
         }))
       };
@@ -1276,118 +1707,177 @@ async function sendAllTroopsRaid(villageId, target) {
   // ────────────────────────────────────────────────────────────────────────────
   // Auto-evade: planificación y ejecución
   // ────────────────────────────────────────────────────────────────────────────
-    async function planAndRunEvade(state) {
-        if (!state.settings.autoEvade) return;
-        const tNow = now();
+  // Asegúrate de tener esto en tus constantes junto a las otras:
+  async function planAndRunEvade(state) {
+    if (!state.settings.autoEvade) return;
+    const tNow = now();
 
-        for (const vid of Object.keys(state.villages)) {
-            const village = state.villages[vid];
+    for (const vid of Object.keys(state.villages)) {
+      const village = state.villages[vid];
 
-            for (const akey of Object.keys(village.attackers || {})) {
-                const atk = village.attackers[akey];
+      for (const akey of Object.keys(village.attackers || {})) {
+        const atk = village.attackers[akey];
 
-                for (const w of atk.waves || []) {
-                    const eta = w.arrivalEpoch - tNow;
-                    const ev = (w.evade ||= { target:null, plannedAt:0, firstSent:false, secondSent:false, sendingLock:false, lastErrorAt:0, terminal:false, kind:null });
+        for (const w of atk.waves || []) {
+          // estructura evade con nuevos campos (si faltan)
+          const ev = (w.evade ||= {
+            target: null,
+            plannedAt: 0,
+            firstSent: false,
+            secondSent: false,
+            sendingLock: false,
+            lastErrorAt: 0,
+            terminal: false,
+            kind: null,
+            attemptsT60: [],
+            attemptsT10: [],
+            lastSendAt: 0,
+            recallUrls: []
+          });
 
-                    if (ev.terminal) continue; // ← nada más que hacer en esta ola
+          const eta = w.arrivalEpoch - tNow;
+          if (eta <= -GRACE_MS) { ev.terminal = true; continue; } // ola ya vencida
 
-                    // 1) T-10m plan
-                    if (eta > 0 && eta <= T10_WINDOW_MS) {
-                        if (!ev.target && (!ev.lastErrorAt || (tNow - ev.lastErrorAt) > 30_000)) {
-                            try {
-                                const rpHtml = await openRallyFor(vid, 0, 0).catch(()=>null);
-                                let totalTroops = 0;
-                                if (rpHtml) {
-                                    const maxMap = parseMaxForAllTypes(rpHtml);
-                                    totalTroops = Object.values(maxMap).reduce((a,b)=>a+(b||0),0);
-                                }
-                                const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
-                                const target = await findTargetForEvade(village, maxAnimals);
-                                if (target) {
-                                    ev.target = { x: target.x, y: target.y, link: target.link };
-                                    ev.plannedAt = tNow;
-                                    ev.kind = target.kind || 'oasis';
-                                    saveState(state, "evade:planned");
-                                    ensureModal(); renderModal(loadState());
-                                    L.info("Evade planned", { vid, target: ev.target, kind: ev.kind, maxAnimals });
-                                } else {
-                                    ev.lastErrorAt = tNow;
-                                    saveState(state, "evade:no-target");
-                                }
-                            } catch (e) {
-                                ev.lastErrorAt = tNow;
-                                saveState(state, "evade:plan-error");
-                                L.warn("plan target error", e);
-                            }
-                        }
-                    }
-
-                    // 2) T-60s: primer intento
-                    if (!ev.firstSent && !ev.sendingLock && eta > 0 && eta <= T60_WINDOW_MS && ev.target) {
-                        ev.sendingLock = true;
-                        try {
-                            const res = await sendAllTroopsRaid(vid, ev.target);
-                            if (res.ok) {
-                                ev.firstSent = true;
-                                ev.terminal = false; // cambiar en caso que se necesite el segundo
-                                saveState(state, "evade:first:ok");
-                                L.info("Evade first send (T-60) OK", { vid, res });
-                            } else {
-                                // si es terminal (p.ej. NO_TROOPS) no reintentes
-                                if (res.terminal) {
-                                    ev.terminal = true;
-                                    saveState(state, "evade:first:terminal");
-                                    L.warn("Evade first send terminal, no retry", res);
-                                } else {
-                                    // recuperable → deja que pase a T-10s
-                                    saveState(state, "evade:first:recoverable");
-                                    L.warn("Evade first send recoverable, will try at T-10s", res);
-                                }
-                            }
-                        } catch (e) {
-                            L.warn("Evade first send threw", e);
-                        } finally {
-                            ev.sendingLock = false;
-                        }
-                    }
-
-                    // 3) T-10s: segundo intento SOLO si no fue terminal ni enviado
-                    if (!ev.terminal && !ev.secondSent && !ev.firstSent && !ev.sendingLock && eta > 0 && eta <= T10s_WINDOW_MS && ev.target) {
-                        ev.sendingLock = true;
-                        try {
-                            const res2 = await sendAllTroopsRaid(vid, ev.target);
-                            if (res2.ok) {
-                                ev.secondSent = true;
-                                ev.terminal = true;
-                                saveState(state, "evade:second:ok");
-                                L.info("Evade second send (T-10s) OK", { vid, res2 });
-                            } else {
-                                ev.secondSent = true; // ya intentamos el segundo
-                                if (res2.terminal) {
-                                    ev.terminal = true;
-                                    saveState(state, "evade:second:terminal");
-                                    L.warn("Evade second send terminal", res2);
-                                } else {
-                                    // falló de forma recuperable pero ya no hay más ventanas → terminal igual
-                                    ev.terminal = true;
-                                    saveState(state, "evade:second:recoverable-but-done");
-                                    L.warn("Evade second send recoverable but no more retries", res2);
-                                }
-                            }
-                        } catch (e) {
-                            ev.secondSent = true;
-                            ev.terminal = true; // ya no hay más ventanas
-                            saveState(state, "evade:second:threw");
-                            L.warn("Evade second send threw", e);
-                        } finally {
-                            ev.sendingLock = false;
-                        }
-                    }
+          // 1) PLAN: en ventana de T-10m intentar elegir target si no hay
+          if (
+            eta > 0 &&
+            eta <= PLAN_WINDOW_MS &&
+            !ev.target &&
+            (!ev.lastErrorAt || (tNow - ev.lastErrorAt) > 30_000) &&
+            !ev.sendingLock &&
+            !ev.terminal
+          ) {
+            ev.sendingLock = true;
+            try {
+              // evaluamos tropas para estimar umbral de animales
+              let totalTroops = 0;
+              try {
+                const rpHtml = await openRallyFor(vid, 0, 0).catch(() => null);
+                if (rpHtml) {
+                  const maxMap = parseMaxForAllTypes(rpHtml);
+                  totalTroops = Object.values(maxMap).reduce((a, b) => a + (b || 0), 0);
                 }
+              } catch {}
+              const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
+              const target = await findTargetForEvade(village, maxAnimals);
+
+              if (target) {
+                ev.target = { x: target.x, y: target.y, link: target.link };
+                ev.kind = target.kind || "oasis";
+                ev.plannedAt = tNow;
+                saveState(state, "evade:planned");
+                ensureModal(); renderModal(loadState());
+                L.info("Evade planned", { vid, kind: ev.kind, target: ev.target, maxAnimals });
+              } else {
+                ev.lastErrorAt = tNow;
+                saveState(state, "evade:no-target");
+                L.warn("No target found in PLAN window (T-10m).");
+              }
+            } catch (e) {
+              ev.lastErrorAt = tNow;
+              saveState(state, "evade:plan-error");
+              L.warn("plan target error", e);
+            } finally {
+              ev.sendingLock = false;
             }
-        }
-    }
+          }
+
+          // helper para intentar envío (usado por T60/T10 series)
+          const trySendOnce = async (offset, seriesTag) => {
+            // si aún no hay target, intentamos planificar "al vuelo"
+            if (!ev.target && !ev.sendingLock) {
+              ev.sendingLock = true;
+              try {
+                let totalTroops = 0;
+                try {
+                  const rpHtml = await openRallyFor(vid, 0, 0).catch(() => null);
+                  if (rpHtml) {
+                    const maxMap = parseMaxForAllTypes(rpHtml);
+                    totalTroops = Object.values(maxMap).reduce((a, b) => a + (b || 0), 0);
+                  }
+                } catch {}
+                const maxAnimals = Math.max(1, Math.min(30, Math.floor(totalTroops / 20)));
+                const target = await findTargetForEvade(village, maxAnimals);
+                if (target) {
+                  ev.target = { x: target.x, y: target.y, link: target.link };
+                  ev.kind = target.kind || "oasis";
+                  ev.plannedAt = tNow;
+                  saveState(state, `evade:${seriesTag}:planned-on-demand@${offset}`);
+                } else {
+                  ev.lastErrorAt = now();
+                  saveState(state, `evade:${seriesTag}:no-target-on-demand@${offset}`);
+                  L.warn(`[${seriesTag}] on-demand target not found`);
+                  return false; // no target, no envío
+                }
+              } finally {
+                ev.sendingLock = false;
+              }
+            }
+
+            // si sigue sin target, aborta
+            if (!ev.target) return false;
+
+            // intento de envío
+            ev.sendingLock = true;
+            try {
+              L.info(`Attempting ${seriesTag} send @${offset/1000}s`, { vid, akey, eta, target: ev.target });
+              const res = await sendAllTroopsRaid(vid, ev.target);
+              ev.lastSendAt = now();
+
+              if (res.ok) {
+                ev.terminal = true;
+                saveState(state, `evade:${seriesTag}:ok@${offset}`);
+                L.info(`${seriesTag} OK`, { vid, offset });
+                return true;
+              } else {
+                if (res.terminal) {
+                  ev.terminal = true;
+                  saveState(state, `evade:${seriesTag}:terminal@${offset}`);
+                  L.warn(`${seriesTag} terminal`, res);
+                  return false;
+                } else {
+                  saveState(state, `evade:${seriesTag}:recoverable@${offset}`);
+                  L.warn(`${seriesTag} recoverable failure`, res);
+                  return false;
+                }
+              }
+            } catch (err) {
+              L.warn(`${seriesTag} threw`, err);
+              return false;
+            } finally {
+              ev.sendingLock = false;
+            }
+          };
+
+          // 2) Serie T60 (ahora offsets 30/25/20/15)
+          for (const offset of RETRY_OFFSETS_T60) {
+            if (eta > 0 && eta <= offset && !ev.terminal) {
+              ev.attemptsT60 ||= [];
+              if (!ev.attemptsT60.includes(offset)) {
+                ev.attemptsT60.push(offset);
+                const ok = await trySendOnce(offset, "t60");
+                if (ok || ev.terminal) break; // si tuvo éxito o quedó terminal, no seguimos más offsets T60
+              }
+            }
+          }
+
+          // 3) Serie T10 (10/8/5/3) — súper urgente
+          for (const offset of RETRY_OFFSETS_T10) {
+            if (eta > 0 && eta <= offset && !ev.terminal) {
+              ev.attemptsT10 ||= [];
+              if (!ev.attemptsT10.includes(offset)) {
+                ev.attemptsT10.push(offset);
+                const ok2 = await trySendOnce(offset, "t10");
+                if (ok2 || ev.terminal) break; // éxito o terminal → salimos
+              }
+            }
+          }
+
+        } // waves
+      } // attackers
+    } // villages
+  }
+
 
   // "Evadir ahora": una sola ejecución (sin reintentos) para debug
   async function onEvadirAhoraClicked() {
@@ -1442,27 +1932,46 @@ async function sendAllTroopsRaid(villageId, target) {
   // ────────────────────────────────────────────────────────────────────────────
   // Observers & Hooks
   // ────────────────────────────────────────────────────────────────────────────
-  function observeSidebar() {
-    const box = $("#sidebarBoxVillageList");
-    if (!box) return;
-    const mo = new MutationObserver(() => { scheduleLateSidebarScan('sidebarMutation'); });
-    mo.observe(box, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-did'] });
-  }
+    function observeSidebar() {
+      const box = $("#sidebarBoxVillageList");
+      if (!box) return;
+      let t = null;
+
+      const mo = new MutationObserver(() => {
+       if (t) clearTimeout(t);
+       t = setTimeout(() => {
+         scheduleLateSidebarScan('sidebarMutation');
+         applySidebarAttackIconsFromDorf1();
+       }, 100);
+      });
+      mo.observe(box, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-did'] });
+    }
+
 
   function hookNavigation() {
     const push = history.pushState;
+    const rep  = history.replaceState;
     history.pushState = function () {
       push.apply(this, arguments);
-      setTimeout(() => { handleInfoboxDeltaForActiveVillage(); }, 300);
+      setTimeout(handleInfoboxDeltaForActiveVillage, 300);
     };
-    window.addEventListener("popstate", () => {
-      setTimeout(() => { handleInfoboxDeltaForActiveVillage(); }, 300);
-    });
+    history.replaceState = function () {
+      rep.apply(this, arguments);
+      setTimeout(handleInfoboxDeltaForActiveVillage, 300);
+    };
+    window.addEventListener("popstate", () => setTimeout(handleInfoboxDeltaForActiveVillage, 300));
   }
 
     function startTickUI() {
         setInterval(() => {
+
+            // ← NUEVO: sincroniza dorf1 si estamos en dorf1
+            processDorf1IncomingList();
+            // …y aplica el hack visual del sidebar
+            applySidebarAttackIconsFromDorf1();
+
             const st = loadState();
+
             if (!shouldShowModal(st)) {
                 // no hay ataques: no UI
                 document.getElementById(MODAL_ID)?.remove();
@@ -1504,9 +2013,12 @@ async function sendAllTroopsRaid(villageId, target) {
   // Boot
   // ────────────────────────────────────────────────────────────────────────────
   (function init() {
-    L.info(`Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.2.0`);
+    L.info(`Attack Detector Pro + Auto-Evade init on ${location.host} (${SUFFIX}) v2.2.5`);
     observeSidebar();
     hookNavigation();
+
+    // NUEVO: primer sync si entras directo a dorf1
+    if (isOnDorf1()) processDorf1IncomingList();
 
     scheduleLateSidebarScan('init');
     if (isOnDorf1()) handleInfoboxDeltaForActiveVillage();

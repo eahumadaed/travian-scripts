@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🧱 Travian - DemolitionMan
-// @version      2.3
+// @version      2.4
 // @description  Cola por aldea, botón “Demoler” en la vista del edificio, intervalos dinámicos por nivel, reintentos inteligentes, sin alerts nativos, modal/toasts propios, y ocultar UI si no hay cola.
 // @include        *://*.travian.*
 // @include        *://*/*.travian.*
@@ -61,6 +61,92 @@
       return response.status === 400 && String(data?.error || "").includes("abrissAlreadyKnockingDown");
     } catch { return false; }
   }
+
+  // Baja el HTML del Edificio Principal (gid=15) de una aldea
+  async function fetchMainBuilding(did){
+    const url = `/build.php?newdid=${encodeURIComponent(did)}&gid=15`;
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return doc;
+  }
+
+  // Si hay demolición activa, lee el timer: <table id="demolish"> ... <span class="timer" value="891">
+  function readDemolishETA(doc){
+    const timer = doc.querySelector('#demolish span.timer[value]');
+    if (!timer) return null;
+    const v = parseInt(timer.getAttribute('value')||'0',10);
+    return Number.isFinite(v) && v>0 ? v : null; // segundos restantes
+  }
+
+  // Si NO hay cola (hay <form.demolish_building>), busca el slot en el select y extrae el nivel del texto
+  // Ej: <option value="26">26 Main Building 10</option> → 10
+  function readSlotLevelFromSelect(doc, slotId){
+    const sel = doc.querySelector('form.demolish_building select#demolish');
+    if (!sel) return { foundSelect:false, foundSlot:false, level:null };
+    const opt = sel.querySelector(`option[value="${slotId}"]`);
+    if (!opt) return { foundSelect:true, foundSlot:false, level:null };
+    const txt = (opt.textContent||'').trim(); // "26 Main Building 10"
+    const m = txt.match(/(\d+)\s*$/); // último número = nivel
+    const lvl = m ? parseInt(m[1],10) : null;
+    return { foundSelect:true, foundSlot:true, level: lvl };
+  }
+
+  // Relee el estado real y ajusta head.nextAt y/o niveles según corresponda
+  async function syncHeadFromMainBuilding(did, head){
+    try{
+      const doc = await fetchMainBuilding(did);
+      const eta = readDemolishETA(doc);
+      const nowS = nowSec();
+
+      if (eta != null){
+        // Hay cola activa → programamos exactamente con ETA real ( +1–3s de jitter)
+        const jitter = 1 + Math.floor(Math.random()*3);
+        head.nextAt = nowS + eta + jitter;
+        // NO tocamos currentLevel aquí; lo haremos cuando la cola se libere
+        saveState(); renderModal();
+        return { hasActive:true, eta };
+      }
+
+      // No hay cola activa → mirar el select para saber nivel actual o si ya se demolió por completo
+      const { foundSelect, foundSlot, level } = readSlotLevelFromSelect(doc, head.slotId);
+      if (!foundSelect){
+        // Página inesperada; usar un retry corto
+        head.nextAt = nowS + (state.settings.retryShortSec || RETRY_SHORT_SEC);
+        saveState(); renderModal();
+        return { hasActive:false, indeterminate:true };
+      }
+
+      if (!foundSlot){
+        // El slot ya no aparece → edificio demolido por completo (nivel 0)
+        head.currentLevel = 0;
+        saveState(); renderModal();
+        return { hasActive:false, level:null };
+      }
+
+      // Slot existe → actualiza nivel real
+      if (Number.isFinite(level)){
+        head.currentLevel = level;
+        saveState(); renderModal();
+        return { hasActive:false, level };
+      }
+
+      // Fallback nivel desconocido
+      head.nextAt = nowS + (state.settings.retryShortSec || RETRY_SHORT_SEC);
+      saveState(); renderModal();
+      return { hasActive:false, level:null };
+    }catch(e){
+      log("⚠️ syncHeadFromMainBuilding error:", e);
+      const nowS = nowSec();
+      head.nextAt = nowS + (state.settings.retryShortSec || RETRY_SHORT_SEC);
+      saveState(); renderModal();
+      return { error:true };
+    }
+  }
+
+
+
 
   /******************************************************************
    * 🗃️ Estado
@@ -124,7 +210,6 @@
     const raw = [...h1.childNodes].filter(n=>n.nodeType===3).map(n=>n.nodeValue).join(' ').trim();
     return raw || 'Building';
   }
-
   /******************************************************************
    * 📡 POST demolición
    ******************************************************************/
@@ -143,19 +228,20 @@
         action: "demolishBuilding",
       }),
       onload: (response) => {
+        // OK / No Content
         if (response.status === 200 || response.status === 204) {
           log(`✅ ${response.status} OK → Demolition accepted (did=${villageId}, slot=${slotId})`);
           onDone && onDone({ status: 200 });
           return;
         }
+        // Cola ya en curso
         if (isAbrissAlreadyKnockingDown(response)) {
           log(`⏳ 400 in progress → still knocking (did=${villageId}, slot=${slotId})`);
           onDone && onDone({ status: 400, inProgress: true });
           return;
         }
-        
+        // Resto: transitorio
         log(`⚠️ ${response.status} unexpected → short retry (did=${villageId}, slot=${slotId})`);
-        //console.log(response.status);
         onDone && onDone({ status: response.status, error: true });
       },
       onerror: (err) => {
@@ -164,6 +250,8 @@
       }
     });
   }
+
+
 
   /******************************************************************
    * 🍞 Toasts & Confirm (sin alert/confirm nativos)
@@ -293,54 +381,81 @@
 
       if (head.nextAt > n) continue;
 
-      // Toca intentar
+      // ======== ⬇️ REEMPLAZA desde AQUÍ tu bloque "// Toca intentar" anterior ⬇️ ========
       v.runner.inFlight = true;
       v.runner.lastRun = n;
       saveState();
 
-      log(`🚧 Try → did=${did}, slot=${head.slotId}, level=${head.currentLevel}`);
-      sendDemolish(did, head.slotId, (res)=>{
-        const v2 = ensureVillage(did);
-        v2.runner.inFlight = false;
-        const head2 = v2.queue[0];
-        if (!head2) { saveState(); renderModal(); return; }
+      (async () => {
+        try{
+          // 1) Sincroniza contra Edificio Principal (gid=15)
+          const info = await syncHeadFromMainBuilding(did, head);
 
-        const n2 = nowSec();
-
-        if (res.status === 200) {
-          head2.currentLevel = Math.max(0, safeParseInt(head2.currentLevel)-1);
-          if (head2.currentLevel <= head2.targetLevel) {
-            const finished = v2.queue.shift();
-            log(`✅ Done → did=${did}, ${finished.name} llegó a ${finished.targetLevel}`);
-            if (v2.queue[0]) {
-              v2.queue[0].nextAt = n2; // al terminar uno, intenta empezar el siguiente ya
-            } else {
-              maybePruneVillage(did);
-            }
-          } else {
-            head2.nextAt = n2 + getDemolishDelaySec(head2.currentLevel);
-            log(`🔁 Reprogramado en ${Math.round((head2.nextAt-n2)/60)} min → lvl=${head2.currentLevel}`);
+          // 2) Si hay cola activa → ya fijamos ETA real dentro de sync; no hacemos POST
+          if (info && info.hasActive){
+            v.runner.inFlight = false;
+            saveState(); renderModal();
+            return;
           }
-          saveState(); renderModal();
-          return;
-        }
 
-        if (res.inProgress) {
-          head2.nextAt = n2 + getDemolishDelaySec(head2.currentLevel);
-          log(`⏳ En curso. Próximo intento en ${Math.round((head2.nextAt-n2)/60)} min (lvl=${head2.currentLevel}).`);
-          saveState(); renderModal();
-          return;
-        }
+          // 3) No hay cola activa → revisar nivel real por select
+          if (info && info.hasActive === false && info.level === null){
+            // Slot ya no existe -> quedó en 0
+            const finished = v.queue.shift();
+            log(`✅ Done (slot ausente) → did=${did}, ${finished.name} llegó a 0`);
+            if (v.queue[0]) v.queue[0].nextAt = nowSec(); else maybePruneVillage(did);
+            v.runner.inFlight = false;
+            saveState(); renderModal();
+            return;
+          }
 
-        const retry = state.settings.retryShortSec || RETRY_SHORT_SEC;
-        head2.nextAt = n2 + retry;
-        log(`⚠️ Error transitorio (${res.status}). Retry en ${Math.round(retry/60)} min.`);
-        saveState(); renderModal();
-      });
+          if (info && Number.isFinite(info.level)){
+            head.currentLevel = info.level;
+            if (head.currentLevel <= head.targetLevel){
+              const finished = v.queue.shift();
+              log(`✅ Done → did=${did}, ${finished.name} llegó a ${finished.targetLevel}`);
+              if (v.queue[0]) v.queue[0].nextAt = nowSec(); else maybePruneVillage(did);
+              v.runner.inFlight = false;
+              saveState(); renderModal();
+              return;
+            }
+          }
+
+          // 4) No hay cola y aún falta → POST para bajar 1 nivel más
+          log(`🚧 Try → did=${did}, slot=${head.slotId}, level=${head.currentLevel}`);
+          sendDemolish(did, head.slotId, async (res)=>{
+            const v3 = ensureVillage(did);
+            v3.runner.inFlight = false;
+            const head3 = v3.queue[0];
+            if (!head3){ saveState(); renderModal(); return; }
+
+            if (res.status === 200 || res.inProgress){
+              // Nada de restar nivel aquí. Tomamos ETA real o nivel real en MB.
+              await syncHeadFromMainBuilding(did, head3);
+              return;
+            }
+
+            const retry = state.settings.retryShortSec || RETRY_SHORT_SEC;
+            head3.nextAt = nowSec() + retry;
+            log(`⚠️ Error transitorio (${res.status}). Retry en ${Math.round(retry/60)} min.`);
+            saveState(); renderModal();
+          });
+
+        }catch(e){
+          v.runner.inFlight = false;
+          const retry = state.settings.retryShortSec || RETRY_SHORT_SEC;
+          head.nextAt = nowSec() + retry;
+          log("❌ Error en ciclo decide/try:", e);
+          saveState(); renderModal();
+        }
+      })();
+      // ======== ⬆️ HASTA AQUÍ el reemplazo ⬆️ ========
+
     }
 
     updateCountdownsInDOM();
   }, 1000);
+
 
   /******************************************************************
    * 🪟 Modal UI (no mostrar si no hay colas)
@@ -609,17 +724,22 @@
         }, (ok)=> { if (ok) { targetLevel = 0; confirmEnqueue(); } });
       }
 
-      function confirmEnqueue() {
-        const firstDelay = getDemolishDelaySec(level);
+      async function confirmEnqueue() {
         const job = {
           slotId, gid, name,
           currentLevel: level,
           targetLevel: targetLevel,
-          nextAt: nowSec() + firstDelay, // se sobreescribe a 0 si arranque inmediato aplica
+          nextAt: 0, // que el ciclo lo resuelva y/o se sincronice
           pageUrl: location.pathname + location.search,
           status: "queued"
         };
         enqueueJob(did, job);
+
+        // Primer sync rápido para fijar ETA real si ya quedó en cola
+        const v = ensureVillage(did);
+        if (v.queue[0] === job){
+          await syncHeadFromMainBuilding(did, job);
+        }
       }
     });
 
