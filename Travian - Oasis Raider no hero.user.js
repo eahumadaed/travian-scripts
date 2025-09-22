@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider — No Hero (por aldea)
-// @version      0.9.0
+// @version      1.0.1
 // @namespace    tscm
 // @description  Raideo por aldea SIN héroe: con animales via smartBuildWaveNoHero, vacíos con 5 tropas; ciclo global por aldeas activas, UI por aldea y log de envíos.
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
+// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider%20no%20hero.user.js
+// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Oasis%20Raider%20no%20hero.user.js
 // @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
 // @grant        unsafeWindow
 // ==/UserScript==

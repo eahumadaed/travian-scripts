@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.6
+// @version      2.0.7
 // @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
@@ -81,6 +81,7 @@
     u39:{inf:440, cav:520},  // Tiger
     u40:{inf:600, cav:440},  // Elephant
   };
+  const MIN_WAVE = 5;
 
   // Mapas auxiliares para parser de animales
 
@@ -172,6 +173,24 @@
   /******************************************************************
    * Utils
    ******************************************************************/
+  function maxWaveCount(send){
+    if(!send) return 0;
+    let m = 0;
+    for(const k of ["t1","t2","t3","t4","t5","t6"]){
+      m = Math.max(m, +send[k]||0);
+    }
+    return m;
+  }
+  function totalUsableStock(available, allowedUnits){
+    let sum = 0;
+    for(const k of ["t1","t2","t3","t4","t5","t6"]){
+      if (!allowedUnits || allowedUnits[k]) sum += (+available[k]||0);
+    }
+    return sum|0;
+  }
+
+
+
   const distFields = (a,b)=> Math.hypot(a.x-b.x,a.y-b.y);
   function decodeHtmlEntities(raw){ if(!raw) return ""; const t=document.createElement("textarea"); t.innerHTML=String(raw); return t.value; }
 
@@ -899,7 +918,12 @@
     const ePause=document.getElementById(IDs.CFG_EMPTY_INBOUND_PAUSE);
 
     eEn.onchange   = ()=>{ USER_CONFIG.empty=USER_CONFIG.empty||{}; USER_CONFIG.empty.enabled=!!eEn.checked; persistCfg(); };
-    ePer.onchange  = ()=>{ USER_CONFIG.empty=USER_CONFIG.empty||{}; USER_CONFIG.empty.perTarget=+ePer.value||CFG.EMPTY.PER_TARGET; persistCfg(); };
+    ePer.onchange = ()=>{
+      USER_CONFIG.empty = USER_CONFIG.empty||{};
+      const v = +ePer.value || CFG.EMPTY.PER_TARGET;
+      USER_CONFIG.empty.perTarget = Math.max(MIN_WAVE, v); // ← clamp
+      persistCfg();
+    };
     eMin.onchange  = ()=>{ USER_CONFIG.empty=USER_CONFIG.empty||{}; USER_CONFIG.empty.intervalMinSec=+eMin.value||CFG.EMPTY.INTERVAL_MIN_SEC; persistCfg(); };
     eMax.onchange  = ()=>{ USER_CONFIG.empty=USER_CONFIG.empty||{}; USER_CONFIG.empty.intervalMaxSec=+eMax.value||CFG.EMPTY.INTERVAL_MAX_SEC; persistCfg(); };
     eDelay.onchange= ()=>{ USER_CONFIG.empty=USER_CONFIG.empty||{}; USER_CONFIG.empty.postOutboundDelaySec=+eDelay.value||CFG.EMPTY.POST_OUTBOUND_DELAY_SEC; persistCfg(); };
@@ -961,7 +985,11 @@
 
     const ec=getEmptyCfg();
     const eEn=document.getElementById(IDs.CFG_EMPTY_ENABLE); if(eEn) eEn.checked=ec.enabled;
-    const ePer=document.getElementById(IDs.CFG_EMPTY_PER); if(ePer) ePer.value=String(ec.perTarget);
+    const ePer=document.getElementById(IDs.CFG_EMPTY_PER);
+    if(ePer){
+      ePer.min = String(MIN_WAVE);            // ← fija el mínimo visible en la UI
+      ePer.value = String(ec.perTarget);
+    }
     const eMin=document.getElementById(IDs.CFG_EMPTY_INT_MIN); if(eMin) eMin.value=String(ec.intMin);
     const eMax=document.getElementById(IDs.CFG_EMPTY_INT_MAX); if(eMax) eMax.value=String(ec.intMax);
     const eDelay=document.getElementById(IDs.CFG_EMPTY_OUTBOUND_DELAY); if(eDelay) eDelay.value=String(ec.postOutboundDelaySec);
@@ -1270,8 +1298,18 @@
       };
       console.log(`${tag} Available stock:`, JSON.stringify(available));
 
-      const perTarget = Math.max(1, ec.perTarget|0);
+      const perTarget = Math.max(MIN_WAVE, ec.perTarget|0);
+
       const totalStock = ["t1","t2","t3","t4","t5","t6"].reduce((s,k)=> s + (available[k]||0), 0);
+
+      // Sin stock suficiente global para cumplir el mínimo
+      if (totalStock < MIN_WAVE){
+        const cd = (ec.outOfStockCooldownMs || 30*60*1000);
+        warn(`[EMPTY] totalStock(${totalStock}) < ${MIN_WAVE} → cooldown ${(cd/60000)|0}m`);
+        scheduleNext(cd, "empty: low global stock");
+        return false;
+      }
+
       log(`${tag} perTarget=${perTarget} | totalStock=${totalStock}`);
 
       // 2) SIN TROPA → pausa 30min y NO marcar el oasis
@@ -1286,26 +1324,19 @@
       // 3) Elegir unidad preferida (rápidas→lentas) con fallback si no alcanza
       const tribe = (tscm.utils.getCurrentTribe() || "GAUL").toUpperCase();
       let unit = (typeof pickUnitForEmpty === "function") ? pickUnitForEmpty(available, tribe, perTarget) : null;
-      log(`${tag} pickUnitForEmpty → ${unit||"null"}`);
 
-        // Fallback manual por preferencia (rápidas→lentas)
-        if (!unit || (available[unit]||0) < perTarget) {
-            const groups = tribeOrder(tribe); // respeta CFG.TRIBE_UNIT_GROUPS
-            const ua = tribeUA(tribe) || {};  // <-- ¡esta línea es clave!
+      // Fallback respetando el orden de tu tribu y evitando scouts/def
+      if (!unit || (available[unit]||0) < perTarget) {
+        const groups = tribeOrder(tribe);
+        const ua = tribeUA(tribe) || {};
+        const pref = [...(groups.cav||[]), ...(groups.inf||[])].filter(u => (ua[u]||0) > 0);
+        unit = pref.find(u => (available[u]||0) >= perTarget) || null;
+      }
 
-            const pref = [...(groups.cav||[]), ...(groups.inf||[])].filter(u => (ua[u]||0) > 0);   // evita scouts/def para esa tribu
-
-            const prevUnit = unit;
-            unit = pref.find(u => (available[u]||0) >= perTarget) || null;
-            log(`${tag} fallback unit from ${prevUnit||"null"} → ${unit||"null"}`);
-        }
-
-
-      // 4) Ninguna unidad alcanza perTarget para este tile → marcar tile & avanzar
       if (!unit) {
         warn(`${tag} No unit meets perTarget=${perTarget}. Skip this tile and short retry.`);
         if (oasis) {
-          oasis.attacked = true;                      // Consumimos solo este tile
+          oasis.attacked = true; // si prefieres NO consumirlo para reintentar luego, comenta esta línea
           STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
           saveState(STATE); uiRender();
         }
@@ -1315,6 +1346,7 @@
       }
 
       const send = {}; send[unit] = perTarget;
+
 
         // 5) DRY-RUN
         if (typeof getDryRun === "function" && getDryRun()) {
@@ -1465,6 +1497,14 @@
       t6:parseMaxOfType(rp,"t6"),
     };
 
+    const allowedUnits = getSelectedUnits();
+    if (totalUsableStock(available, allowedUnits) < MIN_WAVE){
+      warn(`[WITH] Stock usable < ${MIN_WAVE} → skip y esperar`);
+      scheduleNext(getRetryMs(), "min-wave: low usable stock");
+      return false;
+    }
+
+
     const { counts } = await tscm.utils.fetchOasisDetails(x,y);
 
 
@@ -1485,6 +1525,19 @@
       allowedUnits: getSelectedUnits(),
     };
     const { send, explain } = smartBuildWave(counts, available, smartInput);
+
+    // No mandamos waves enanos
+    if (maxWaveCount(send) < MIN_WAVE){
+      warn(`[WITH] wave.max < ${MIN_WAVE} → skip`);
+      // Marcamos el oasis como consumido para avanzar al siguiente
+      if (oasis) {
+        oasis.attacked = true;
+        STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+        saveState(STATE); uiRender();
+      }
+      scheduleNext(1000, "min-wave: with-hero");
+      return false;
+    }
 
     // --- Nuevo filtro: no mandar si supera el objetivo de pérdidas (según config)
     const maxLoss = getLossTarget(); // ej: 0.02 = 2%
@@ -1638,6 +1691,13 @@
             scheduleNext(waitMs, "sweep: reality-check insufficient");
             break;
           }
+          if (maxWaveCount(send) < MIN_WAVE) {
+            log(`[SWEEP] wave.max < ${MIN_WAVE} @ (${o.x}|${o.y}) → skip sin marcar`);
+            // Importante: NO marcar o.attacked aquí, así se reintenta más tarde cuando haya stock
+            continue;
+          }
+
+
           await sendTroopsNoHero(o.x, o.y, send);
           subtractUnits(availablePool, send);
 
@@ -1985,7 +2045,7 @@
    * Init
    ******************************************************************/
   (async function init(){
-    log("INIT Oasis Raider v2.0.6");
+    log("INIT Oasis Raider v2.0.7");
     ensureSidebar();
     if(STATE.running){
       if(!STATE.currentVillage.id) await updateActiveVillage();
