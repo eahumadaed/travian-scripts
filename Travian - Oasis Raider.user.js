@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.7
+// @version      2.0.8
 // @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
@@ -147,7 +147,7 @@
     const c = USER_CONFIG.empty || {};
     return {
       enabled: !!(c.enabled ?? CFG.EMPTY.ENABLED),
-      perTarget: +((c.perTarget ?? CFG.EMPTY.PER_TARGET) || 0),
+      perTarget: Math.max(MIN_WAVE, +((c.perTarget ?? CFG.EMPTY.PER_TARGET) || 0)), // ← aquí
       intMin: +((c.intervalMinSec ?? CFG.EMPTY.INTERVAL_MIN_SEC) || 0),
       intMax: +((c.intervalMaxSec ?? CFG.EMPTY.INTERVAL_MAX_SEC) || 0),
       postOutboundDelaySec: +((c.postOutboundDelaySec ?? CFG.EMPTY.POST_OUTBOUND_DELAY_SEC) || 0),
@@ -988,7 +988,8 @@
     const ePer=document.getElementById(IDs.CFG_EMPTY_PER);
     if(ePer){
       ePer.min = String(MIN_WAVE);            // ← fija el mínimo visible en la UI
-      ePer.value = String(ec.perTarget);
+      ePer.value = String(Math.max(MIN_WAVE, ec.perTarget));
+
     }
     const eMin=document.getElementById(IDs.CFG_EMPTY_INT_MIN); if(eMin) eMin.value=String(ec.intMin);
     const eMax=document.getElementById(IDs.CFG_EMPTY_INT_MAX); if(eMax) eMax.value=String(ec.intMax);
@@ -2045,7 +2046,7 @@
    * Init
    ******************************************************************/
   (async function init(){
-    log("INIT Oasis Raider v2.0.7");
+    log("INIT Oasis Raider v2.0.8");
     ensureSidebar();
     if(STATE.running){
       if(!STATE.currentVillage.id) await updateActiveVillage();
