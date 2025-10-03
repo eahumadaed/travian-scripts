@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.0
+// @version       2.1.1
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -163,6 +163,31 @@
   };
 
   function sumUnits(u){ return ['t1','t2','t3','t4','t5','t6','t7','t8','t9','t10'].reduce((a,k)=>a+(u?.[k]|0),0); }
+  // --- helper robusto para sumar unidades ---
+  function safeSumUnits(pack){
+    if (!pack || typeof pack !== 'object') return 0;
+    let total = 0;
+    for (const k in pack){
+      const v = pack[k];
+      // coerción robusta + filtro de no-numéricos/negativos
+      const n = (typeof v === 'number') ? v : parseInt(v, 10);
+      if (Number.isFinite(n) && n > 0) total += n;
+    }
+    return total | 0;
+  }
+
+  function normalizeUnits(send){
+    if (!send || typeof send !== 'object') return null;
+    const src = (send.units && typeof send.units === 'object') ? send.units : send;
+    const out = {};
+    for (let i=1;i<=10;i++){
+      const k = 't'+i;
+      if (k in src) out[k] = src[k];
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
+
   function dist(ax,ay,bx,by){ const dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
 
   function getWhitelist(){
@@ -495,398 +520,442 @@
   function unitDiffers(a,b){
     return !UNIT_KEYS.every(k => (a?.[k]|0) === (b?.[k]|0));
   }
+  function toFullUnitPack(pack){
+    const out = {};
+    for (const k of UNIT_KEYS){
+      const v = pack?.[k] ?? 0;
+      out[k] = (typeof v === 'number') ? (v|0) : (parseInt(v,10) || 0);
+    }
+    return out;
+  }
 
   function cfgGetBool(key, def){ const v=LS.get(key, def); return !!v; }
   function cfgGetInt(key, def){ const v=LS.get(key, def); const n = parseInt(v,10); return Number.isFinite(n)?n:def; }
 
-async function planForList(flId, gqlData){
-  console.log(new Date().toISOString(), "[planForList] START flId=", flId);
+  async function planForList(flId, gqlData){
+    console.log(new Date().toISOString(), "[planForList] START flId=", flId);
 
-  const farmList = gqlData?.farmList;
-  const slots = farmList?.slots || [];
-  const history = getHistory();
-  const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
-  const did = farmList?.ownerVillage?.id|0;
-  const vm  = findVillageByDid(did);
-
-  const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-  const pool = getBudgetPool(villageUnits);
-  const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
-
-  const wl = getWhitelist();
-  const cfg = {
-    whitelist: wl,
-    allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),
-    allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),
-    icon2DecayH: cfgGetInt(KEY_CFG_ICON2DECAYH, ICON2_DECAY_H),
-    burstN: cfgGetInt(KEY_CFG_BURST_N, BURST_DEFAULT.n),
-    burstDMin: cfgGetInt(KEY_CFG_BURST_DMIN, BURST_DEFAULT.dmin),
-    burstDMax: cfgGetInt(KEY_CFG_BURST_DMAX, BURST_DEFAULT.dmax),
-  };
-
-  console.log("[planForList] budget:", budget);
-  console.log("[planForList] cfg:", cfg);
-  console.log("[planForList] slots count:", slots.length);
-
-  const updates = [];
-  const candidates = [];
-
-  function blockForHours(h){
-    const until = now() + (h|0)*3600*1000;
-    return { permaUntil: until, blockedUntil: until };
-  }
-
-  async function getReportDecision(sl){
-    const lr = sl?.lastRaid || {};
-    if (!lr?.reportId || !lr?.authKey) return null;
-    try{
-      const mini = await tscm.utils.fetchReportMini({ reportId: lr.reportId, authKey: lr.authKey });
-      console.log("[report-mini]", sl.id, mini);
-      return mini || null;
-    }catch(e){
-      console.log("[report-mini] error", sl?.id, e);
-      return null;
+    // --- helpers locales robustos para oasis libres ---
+    function normalizeUnits(send){
+      if (!send || typeof send !== 'object') return null;
+      const src = (send.units && typeof send.units === 'object') ? send.units : send;
+      const out = {};
+      for (let i=1;i<=10;i++){
+        const k = 't'+i;
+        if (k in src) out[k] = src[k];
+      }
+      return Object.keys(out).length ? out : null;
     }
-  }
+    function safeSumUnits(pack){
+      if (!pack || typeof pack !== 'object') return 0;
+      let total = 0;
+      for (const k in pack){
+        const n = Number.parseInt(pack[k], 10);
+        if (Number.isFinite(n) && n > 0) total += n;
+      }
+      return total|0;
+    }
 
-  // -------------------------
-  // STAGE 1: build candidates
-  // -------------------------
-  for (const sl of slots){
-    if (!sl?.id) continue;
-    if (!sl.isActive) continue;
-    if (sl.isRunning){
-      const over = cfgGetBool(KEY_CFG_OVERLOAD, false);
-      if (!over){
-        continue; // comportamiento clásico
-      } else {
-        if (!canOverloadSlot(sl)){
-          console.log("[cand] overload filtered out", sl.id, { running: sl.runningAttacks, nextAttackAt: sl.nextAttackAt });
-          continue;
-        }
+    const farmList = gqlData?.farmList;
+    const slots = farmList?.slots || [];
+    const history = getHistory();
+    const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
+    const did = farmList?.ownerVillage?.id|0;
+    const vm  = findVillageByDid(did);
+
+    const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
+    const pool = getBudgetPool(villageUnits);
+    const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
+
+    const wl = getWhitelist();
+    const cfg = {
+      whitelist: wl,
+      allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),
+      allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),
+      icon2DecayH: cfgGetInt(KEY_CFG_ICON2DECAYH, ICON2_DECAY_H),
+      burstN: cfgGetInt(KEY_CFG_BURST_N, BURST_DEFAULT.n),
+      burstDMin: cfgGetInt(KEY_CFG_BURST_DMIN, BURST_DEFAULT.dmin),
+      burstDMax: cfgGetInt(KEY_CFG_BURST_DMAX, BURST_DEFAULT.dmax),
+    };
+
+    console.log("[planForList] budget:", budget);
+    console.log("[planForList] cfg:", cfg);
+    console.log("[planForList] slots count:", slots.length);
+
+    const updates = [];
+    const candidates = [];
+
+    function blockForHours(h){
+      const until = now() + (h|0)*3600*1000;
+      return { permaUntil: until, blockedUntil: until };
+    }
+
+    async function getReportDecision(sl){
+      const lr = sl?.lastRaid || {};
+      if (!lr?.reportId || !lr?.authKey) return null;
+      try{
+        const mini = await tscm.utils.fetchReportMini({ reportId: lr.reportId, authKey: lr.authKey });
+        console.log("[report-mini]", sl.id, mini);
+        return mini || null;
+      }catch(e){
+        console.log("[report-mini] error", sl?.id, e);
+        return null;
       }
     }
-    if (sl.isSpying) continue;
 
-    const st = readSlotState(sl.id);
-    const lr = sl?.lastRaid || {};
-    const curIcon = parseInt(lr?.icon ?? st.lastIcon ?? -1, 10);
+    // -------------------------
+    // STAGE 1: build candidates
+    // -------------------------
+    for (const sl of slots){
+      if (!sl?.id) continue;
+      if (!sl.isActive) continue;
+      if (sl.isRunning){
+        const over = cfgGetBool(KEY_CFG_OVERLOAD, false);
+        if (!over){
+          continue; // comportamiento clásico
+        } else {
+          if (!canOverloadSlot(sl)){
+            console.log("[cand] overload filtered out", sl.id, { running: sl.runningAttacks, nextAttackAt: sl.nextAttackAt });
+            continue;
+          }
+        }
+      }
+      if (sl.isSpying) continue;
 
-    // ICON 3: universal skip
-    if (curIcon === 3){
-      console.log("[cand] skip icon3", sl.id);
-      writeSlotState(sl.id, { lastIcon: 3 });
-      continue;
-    }
+      const st = readSlotState(sl.id);
+      const lr = sl?.lastRaid || {};
+      const curIcon = parseInt(lr?.icon ?? st.lastIcon ?? -1, 10);
 
-    // Log de ayuda cuando icon es 2 (si hay reporte)
-    if (curIcon === 2 && (lr?.reportId && lr?.authKey)){
-      console.log("[cand] icon2 → report", sl.id, { reportId: lr.reportId, authKey: lr.authKey, time: lr.time });
-    }
-
-    const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
-    const ttype = sl?.target?.type|0; // 0=aldea, 1=capital, 2=oasis ocupado, 3=oasis libre
-
-    try{
-      if (ttype === 2){
-        // Oasis ocupado → nunca desde farmlist
-        console.log("[cand] occupied oasis → skip", sl.id, { x: tx, y: ty });
+      // ICON 3: universal skip
+      if (curIcon === 3){
+        console.log("[cand] skip icon3", sl.id);
+        writeSlotState(sl.id, { lastIcon: 3 });
         continue;
       }
 
-      if (ttype === 3){
-        // Oasis libre → usar planificador unificado SIN héroe (tscm)
-        // 1) Obtener did desde el GQL (ownerVillage.id) y coords desde el cache
-        const did = farmList?.ownerVillage?.id|0;
-        const vMatch = findVillageByDid(did);
+      // Log de ayuda cuando icon es 2 (si hay reporte)
+      if (curIcon === 2 && (lr?.reportId && lr?.authKey)){
+        console.log("[cand] icon2 → report", sl.id, { reportId: lr.reportId, authKey: lr.authKey, time: lr.time });
+      }
 
-        if (!vMatch){
-          // intento de rescaneo rápido por si el cache estaba vacío o incompleto
+      const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
+      const ttype = sl?.target?.type|0; // 0=aldea, 1=capital, 2=oasis ocupado, 3=oasis libre
+
+      try{
+        if (ttype === 2){
+          // Oasis ocupado → nunca desde farmlist
+          console.log("[cand] occupied oasis → skip", sl.id, { x: tx, y: ty });
+          continue;
+        }
+
+        if (ttype === 3){
+          // Oasis libre → usar planificador unificado SIN héroe (tscm)
+          // 1) Obtener did desde el GQL (ownerVillage.id) y coords desde el cache
+          const did = farmList?.ownerVillage?.id|0;
+          const vMatch = findVillageByDid(did);
+
+          if (!vMatch){
+            // intento de rescaneo rápido por si el cache estaba vacío o incompleto
+            try{
+              const rescanned = scanAllVillagesFromSidebar();
+              if (Object.keys(rescanned).length) setVillagesMap(rescanned);
+            }catch(e){ /* ignore */ }
+          }
+
+          const vm = vMatch || findVillageByDid(did);
+          if (!vm){
+            console.log("[cand] free oasis: cannot resolve coords from did", { did, slotId: sl.id });
+            continue;
+          }
+
+          // 2) available desde pool (coherente con tu sistema de reservas)
+          const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
+          const pool = getBudgetPool(villageUnits);
+          const available = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
+
+          // 3) whitelist & lossTarget
+          const wl = getWhitelist();
+          const lossTarget = 0.02;
+
+          // 4) plan del helper central
+          const oX = sl?.target?.x|0, oY = sl?.target?.y|0;
+          let plan=null;
           try{
-            const rescanned = scanAllVillagesFromSidebar();
-            if (Object.keys(rescanned).length) setVillagesMap(rescanned);
-          }catch(e){ /* ignore */ }
-        }
+            plan = await tscm.utils.planOasisRaidNoHero(vm.did, vm.x, vm.y, oX, oY, available, wl, lossTarget);
+          }catch(e){
+            console.log("[cand] planOasisRaidNoHero error", sl.id, e);
+            continue;
+          }
 
-        const vm = vMatch || findVillageByDid(did);
-        if (!vm){
-          console.log("[cand] free oasis: cannot resolve coords from did", { did, slotId: sl.id });
+          let normalized = null; // <- hoist aquí para usarlo después
+          if (!plan?.ok){
+            console.log("[cand] free oasis → plan no-ok, disable + block", sl.id, plan?.reason);
+            updates.push({ listId: flId, id: sl.id, x: oX, y: oY, active: true });
+            writeSlotState(sl.id, { ...blockForHours(12), lastIcon: 2 });
+            continue;
+          }else{
+            normalized = normalizeUnits(plan.send);
+            console.log("[cand] free oasis → plan ok", sl.id, { desired: normalized ? safeSumUnits(normalized) : 0, plan });
+          }
+
+          // ok → marcar para STAGE 3 usando plan.send (sin héroe)
+          sl.__isFreeOasis = true;
+          // clonar para evitar prototipos/propiedades extrañas y mutaciones
+          sl.__oasisPlanSend = { units: normalized || {} }; // guardamos siempre con shape {units:{}}
+          sl.__oasisDesired  = normalized ? safeSumUnits(normalized) : 0;
+          candidates.push(sl);
           continue;
         }
 
-        // 2) available desde pool (coherente con tu sistema de reservas)
-        const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-        const pool = getBudgetPool(villageUnits);
-        const available = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
+        // ttype 0/1: aldeas (incluye natars). NO getOasisVerdict.
+        // Si está bloqueado y el último icon fue 1, limpialo
+        if (curIcon === 1 && (st.blockedUntil > now()    || st.permaUntil > now())){
+          console.log("[cand] clean blocks on icon1", sl.id);
+          writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
+        }
 
-        // 3) whitelist & lossTarget
-        const wl = getWhitelist();
-        const lossTarget = 0.02;
-
-        // 4) plan del helper central
-        const oX = sl?.target?.x|0, oY = sl?.target?.y|0;
-        let plan=null;
-        try{
-          plan = await tscm.utils.planOasisRaidNoHero(vm.did, vm.x, vm.y, oX, oY, available, wl, lossTarget);
-        }catch(e){
-          console.log("[cand] planOasisRaidNoHero error", sl.id, e);
+        // Respeta bloqueo actual
+        if (isBlocked(readSlotState(sl.id))){
+          console.log("[cand] blocked", sl.id);
           continue;
         }
 
-        if (!plan?.ok){
-          console.log("[cand] free oasis → plan no-ok, disable + block", sl.id, plan?.reason);
-          updates.push({ listId: flId, id: sl.id, x: oX, y: oY, active: false });
-          writeSlotState(sl.id, { ...blockForHours(12), lastIcon: 2 });          
-          continue;
+        // Sin icono → candidato automático (ya filtrado type 2 arriba)
+        if (Number.isNaN(curIcon) || curIcon < 0){
+          console.log("[cand] no icon → auto-candidate", sl.id);
         }
 
-        // ok → marcar para STAGE 3 usando plan.send (sin héroe)
-        sl.__isFreeOasis = true;
-        sl.__oasisPlanSend = plan.send;
-        sl.__oasisDesired  = plan.send?.units ? sumUnits(plan.send.units) : 0;
         candidates.push(sl);
-        continue;
+      }catch(e){
+        console.log("[cand] error", sl?.id, e);
       }
-
-
-      // ttype 0/1: aldeas (incluye natars). NO getOasisVerdict.
-      // Si está bloqueado y el último icon fue 1, limpialo
-      if (curIcon === 1 && (st.blockedUntil > now()    || st.permaUntil > now())){
-        console.log("[cand] clean blocks on icon1", sl.id);
-        writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
-      }
-
-      // Respeta bloqueo actual
-      if (isBlocked(readSlotState(sl.id))){
-        console.log("[cand] blocked", sl.id);
-        continue;
-      }
-
-      // Sin icono → candidato automático (ya filtrado type 2 arriba)
-      if (Number.isNaN(curIcon) || curIcon < 0){
-        console.log("[cand] no icon → auto-candidate", sl.id);
-      }
-
-      candidates.push(sl);
-    }catch(e){
-      console.log("[cand] error", sl?.id, e);
-    }
-  }
-
-  console.log("[planForList] candidates:", candidates.map(c=>c.id));
-
-  // -------------------------
-  // STAGE 2: ordering
-  // -------------------------
-  function priOrder(sl){
-    const st=readSlotState(sl.id);
-    const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
-    const mySent = history[sl.id]||0;
-    const lo = lootOutcome(sl.lastRaid, mySent);
-    const sinceLast = now() - (st.lastSentTs||0);
-    const sinceGood = now() - (st.lastGoodTs||0);
-    const bm = sl?.lastRaid?.bootyMax|0;
-
-    // Orden: icon1 primero, luego icon2, luego sin icono, y al final otros
-    const iconScore =
-      (icon===1)?0 :
-      (icon===2)?1 :
-      (icon<0)?2 : 3;
-
-    const outScore =
-      (lo.outcome==='GOOD')?0 :
-      (lo.outcome==='MID')?1 :
-      (lo.outcome==='LOW')?2 :
-      (lo.outcome==='ZERO')?3 : 4;
-
-    return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
-  }
-
-  candidates.sort((a,b)=>{
-    const A=priOrder(a), B=priOrder(b);
-    for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
-    return 0;
-  });
-
-  console.log("[planForList] ordered candidates:", candidates.map(c=>c.id));
-
-  // -------------------------
-  // STAGE 3: processing plan
-  // -------------------------
-  const chosenTargets = [];
-  const burstsToSchedule = [];
-
-  for (const sl of candidates){
-    const slotId = sl.id;
-    const st = readSlotState(slotId);
-    const lastIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
-
-    // Ruta exclusiva para oasis libres (ttype=3) ya verificados
-    if (sl.__isFreeOasis === true){
-      // Reemplaza TODO el contenido de este bloque por:
-      console.log("[proc] free oasis with central plan", slotId);
-
-      const send = sl.__oasisPlanSend || null;
-      const pack = send?.units || null;
-      const planned = pack ? sumUnits(pack) : 0;
-      if (planned <= 0){ console.log("[proc] free oasis plan has no units", slotId); continue; }
-
-      // Si difiere, PUT
-      if (unitDiffers(sl?.troop||{}, pack)){
-        updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
-      }
-
-      // Debitar del pool para mantener coherencia con tu presupuesto compartido
-      debitBudgetPool(pack);
-
-      // Estado & elección para SEND
-      writeSlotState(slotId, {
-        lastIcon: 1,
-        lastOutcome: 'GOOD',
-        desiredCount: planned,
-        lastSentTs: now(),
-        lastGoodTs: now()
-      });
-      chosenTargets.push(slotId);
-
-      // Burst si corresponde
-      if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
-      continue;
     }
 
+    console.log("[planForList] candidates:", candidates.map(c=>c.id));
 
-    // ICON 3: (redundante por filtro de candidatos, pero por si acaso)
-    if (lastIcon===3){
-      console.log("[proc] skip icon3", slotId);
-      writeSlotState(slotId, { lastIcon:3 });
-      continue;
+    // -------------------------
+    // STAGE 2: ordering
+    // -------------------------
+    function priOrder(sl){
+      const st=readSlotState(sl.id);
+      const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
+      const mySent = history[sl.id]||0;
+      const lo = lootOutcome(sl.lastRaid, mySent);
+      const sinceLast = now() - (st.lastSentTs||0);
+      const sinceGood = now() - (st.lastGoodTs||0);
+      const bm = sl?.lastRaid?.bootyMax|0;
+
+      // Orden: icon1 primero, luego icon2, luego sin icono, y al final otros
+      const iconScore =
+        (icon===1)?0 :
+        (icon===2)?1 :
+        (icon<0)?2 : 3;
+
+      const outScore =
+        (lo.outcome==='GOOD')?0 :
+        (lo.outcome==='MID')?1 :
+        (lo.outcome==='LOW')?2 :
+        (lo.outcome==='ZERO')?3 : 4;
+
+      return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
     }
 
-    const mySent = history[slotId]||0;
-    const lo = lootOutcome(sl.lastRaid, mySent);
-    //const dx = dist(srcX, srcY, sl?.target?.x|0, sl?.target?.y|0);
-    const dx = dist(vm.x, vm.y, sl?.target?.x|0, sl?.target?.y|0);
-    // ICON 2 → usar report-mini; si no hay, fallback a lootOutcome
-    if (lastIcon===2){
-      const decision = await getReportDecision(sl);
-      if (decision){
-        if (!decision.reAttack){
-          console.log("[proc] icon2 decision: DO NOT re-attack", slotId, decision);
-          writeSlotState(slotId, { lastIcon:2, lastOutcome: decision.rating, ...blockForHours(cfg.icon2DecayH|0) });
-          continue;
+    candidates.sort((a,b)=>{
+      const A=priOrder(a), B=priOrder(b);
+      for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
+      return 0;
+    });
+
+    console.log("[planForList] ordered candidates:", candidates.map(c=>c.id));
+
+    // -------------------------
+    // STAGE 3: processing plan
+    // -------------------------
+    const chosenTargets = [];
+    const burstsToSchedule = [];
+
+    for (const sl of candidates){
+      const slotId = sl.id;
+      const st = readSlotState(slotId);
+      const lastIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
+
+      // Ruta exclusiva para oasis libres (ttype=3) ya verificados
+      if (sl.__isFreeOasis === true){
+        console.log("[proc] free oasis with central plan", slotId);
+
+        const send = sl.__oasisPlanSend || null;
+        const pack = send?.units || null; // ahora siempre existe como objeto (por el paso anterior)
+
+        const planned = pack ? safeSumUnits(pack) : 0;
+        if (planned <= 0){
+          console.log("[proc][debug] planned<=0",
+            { hasSend: !!send, hasPack: !!pack, keys: pack ? Object.keys(pack) : [] , sendShape: typeof send, packShape: typeof pack, rawSend: send }
+          );
         }
-        // reAttack = true
-        const baseGrow = decision.barrida ? Math.max(st.desiredCount||6, 10) : Math.max(st.desiredCount||5, 6);
-        let desired = Math.ceil(baseGrow * (decision.multiplier || 1));
-        desired = Math.max(4, Math.min(desired, 60)); // límites
 
-        const pack = buildPack(desired, dx, tribe, budget, cfg);
-        const planned = sumUnits(pack);
-        if (planned<=0){ console.log("[proc] icon2 decision no troops", slotId); continue; }
+        if (planned <= 0){ console.log("[proc] free oasis plan has no units", slotId); continue; }
 
+        // Si difiere, PUT
         if (unitDiffers(sl?.troop||{}, pack)){
-          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
+          //updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
+          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
         }
 
-        chosenTargets.push(slotId);
+        // Debitar del pool para mantener coherencia con tu presupuesto compartido
         debitBudgetPool(pack);
 
-        const goodish = /muy bueno|bueno/i.test(decision.rating) || decision.barrida === true;
+        // Estado & elección para SEND
         writeSlotState(slotId, {
-          lastIcon: 2,
-          lastOutcome: decision.rating,
+          lastIcon: 1,
+          lastOutcome: 'GOOD',
           desiredCount: planned,
           lastSentTs: now(),
-          ...(goodish ? { lastGoodTs: now() } : {})
+          lastGoodTs: now()
         });
+        chosenTargets.push(slotId);
 
-        if (cfg.burstN>0 && decision.multiplier >= 1){
-          burstsToSchedule.push({slotId, bursts: cfg.burstN});
+        // Burst si corresponde
+        if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
+        continue;
+      }
+
+      // ICON 3: (redundante por filtro de candidatos, pero por si acaso)
+      if (lastIcon===3){
+        console.log("[proc] skip icon3", slotId);
+        writeSlotState(slotId, { lastIcon:3 });
+        continue;
+      }
+
+      const mySent = history[slotId]||0;
+      const lo = lootOutcome(sl.lastRaid, mySent);
+      const dx = dist(vm.x, vm.y, sl?.target?.x|0, sl?.target?.y|0);
+
+      // ICON 2 → usar report-mini; si no hay, fallback a lootOutcome
+      if (lastIcon===2){
+        const decision = await getReportDecision(sl);
+        if (decision){
+          if (!decision.reAttack){
+            console.log("[proc] icon2 decision: DO NOT re-attack", slotId, decision);
+            writeSlotState(slotId, { lastIcon:2, lastOutcome: decision.rating, ...blockForHours(cfg.icon2DecayH|0) });
+            continue;
+          }
+          // reAttack = true
+          const baseGrow = decision.barrida ? Math.max(st.desiredCount||6, 10) : Math.max(st.desiredCount||5, 6);
+          let desired = Math.ceil(baseGrow * (decision.multiplier || 1));
+          desired = Math.max(4, Math.min(desired, 60)); // límites
+
+          const pack = buildPack(desired, dx, tribe, budget, cfg);
+          const planned = sumUnits(pack);
+          if (planned<=0){ console.log("[proc] icon2 decision no troops", slotId); continue; }
+
+          if (unitDiffers(sl?.troop||{}, pack)){
+            //updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+          }
+
+          chosenTargets.push(slotId);
+          debitBudgetPool(pack);
+
+          const goodish = /muy bueno|bueno/i.test(decision.rating) || decision.barrida === true;
+          writeSlotState(slotId, {
+            lastIcon: 2,
+            lastOutcome: decision.rating,
+            desiredCount: planned,
+            lastSentTs: now(),
+            ...(goodish ? { lastGoodTs: now() } : {})
+          });
+
+          if (cfg.burstN>0 && decision.multiplier >= 1){
+            burstsToSchedule.push({slotId, bursts: cfg.burstN});
+          }
+          continue;
+        }
+
+        // Fallback sin decisión
+        console.log("[proc] icon2 no decision → fallback lootOutcome", slotId, lo);
+        if (lo.outcome==='GOOD'){
+          const desired = Math.max(st.desiredCount||5, 10);
+          const pack = buildPack(desired, dx, tribe, budget, cfg);
+          const planned = sumUnits(pack);
+          if (planned<=0){ console.log("[proc] icon2 fallback no troops", slotId); continue; }
+          if (unitDiffers(sl?.troop||{}, pack)){
+            //updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+
+          }
+          chosenTargets.push(slotId);
+          debitBudgetPool(pack);
+
+          writeSlotState(slotId, { lastIcon: 2, lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
+        } else {
+          writeSlotState(slotId, { lastIcon:2, lastOutcome: lo.outcome, badStreak:(st.badStreak|0)+1, ...blockForHours(cfg.icon2DecayH|0) });
         }
         continue;
       }
 
-      // Fallback sin decisión
-      console.log("[proc] icon2 no decision → fallback lootOutcome", slotId, lo);
+      // ICON 1 o SIN ICONO → pipeline clásico
       if (lo.outcome==='GOOD'){
-        const desired = Math.max(st.desiredCount||5, 10);
+        console.log("[proc] icon1/none GOOD", slotId);
+        const desired = Math.max( (st.desiredCount|0)+2, 5 );
         const pack = buildPack(desired, dx, tribe, budget, cfg);
         const planned = sumUnits(pack);
-        if (planned<=0){ console.log("[proc] icon2 fallback no troops", slotId); continue; }
+        if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
         if (unitDiffers(sl?.troop||{}, pack)){
-          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
+          //updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
+          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+
         }
         chosenTargets.push(slotId);
         debitBudgetPool(pack);
 
-        writeSlotState(slotId, { lastIcon: 2, lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
+        if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
+        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
+
+      } else if (lo.outcome==='MID'){
+        console.log("[proc] icon1/none MID", slotId);
+        const desired = Math.max(st.desiredCount||5, 6);
+        const pack = buildPack(desired, dx, tribe, budget, cfg);
+        const planned = sumUnits(pack);
+        if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
+        if (unitDiffers(sl?.troop||{}, pack)){
+          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+        }
+        chosenTargets.push(slotId);
+        debitBudgetPool(pack);
+        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'MID', desiredCount: planned, lastSentTs: now() });
+
+      } else if (lo.outcome==='LOW' || lo.outcome==='ZERO'){
+        console.log("[proc] icon1/none LOW/ZERO", slotId);
+        const desired = Math.max(5, Math.floor((st.desiredCount||5)));
+        const pack = buildPack(desired, dx, tribe, budget, cfg);
+        const planned = sumUnits(pack);
+        if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
+        if (unitDiffers(sl?.troop||{}, pack)){
+          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+        }
+        chosenTargets.push(slotId);
+        debitBudgetPool(pack);
+        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: lo.outcome, desiredCount: planned, lastSentTs: now() });
+
       } else {
-        writeSlotState(slotId, { lastIcon:2, lastOutcome: lo.outcome, badStreak:(st.badStreak|0)+1, ...blockForHours(cfg.icon2DecayH|0) });
+        // UNKNOWN / SIN ICONO: primer envío conservador
+        console.log("[proc] icon1/none UNKNOWN", slotId);
+        const desired = 5;
+        const pack = buildPack(desired, dx, tribe, budget, cfg);
+        const planned = sumUnits(pack);
+        if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
+        if (unitDiffers(sl?.troop||{}, pack)){
+          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+        }
+        chosenTargets.push(slotId);
+        debitBudgetPool(pack);
+        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'UNKNOWN', desiredCount: planned, lastSentTs: now() });
       }
-      continue;
     }
 
-    // ICON 1 o SIN ICONO → pipeline clásico
-    if (lo.outcome==='GOOD'){
-      console.log("[proc] icon1/none GOOD", slotId);
-      const desired = Math.max( (st.desiredCount|0)+2, 5 );
-      const pack = buildPack(desired, dx, tribe, budget, cfg);
-      const planned = sumUnits(pack);
-      if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
-      if (unitDiffers(sl?.troop||{}, pack)){
-        updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
-      }
-      chosenTargets.push(slotId);
-      debitBudgetPool(pack);
-
-      if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
-      writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
-
-    } else if (lo.outcome==='MID'){
-      console.log("[proc] icon1/none MID", slotId);
-      const desired = Math.max(st.desiredCount||5, 6);
-      const pack = buildPack(desired, dx, tribe, budget, cfg);
-      const planned = sumUnits(pack);
-      if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
-      if (unitDiffers(sl?.troop||{}, pack)){
-        updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
-      }
-      chosenTargets.push(slotId);
-      debitBudgetPool(pack);
-      writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'MID', desiredCount: planned, lastSentTs: now() });
-
-    } else if (lo.outcome==='LOW' || lo.outcome==='ZERO'){
-      console.log("[proc] icon1/none LOW/ZERO", slotId);
-      const desired = Math.max(5, Math.floor((st.desiredCount||5)));
-      const pack = buildPack(desired, dx, tribe, budget, cfg);
-      const planned = sumUnits(pack);
-      if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
-      if (unitDiffers(sl?.troop||{}, pack)){
-        updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
-      }
-      chosenTargets.push(slotId);
-      debitBudgetPool(pack);
-      writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: lo.outcome, desiredCount: planned, lastSentTs: now() });
-
-    } else {
-      // UNKNOWN / SIN ICONO: primer envío conservador
-      console.log("[proc] icon1/none UNKNOWN", slotId);
-      const desired = 5;
-      const pack = buildPack(desired, dx, tribe, budget, cfg);
-      const planned = sumUnits(pack);
-      if (planned<=0){ console.log("[proc] no troops", slotId); continue; }
-      if (unitDiffers(sl?.troop||{}, pack)){
-        updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack });
-      }
-      chosenTargets.push(slotId);
-      debitBudgetPool(pack);
-      writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'UNKNOWN', desiredCount: planned, lastSentTs: now() });
-    }
+    console.log("[planForList] END updates:", updates, "chosenTargets:", chosenTargets, "burstsToSchedule:", burstsToSchedule);
+    return { updates, chosenTargets, burstsToSchedule };
   }
-
-  console.log("[planForList] END updates:", updates, "chosenTargets:", chosenTargets, "burstsToSchedule:", burstsToSchedule);
-  return { updates, chosenTargets, burstsToSchedule };
-}
 
 
   // ───────────────────────────────────────────────────────────────────
