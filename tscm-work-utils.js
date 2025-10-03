@@ -912,54 +912,285 @@
 
 
     // === Agregar a tscm-work-utils.js ===
+    // (function(root){
+    // const tscm  = (root.tscm  = root.tscm  || {});
+    // const utils = (tscm.utils = tscm.utils || {});
+
+    // // Cache por DID + oasis, ventana 30 minutos
+    // const OASIS_CACHE_PREFIX = "tscm_oasis_cache_v2_";
+    // const OASIS_TTL_MS = 30 * 60 * 1000; // 30 min
+    // const MIN_WAVE = 5;
+
+    // const _ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
+
+    // function _cacheKey(did){ return OASIS_CACHE_PREFIX + String(did); }
+    // function _loadCache(did){
+    //     try{
+    //     const raw = localStorage.getItem(_cacheKey(did));
+    //     return raw ? JSON.parse(raw) : { oases:{} }; // oases: { "x|y": { ts, counts, empty } }
+    //     }catch{ return { oases:{} }; }
+    // }
+    // function _saveCache(did, data){
+    //     try{ localStorage.setItem(_cacheKey(did), JSON.stringify(data)); }catch{}
+    // }
+    // function _readCached(cache, x, y){
+    //     const key = `${x}|${y}`;
+    //     const rec = cache.oases[key];
+    //     if(!rec) return null;
+    //     if((Date.now() - (rec.ts||0)) > OASIS_TTL_MS) return null;
+    //     return rec;
+    // }
+    // function _writeCached(cache, x, y, counts){
+    //     const total = Object.values(counts||{}).reduce((s,v)=>s+(+v||0),0);
+    //     cache.oases[`${x}|${y}`] = { ts: Date.now(), counts: (counts||{}), empty: total===0 };
+    // }
+
+    // function _dist(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
+
+    // // Escoge UNA sola unidad para oasis vacío
+    // function _pickUnitForEmpty(tribe, available, whitelist, dist){
+    //     const groups = utils.getTribeUnitGroups ? utils.getTribeUnitGroups(tribe) : { cav:["t4","t6","t5"], inf:["t3","t2","t1"] };
+    //     const ua     = utils.getUnitsAttack ? utils.getUnitsAttack(tribe) : null;
+
+    //     const pref = dist >= 10
+    //     ? [ ...(groups.cav||[]), ...(groups.inf||[]) ]
+    //     : [ ...(groups.inf||[]), ...(groups.cav||[]) ];
+
+    //     const allowed = u => (!whitelist || whitelist[u]) && (available[u]|0) >= MIN_WAVE && (!ua || (ua[u]|0)>0);
+    //     for(const u of pref){ if(allowed(u)) return u; }
+
+    //     // fallback: el que tenga más stock dentro de whitelist y con ataque>0
+    //     let best=null, bestCnt=0;
+    //     for(const u of ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"]){
+    //     if(whitelist && !whitelist[u]) continue;
+    //     if(ua && !(ua[u]|0)) continue;
+    //     const c = (available[u]|0);
+    //     if(c > bestCnt){ best=u; bestCnt=c; }
+    //     }
+    //     return (bestCnt>=MIN_WAVE) ? best : null;
+    // }
+
+    // /**
+    //  * Planificador unificado SIN héroe para oasis.
+    //  * Reutiliza: fetchOasisDetails, getCurrentTribe, getTribeUnitGroups, getUnitsAttack, smartBuildWaveNoHero.
+    //  *
+    //  * @param {number} did        - id de la aldea (para segmentar cache)
+    //  * @param {number} vX,vY      - coords aldea (para distancia; NO se usa para mapa)
+    //  * @param {number} oX,oY      - coords del oasis objetivo
+    //  * @param {object} available  - stock disponible {t1..t10}
+    //  * @param {object} whitelist  - {t1:true,...} unidades permitidas
+    //  * @param {number} lossTarget - 0..1 (p.ej. 0.02)
+    //  * @returns {Promise<{ok:boolean,type:"EMPTY"|"ANIMALS",send:object,counts:object,empty:boolean,reason?:string,cachedAt?:number}>}
+    //  */
+    // utils.planOasisRaidNoHero = async function(did, vX, vY, oX, oY, available, whitelist, lossTarget){
+    //     const tribe = (utils.getCurrentTribe ? utils.getCurrentTribe() : "GAUL").toUpperCase();
+    //     const dist  = _dist(vX, vY, oX, oY);
+
+    //     let cache = _loadCache(did);
+    //     let rec   = _readCached(cache, oX, oY);
+    //     if(!rec){
+    //         // No cache válido → pedir directamente al endpoint que ya parsea animales
+    //         try{
+    //             // fetchOasisDetails(x,y) debe retornar { counts:{u31:n,...}, ... }
+    //             const det = await utils.fetchOasisDetails(oX, oY);
+    //             const counts = det?.counts || {};
+    //             _writeCached(cache, oX, oY, counts);
+    //             _saveCache(did, cache);
+    //             rec = _readCached(cache, oX, oY);
+    //         }catch(e){
+    //             console.warn(`[${_ts()}] [OR-core] fetchOasisDetails failed @ (${oX}|${oY}):`, e);
+    //             return { ok:false, type:"EMPTY", send:{}, counts:{}, empty:true, reason:"fetch_error" };
+    //         }
+    //     }
+
+    //     const counts = rec.counts || {};
+    //     const total  = Object.values(counts).reduce((s,v)=>s+(+v||0),0);
+    //     const cachedAt = rec.ts || 0;
+
+    //     // A) Oasis vacío → 1 sola unidad, mínimo 5
+    //     if(total === 0){
+    //     const unit = _pickUnitForEmpty(tribe, (available||{}), (whitelist||{}), dist);
+    //     if(!unit) return { ok:false, type:"EMPTY", send:{}, counts, empty:true, reason:"no_unit_meets_min", cachedAt };
+    //     const n = Math.min(available[unit]|0, Math.max(MIN_WAVE, 5));
+    //     return { ok:true, type:"EMPTY", send:{ [unit]: n }, counts, empty:true, cachedAt };
+    //     }
+
+    //     // B) Con animales → delega a tu smartBuildWaveNoHero
+    //     if(typeof utils.smartBuildWaveNoHero !== "function"){
+    //     return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"no_smart_fn", cachedAt };
+    //     }
+
+    //     try{
+    //     const ret = utils.smartBuildWaveNoHero(counts, (available||{}), {
+    //         lossTarget: (typeof lossTarget === "number" ? lossTarget : 0.02),
+    //         allowedUnits: (whitelist || {})
+    //         // lossWeights los resuelve internamente tu tscm; no los duplicamos aquí
+    //     });
+
+    //     // Normaliza retornos {send,ok} o [send,ok]
+    //     let send=null, ok=false;
+    //     if(Array.isArray(ret)){ send=ret[0]; ok=!!ret[1]; }
+    //     else if(ret && typeof ret==="object"){ send=ret.send; ok=!!ret.ok; }
+
+    //     if(!ok || !send || !Object.keys(send).some(k => (send[k]|0)>0)){
+    //         return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"rejected_by_smart", cachedAt };
+    //     }
+
+    //     // Exigir MIN_WAVE
+    //     const maxCnt = Math.max(...Object.keys(send).map(k => +send[k]||0), 0);
+    //     if(maxCnt < MIN_WAVE){
+    //         return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"below_min_wave", cachedAt };
+    //     }
+
+    //     // Filtra whitelist por si acaso
+    //     const filtered = {};
+    //     for(const k of Object.keys(send)){
+    //         if(whitelist && !whitelist[k]) continue;
+    //         filtered[k] = send[k]|0;
+    //     }
+    //     if(!Object.keys(filtered).length){
+    //         return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"whitelist_filtered_all", cachedAt };
+    //     }
+
+    //     return { ok:true, type:"ANIMALS", send:filtered, counts, empty:false, cachedAt };
+    //     }catch(e){
+    //     console.warn(`[${_ts()}] [OR-core] smartBuildWaveNoHero error:`, e);
+    //     return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"smart_exception", cachedAt };
+    //     }
+    // };
+
+    // })(typeof unsafeWindow!=="undefined" ? unsafeWindow : window);
+
+    // === Agregar a tscm-work-utils.js ===
     (function(root){
     const tscm  = (root.tscm  = root.tscm  || {});
     const utils = (tscm.utils = tscm.utils || {});
 
-    // Cache por DID + oasis, ventana 30 minutos
-    const OASIS_CACHE_PREFIX = "tscm_oasis_cache_v2_";
-    const OASIS_TTL_MS = 30 * 60 * 1000; // 30 min
+    // --- Config cache ---
+    const OASIS_CACHE_PREFIX = "tscm_oasis_cache_v3";  // global por oasis
+    const AREA_SCAN_PREFIX   = "tscm_area_scan_v1";    // por centro (aldea x|y)
+    const TTL_MS  = 30 * 60 * 1000; // 30 min
     const MIN_WAVE = 5;
 
     const _ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
 
-    function _cacheKey(did){ return OASIS_CACHE_PREFIX + String(did); }
-    function _loadCache(did){
-        try{
-        const raw = localStorage.getItem(_cacheKey(did));
-        return raw ? JSON.parse(raw) : { oases:{} }; // oases: { "x|y": { ts, counts, empty } }
-        }catch{ return { oases:{} }; }
+    // Cache global de oasis: { oases: { "x|y": { ts, counts, empty } } }
+    function _loadGlobal(){
+        try{ const raw = localStorage.getItem(OASIS_CACHE_PREFIX);
+            return raw ? JSON.parse(raw) : { oases:{} }; }
+        catch{ return { oases:{} }; }
     }
-    function _saveCache(did, data){
-        try{ localStorage.setItem(_cacheKey(did), JSON.stringify(data)); }catch{}
-    }
-    function _readCached(cache, x, y){
-        const key = `${x}|${y}`;
-        const rec = cache.oases[key];
+    function _saveGlobal(g){ try{ localStorage.setItem(OASIS_CACHE_PREFIX, JSON.stringify(g)); }catch{} }
+    function _getOasis(g, x, y){
+        const rec = g.oases[`${x}|${y}`];
         if(!rec) return null;
-        if((Date.now() - (rec.ts||0)) > OASIS_TTL_MS) return null;
+        if((Date.now() - (rec.ts||0)) > TTL_MS) return null;
         return rec;
     }
-    function _writeCached(cache, x, y, counts){
+    function _putOasis(g, x, y, counts){
         const total = Object.values(counts||{}).reduce((s,v)=>s+(+v||0),0);
-        cache.oases[`${x}|${y}`] = { ts: Date.now(), counts: (counts||{}), empty: total===0 };
+        g.oases[`${x}|${y}`] = { ts: Date.now(), counts: (counts||{}), empty: total===0 };
+    }
+
+    // Cache de “área escaneada” por centro (vX|vY): { scans: { "vx|vy": ts } }
+    function _loadArea(){
+        try{ const raw = localStorage.getItem(AREA_SCAN_PREFIX);
+            return raw ? JSON.parse(raw) : { scans:{} }; }
+        catch{ return { scans:{} }; }
+    }
+    function _saveArea(a){ try{ localStorage.setItem(AREA_SCAN_PREFIX, JSON.stringify(a)); }catch{} }
+    function _areaFresh(a, vX, vY){
+        const ts = a.scans[`${vX}|${vY}`]||0;
+        return (Date.now() - ts) <= TTL_MS;
+    }
+    function _markArea(a, vX, vY){
+        a.scans[`${vX}|${vY}`] = Date.now();
     }
 
     function _dist(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
+
+    // Merge de tiles de /api/v1/map/position a cache global de oasis
+    function _isOasisTile(t){
+        if(!t) return false;
+        const isOasis = (t.did===-1 || t.did==null);
+        if(!isOasis) return false;
+        const title = String(t.title||"");
+        const text  = String(t.text ||"");
+        // Excluir ocupados (jugador/alianza/banderas)
+        const looksOwned = !!t.uid || !!t.aid || /{k\.spieler}|{k\.allianz}|{k\.bt}/i.test(title+text);
+        if(looksOwned) return false;
+        // Marcas típicas de oasis libres (con o sin animales)
+        const hasAnimalsMarkup = /{k\.animals}|inlineIcon\s+tooltipUnit|class="unit u3\d+"/i.test(text);
+        const freeTitle   = /{k\.fo}/i.test(title);
+        const hasResBonus = /{a:r\d}[^%]*\d+%/i.test(text);
+        return hasAnimalsMarkup || freeTitle || hasResBonus;
+    }
+    function _parseCountsFromTileText(text){
+        const counts = {};
+        const re = /class="unit\s+u3(\d+)"[\s\S]*?<span class="value[^>]*>\s*(\d+)\s*<\/span>/gi;
+        let m; while((m=re.exec(text||""))!==null){
+        const code = "u3" + String(parseInt(m[1],10));
+        counts[code] = (counts[code]||0) + (parseInt(m[2],10)||0);
+        }
+        return counts;
+    }
+    function _mergeTilesIntoGlobal(g, tiles){
+        for(const t of tiles||[]){
+        if(!_isOasisTile(t)) continue;
+        const ox = t.position?.x, oy = t.position?.y;
+        if(!Number.isFinite(ox) || !Number.isFinite(oy)) continue;
+        const counts = _parseCountsFromTileText(String(t.text||""));
+        _putOasis(g, ox, oy, counts);
+        }
+    }
+
+    // “cluz”: barrido 5 puntos con zoom=3: centro y ±30 en X/Y
+    async function _cluzScan(vX, vY){
+        const xv = utils.guessXVersion ? utils.guessXVersion() : "1";
+        const points = [
+        {x:vX,   y:vY},
+        {x:vX,   y:vY+30},
+        {x:vX,   y:vY-30},
+        {x:vX-30,y:vY},
+        {x:vX+30,y:vY},
+        ];
+        const g = _loadGlobal();
+        for(const p of points){
+        try{
+            const res = await fetch("/api/v1/map/position", {
+            method:"POST", credentials:"include",
+            headers:{
+                "accept":"application/json",
+                "content-type":"application/json; charset=UTF-8",
+                "x-version":xv,
+                "x-requested-with":"XMLHttpRequest"
+            },
+            body: JSON.stringify({ data:{ x:p.x, y:p.y, zoomLevel:3, ignorePositions:[] }})
+            });
+            if(!res.ok) throw new Error(`map/position ${res.status}`);
+            const data = await res.json();
+            _mergeTilesIntoGlobal(g, data.tiles || []);
+            _saveGlobal(g);
+        }catch(e){
+            console.warn(`[${_ts()}] [OR-core] cluz scan error at (${p.x}|${p.y}):`, e);
+        }
+        }
+        // marca área
+        const a = _loadArea();
+        _markArea(a, vX, vY);
+        _saveArea(a);
+    }
 
     // Escoge UNA sola unidad para oasis vacío
     function _pickUnitForEmpty(tribe, available, whitelist, dist){
         const groups = utils.getTribeUnitGroups ? utils.getTribeUnitGroups(tribe) : { cav:["t4","t6","t5"], inf:["t3","t2","t1"] };
         const ua     = utils.getUnitsAttack ? utils.getUnitsAttack(tribe) : null;
-
         const pref = dist >= 10
         ? [ ...(groups.cav||[]), ...(groups.inf||[]) ]
         : [ ...(groups.inf||[]), ...(groups.cav||[]) ];
-
         const allowed = u => (!whitelist || whitelist[u]) && (available[u]|0) >= MIN_WAVE && (!ua || (ua[u]|0)>0);
         for(const u of pref){ if(allowed(u)) return u; }
-
-        // fallback: el que tenga más stock dentro de whitelist y con ataque>0
+        // fallback: más stock dentro de whitelist
         let best=null, bestCnt=0;
         for(const u of ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"]){
         if(whitelist && !whitelist[u]) continue;
@@ -971,63 +1202,66 @@
     }
 
     /**
-     * Planificador unificado SIN héroe para oasis.
-     * Reutiliza: fetchOasisDetails, getCurrentTribe, getTribeUnitGroups, getUnitsAttack, smartBuildWaveNoHero.
-     *
-     * @param {number} did        - id de la aldea (para segmentar cache)
-     * @param {number} vX,vY      - coords aldea (para distancia; NO se usa para mapa)
+     * Plan unificado SIN héroe para oasis con cache global y barrido “cluz”.
+     * @param {number} vX,vY      - coords de la aldea (para distancia y “cluz”)
      * @param {number} oX,oY      - coords del oasis objetivo
-     * @param {object} available  - stock disponible {t1..t10}
-     * @param {object} whitelist  - {t1:true,...} unidades permitidas
-     * @param {number} lossTarget - 0..1 (p.ej. 0.02)
-     * @returns {Promise<{ok:boolean,type:"EMPTY"|"ANIMALS",send:object,counts:object,empty:boolean,reason?:string,cachedAt?:number}>}
+     * @param {object} available  - stock {t1..t10}
+     * @param {object} whitelist  - {t1:true,...}
+     * @param {number} lossTarget - 0..1
      */
     utils.planOasisRaidNoHero = async function(did, vX, vY, oX, oY, available, whitelist, lossTarget){
         const tribe = (utils.getCurrentTribe ? utils.getCurrentTribe() : "GAUL").toUpperCase();
         const dist  = _dist(vX, vY, oX, oY);
 
-        let cache = _loadCache(did);
-        let rec   = _readCached(cache, oX, oY);
+        let g = _loadGlobal();
+        let rec = _getOasis(g, oX, oY);
+
+        // Si no hay registro FRESCO del oasis:
         if(!rec){
-        // No cache válido → pedir directamente al endpoint que ya parsea animales
-        try{
-            // fetchOasisDetails(x,y) debe retornar { counts:{u31:n,...}, ... }
-            const det = await utils.fetchOasisDetails(oX, oY);
+        // 1) ¿Área fresca? Si no, hago barrido “cluz” (centro y ±30)
+        const area = _loadArea();
+        if(!_areaFresh(area, vX, vY)){
+            await _cluzScan(vX, vY);
+            g = _loadGlobal();
+            rec = _getOasis(g, oX, oY);
+        }
+        // 2) Si aún no aparece, fallback directo al endpoint del oasis
+        if(!rec){
+            try{
+            const det = await utils.fetchOasisDetails(oX, oY); // { counts:{u31:n,...} }
             const counts = det?.counts || {};
-            _writeCached(cache, oX, oY, counts);
-            _saveCache(did, cache);
-            rec = _readCached(cache, oX, oY);
-        }catch(e){
+            g = _loadGlobal();
+            _putOasis(g, oX, oY, counts);
+            _saveGlobal(g);
+            rec = _getOasis(g, oX, oY);
+            }catch(e){
             console.warn(`[${_ts()}] [OR-core] fetchOasisDetails failed @ (${oX}|${oY}):`, e);
             return { ok:false, type:"EMPTY", send:{}, counts:{}, empty:true, reason:"fetch_error" };
+            }
         }
         }
 
-        const counts = rec.counts || {};
+        const counts = rec?.counts || {};
         const total  = Object.values(counts).reduce((s,v)=>s+(+v||0),0);
-        const cachedAt = rec.ts || 0;
+        const cachedAt = rec?.ts || 0;
 
-        // A) Oasis vacío → 1 sola unidad, mínimo 5
+        // (A) Vacío → 1 sola unidad, mínimo 5
         if(total === 0){
         const unit = _pickUnitForEmpty(tribe, (available||{}), (whitelist||{}), dist);
         if(!unit) return { ok:false, type:"EMPTY", send:{}, counts, empty:true, reason:"no_unit_meets_min", cachedAt };
-        const n = Math.min(available[unit]|0, Math.max(MIN_WAVE, 5));
+        const n = Math.min(available[unit]|0, MIN_WAVE);
         return { ok:true, type:"EMPTY", send:{ [unit]: n }, counts, empty:true, cachedAt };
         }
 
-        // B) Con animales → delega a tu smartBuildWaveNoHero
+        // (B) Con animales → delegar a smartBuildWaveNoHero
         if(typeof utils.smartBuildWaveNoHero !== "function"){
         return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"no_smart_fn", cachedAt };
         }
-
         try{
         const ret = utils.smartBuildWaveNoHero(counts, (available||{}), {
             lossTarget: (typeof lossTarget === "number" ? lossTarget : 0.02),
             allowedUnits: (whitelist || {})
-            // lossWeights los resuelve internamente tu tscm; no los duplicamos aquí
         });
-
-        // Normaliza retornos {send,ok} o [send,ok]
         let send=null, ok=false;
         if(Array.isArray(ret)){ send=ret[0]; ok=!!ret[1]; }
         else if(ret && typeof ret==="object"){ send=ret.send; ok=!!ret.ok; }
@@ -1035,14 +1269,10 @@
         if(!ok || !send || !Object.keys(send).some(k => (send[k]|0)>0)){
             return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"rejected_by_smart", cachedAt };
         }
-
-        // Exigir MIN_WAVE
         const maxCnt = Math.max(...Object.keys(send).map(k => +send[k]||0), 0);
         if(maxCnt < MIN_WAVE){
             return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"below_min_wave", cachedAt };
         }
-
-        // Filtra whitelist por si acaso
         const filtered = {};
         for(const k of Object.keys(send)){
             if(whitelist && !whitelist[k]) continue;
@@ -1051,7 +1281,6 @@
         if(!Object.keys(filtered).length){
             return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"whitelist_filtered_all", cachedAt };
         }
-
         return { ok:true, type:"ANIMALS", send:filtered, counts, empty:false, cachedAt };
         }catch(e){
         console.warn(`[${_ts()}] [OR-core] smartBuildWaveNoHero error:`, e);
