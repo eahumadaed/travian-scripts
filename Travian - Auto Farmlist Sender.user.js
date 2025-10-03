@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.3
+// @version       2.1.4
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -89,6 +89,7 @@
   const KEY_CFG_BURST_DMAX  = KEY_ROOT + 'cfg_burst_delay_max'; // seconds
   const KEY_CFG_BURST_N     = KEY_ROOT + 'cfg_burst_n';         // int
   const KEY_MASTER          = KEY_ROOT + 'master';             // { id, ts }
+  const KEY_KICK_GUARD = KEY_ROOT + 'kick_guard'; // { flId: tsUntil }
 
   const DEFAULT_INTERVAL_MS = 60*60*1000; // 1h
   const BURST_DEFAULT = { dmin:60, dmax:120, n:3 };
@@ -103,6 +104,19 @@
   const KEY_CFG_OVER_WINMIN     = KEY_ROOT + 'cfg_over_winmin';    // int min (default 10)
   const KEY_BUDGET_POOL_PREFIX = KEY_ROOT + 'budget_pool_v2_'; // por aldea: budget_pool_v2_<did>
   const BUDGET_POOL_TTL_MS = 90*1000;
+
+  function getKickGuard(){ return LS.get(KEY_KICK_GUARD, {}) || {}; }
+  function setKickGuard(m){ LS.set(KEY_KICK_GUARD, m); }
+  function setKickGuardFor(flId, ms=3000){
+    const g = getKickGuard();
+    g[flId] = now() + Math.max(500, ms);
+    setKickGuard(g);
+  }
+  function isKickGuardActive(flId){
+    const g = getKickGuard();
+    return (g[flId]||0) > now();
+  }
+
 
   function canOverloadSlot(sl){
     // Lee config
@@ -1181,6 +1195,7 @@ function scanAllVillagesFromSidebar(){
         st.inflight=false;
         // ❗ aplica cooldown de 2.5s para evitar re-entrada del “kick”
         st.cooldownUntil = now() + 2500;
+        setKickGuardFor(flId, 2500);
         const next = now() + getIntervalMs(flId) + Math.floor(Math.random()*15000);
         schedule(flId, next);
       }
@@ -1302,19 +1317,36 @@ function scanAllVillagesFromSidebar(){
     try{
       const ids = runningIds.length ? runningIds.slice() : selectedIds();
       if (!ids.length) return;
+
       const nm = getNextMap();
+
       ids.forEach(id => {
         const st = ensure(id);
-        if (st.inflight) return;               // ❗ No reprogramar si está corriendo
-        nm[id] = 0;                            // pendiente ya
+
+        // ❌ No patear si está corriendo
+        if (st.inflight) return;
+
+        // ❌ No patear si está en cooldown corto (post-run)
+        if (now() < (st.cooldownUntil||0)) return;
+
+        // ❌ No patear si el "kick guard" está activo
+        if (isKickGuardActive(id)) return;
+
+        // Marca “pendiente ya” y agenda MUY pronto
+        nm[id] = 0;
         schedule(id, now() + 50);
+
+        // Activa guard (3s) para evitar re-kicks encadenados
+        setKickGuardFor(id, 3000);
       });
+
       setNextMap(nm);
       LOG('log','Cycle kick (countdown==0)',{lists: ids.length});
     } finally {
       cycleKickInFlight = false;
     }
   }
+
 
   function getBudgetPool(did, villageUnits){
     const KEY = KEY_BUDGET_POOL_PREFIX + String(did||0);
@@ -1520,7 +1552,7 @@ function scanAllVillagesFromSidebar(){
       KEY_DRYRUN, KEY_CFG_WHITELIST, KEY_CFG_FALLBACK, KEY_CFG_CROSS,
       KEY_CFG_ICON2DECAYH, KEY_CFG_BURST_DMIN, KEY_CFG_BURST_DMAX, KEY_CFG_BURST_N,
       KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN, KEY_MASTER,
-      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE
+      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD
     ].forEach(k=>LS.del(k));
 
     // Apaga timers, bursts, y UI
@@ -1614,10 +1646,20 @@ function scanAllVillagesFromSidebar(){
     const anyZero = ids.some(id => {
       const st = ensure(id);
       const left = (next?.[id]||0) - now();
-      // Si justo terminamos hace menos de 2.5s, no patear
+
+      // ❌ Ignora si inflight
+      if (st.inflight) return false;
+
+      // ❌ Ignora si aún en cooldown post-run
       if (now() < (st.cooldownUntil||0)) return false;
+
+      // ❌ Ignora si guard activo (acaba de ser pateado)
+      if (isKickGuardActive(id)) return false;
+
+      // ✅ Solo dispara si efectivamente ya venció
       return left <= 0;
     });
+
     if (anyZero && running && amIMaster()){
       kickPendingCycle();
     }
