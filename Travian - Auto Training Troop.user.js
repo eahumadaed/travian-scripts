@@ -1,14 +1,22 @@
 // ==UserScript==
 // @name         🐎 Auto Training Troop (Toolbox UI) — Travian
-// @version      2.0.4
+// @version      2.0.5
 // @description  [FIXED] UI rediseñada como toolbox lateral. Muestra próxima tropa en modo colapsado, expandible. Evita duplicados en build.php. Incluye botón "Entrenar ahora" (sin resetear contador) y estadísticas de tropas entrenadas por tarea.
 // @match        https://*.travian.com/*
 // @run-at       document-end
 // @grant        none
+// @grant        unsafeWindow
+// @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
+// @updateURL     https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Training%20Troop.user.js
+// @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Training%20Troop.user.js
 // ==/UserScript==
 
 (() => {
   "use strict";
+  const { tscm } = unsafeWindow;
+  const TASK = 'auto-train';
+  const TTL  = 5 * 60 * 1000;
+  const API_VER = tscm.utils.guessXVersion();
 
   /******************************************************************
    * Constantes / Utils
@@ -24,7 +32,8 @@
   const INTERVAL_OPTIONS = [5, 10, 15, 20, 30, 60];
   const DELAY_MIN_S = 10;
   const DELAY_MAX_S = 20;
-  const UNIT_SPRITE_BASE = "https://cdn.legends.travian.com/gpack/228.2/img_ltr/global/units/gaul/icon/gaul_small.png";
+  const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
+  const UNIT_SPRITE_BASE = "https://cdn.legends.travian.com/gpack/"+API_VER+"/img_ltr/global/units//"+tribe.toLowerCase()+"/icon/"+tribe.toLowerCase()+"_small.png";
   const UNIT_ICON_SIZE = 16;
 
   function ts() { const d = new Date(), p = n => String(n).padStart(2, "0"); return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`; }
