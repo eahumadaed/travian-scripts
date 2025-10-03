@@ -1235,7 +1235,6 @@
 
         // Si no hay registro FRESCO del oasis:
         if(!rec){
-            console.log(""`[${_ts()}] [OR-core] No cache for oasis (${oX}|${oY}), checking area freshness...`);
             // 1) ¿Área fresca? Si no, hago barrido “cluz” (centro y ±30)
             const area = _loadArea();
             if(!_areaFresh(area, vX, vY)){
