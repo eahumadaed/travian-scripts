@@ -1144,42 +1144,59 @@
         }
     }
 
+    const MAP_MIN = -200;
+    const MAP_MAX_INC = 199; // tamaño 400
+    function wrapCoord(v){
+        const size = MAP_MAX_INC - MAP_MIN + 1; // 400
+        let r = (v - MAP_MIN) % size;
+        if (r < 0) r += size;
+        return MAP_MIN + r;
+    }
+
     // “cluz”: barrido 5 puntos con zoom=3: centro y ±30 en X/Y
     async function _cluzScan(vX, vY){
-        const xv = utils.guessXVersion ? utils.guessXVersion() : "1";
-        const points = [
+    const xv = utils.guessXVersion ? utils.guessXVersion() : "1";
+    const points = [
         {x:vX,   y:vY},
         {x:vX,   y:vY+30},
         {x:vX,   y:vY-30},
         {x:vX-30,y:vY},
         {x:vX+30,y:vY},
-        ];
-        const g = _loadGlobal();
-        for(const p of points){
+    ];
+
+    const g = _loadGlobal();
+    for (const p of points){
+        // ⬇️ Normaliza SIEMPRE justo antes de llamar al API
+        const x = wrapCoord(p.x);
+        const y = wrapCoord(p.y);
+        console.log(`[${_ts()}] [OR-core] cluz scan raw (${p.x}|${p.y}) -> wrapped (${x}|${y})`);
+
         try{
-            const res = await fetch("/api/v1/map/position", {
+        const res = await fetch("/api/v1/map/position", {
             method:"POST", credentials:"include",
             headers:{
-                "accept":"application/json",
-                "content-type":"application/json; charset=UTF-8",
-                "x-version":xv,
-                "x-requested-with":"XMLHttpRequest"
+            "accept":"application/json",
+            "content-type":"application/json; charset=UTF-8",
+            "x-version":xv,
+            "x-requested-with":"XMLHttpRequest"
             },
-            body: JSON.stringify({ data:{ x:p.x, y:p.y, zoomLevel:3, ignorePositions:[] }})
-            });
-            if(!res.ok) throw new Error(`map/position ${res.status}`);
-            const data = await res.json();
-            _mergeTilesIntoGlobal(g, data.tiles || []);
-            _saveGlobal(g);
+            body: JSON.stringify({ data:{ x, y, zoomLevel:3, ignorePositions:[] } })
+        });
+        if(!res.ok) throw new Error(`map/position ${res.status}`);
+        const data = await res.json();
+        _mergeTilesIntoGlobal(g, data.tiles || []);
+        _saveGlobal(g);
         }catch(e){
-            console.warn(`[${_ts()}] [OR-core] cluz scan error at (${p.x}|${p.y}):`, e);
+        console.warn(`[${_ts()}] [OR-core] cluz scan error at (${x}|${y}):`, e);
         }
-        }
-        // marca área
-        const a = _loadArea();
-        _markArea(a, vX, vY);
-        _saveArea(a);
     }
+
+    // Marca el centro también envuelto (evita “fantasmas” en bordes)
+    const a = _loadArea();
+    _markArea(a, wrapCoord(vX), wrapCoord(vY));
+    _saveArea(a);
+    }
+
 
     // Escoge UNA sola unidad para oasis vacío
     function _pickUnitForEmpty(tribe, available, whitelist, dist){
@@ -1218,27 +1235,34 @@
 
         // Si no hay registro FRESCO del oasis:
         if(!rec){
-        // 1) ¿Área fresca? Si no, hago barrido “cluz” (centro y ±30)
-        const area = _loadArea();
-        if(!_areaFresh(area, vX, vY)){
-            await _cluzScan(vX, vY);
-            g = _loadGlobal();
-            rec = _getOasis(g, oX, oY);
-        }
-        // 2) Si aún no aparece, fallback directo al endpoint del oasis
-        if(!rec){
-            try{
-            const det = await utils.fetchOasisDetails(oX, oY); // { counts:{u31:n,...} }
-            const counts = det?.counts || {};
-            g = _loadGlobal();
-            _putOasis(g, oX, oY, counts);
-            _saveGlobal(g);
-            rec = _getOasis(g, oX, oY);
-            }catch(e){
-            console.warn(`[${_ts()}] [OR-core] fetchOasisDetails failed @ (${oX}|${oY}):`, e);
-            return { ok:false, type:"EMPTY", send:{}, counts:{}, empty:true, reason:"fetch_error" };
+            console.log(""`[${_ts()}] [OR-core] No cache for oasis (${oX}|${oY}), checking area freshness...`);
+            // 1) ¿Área fresca? Si no, hago barrido “cluz” (centro y ±30)
+            const area = _loadArea();
+            if(!_areaFresh(area, vX, vY)){
+                console.log(`[${_ts()}] [OR-core] Area stale, performing cluz scan around (${vX}|${vY})...`);
+                await _cluzScan(vX, vY);
+                g = _loadGlobal();
+                console.log(`[${_ts()}] [OR-core] cluz scan done, rechecking oasis (${oX}|${oY})...`);
+                rec = _getOasis(g, oX, oY);
+                console.log(`[${_ts()}] [OR-core] After cluz, oasis record:`, rec);
             }
-        }
+            // 2) Si aún no aparece, fallback directo al endpoint del oasis
+            if(!rec){
+                console.log(`[${_ts()}] [OR-core] Oasis still unknown, fetching details for (${oX}|${oY})...`);
+                try{
+                    // fetchOasisDetails(x,y) debe retornar { counts:{u31:n,...}, ... }
+                    const det = await utils.fetchOasisDetails(oX, oY); // { counts:{u31:n,...} }
+                    console.log(`[${_ts()}] [OR-core] Fetched oasis details for (${oX}|${oY}):`, det);
+                    const counts = det?.counts || {};
+                    g = _loadGlobal();
+                    _putOasis(g, oX, oY, counts);
+                    _saveGlobal(g);
+                    rec = _getOasis(g, oX, oY);
+                }catch(e){
+                console.warn(`[${_ts()}] [OR-core] fetchOasisDetails failed @ (${oX}|${oY}):`, e);
+                return { ok:false, type:"EMPTY", send:{}, counts:{}, empty:true, reason:"fetch_error" };
+                }
+            }
         }
 
         const counts = rec?.counts || {};
