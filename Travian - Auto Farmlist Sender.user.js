@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.2
+// @version       2.1.3
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -97,12 +97,12 @@
   const DIST_INF_MAX = 10;
   const KEY_CFG_OVERLOAD = KEY_ROOT + 'cfg_overload';
   const KEY_CFG_RANDOMIZE = KEY_ROOT + 'cfg_randomize';
-  const KEY_BUDGET_POOL = KEY_ROOT + 'budget_pool'; // { ts, units:{t1..t10} }
-  const BUDGET_POOL_TTL_MS = 90*1000;
   const KEY_CFG_RESERVE_PCT = KEY_ROOT + 'cfg_reserve_pct'; // 0..100 (global)
   const KEY_VILLAGES = KEY_ROOT + 'villages_xy'; // { did: {x,y}, ... }
   const KEY_CFG_OVER_MAX        = KEY_ROOT + 'cfg_over_max';       // int (default 2)
   const KEY_CFG_OVER_WINMIN     = KEY_ROOT + 'cfg_over_winmin';    // int min (default 10)
+  const KEY_BUDGET_POOL_PREFIX = KEY_ROOT + 'budget_pool_v2_'; // por aldea: budget_pool_v2_<did>
+  const BUDGET_POOL_TTL_MS = 90*1000;
 
   function canOverloadSlot(sl){
     // Lee config
@@ -563,27 +563,6 @@ function scanAllVillagesFromSidebar(){
   async function planForList(flId, gqlData){
     console.log(new Date().toISOString(), "[planForList] START flId=", flId);
 
-    // --- helpers locales robustos para oasis libres ---
-    function normalizeUnits(send){
-      if (!send || typeof send !== 'object') return null;
-      const src = (send.units && typeof send.units === 'object') ? send.units : send;
-      const out = {};
-      for (let i=1;i<=10;i++){
-        const k = 't'+i;
-        if (k in src) out[k] = src[k];
-      }
-      return Object.keys(out).length ? out : null;
-    }
-    function safeSumUnits(pack){
-      if (!pack || typeof pack !== 'object') return 0;
-      let total = 0;
-      for (const k in pack){
-        const n = Number.parseInt(pack[k], 10);
-        if (Number.isFinite(n) && n > 0) total += n;
-      }
-      return total|0;
-    }
-
     const farmList = gqlData?.farmList;
     const slots = farmList?.slots || [];
     const history = getHistory();
@@ -592,7 +571,7 @@ function scanAllVillagesFromSidebar(){
     const vm  = findVillageByDid(did);
 
     const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-    const pool = getBudgetPool(villageUnits);
+    const pool = getBudgetPool(did, villageUnits);
     const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
 
     const wl = getWhitelist();
@@ -637,6 +616,8 @@ function scanAllVillagesFromSidebar(){
     for (const sl of slots){
       if (!sl?.id) continue;
       if (!sl.isActive) continue;
+
+      // si está corriendo, respetar overload window
       if (sl.isRunning){
         const over = cfgGetBool(KEY_CFG_OVERLOAD, false);
         if (!over){
@@ -650,110 +631,106 @@ function scanAllVillagesFromSidebar(){
       }
       if (sl.isSpying) continue;
 
+      // estado e icono actuales (definir ANTES de usarlos)
       const st = readSlotState(sl.id);
       const lr = sl?.lastRaid || {};
+      const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
+      const ttype = sl?.target?.type|0; // 0=aldea, 1=capital, 2=oasis ocupado, 3=oasis libre
       const curIcon = parseInt(lr?.icon ?? st.lastIcon ?? -1, 10);
 
-      // ICON 3: universal skip
-      if (curIcon === 3){
-        console.log("[cand] skip icon3", sl.id);
-        writeSlotState(sl.id, { lastIcon: 3 });
-        continue;
-      }
-
-      // Log de ayuda cuando icon es 2 (si hay reporte)
+      // Log de ayuda para icon2 con reporte disponible
       if (curIcon === 2 && (lr?.reportId && lr?.authKey)){
         console.log("[cand] icon2 → report", sl.id, { reportId: lr.reportId, authKey: lr.authKey, time: lr.time });
       }
 
-      const tx = sl?.target?.x|0, ty = sl?.target?.y|0;
-      const ttype = sl?.target?.type|0; // 0=aldea, 1=capital, 2=oasis ocupado, 3=oasis libre
-
       try{
+        // Oasis ocupado → jamás desde farmlist
         if (ttype === 2){
-          // Oasis ocupado → nunca desde farmlist
           console.log("[cand] occupied oasis → skip", sl.id, { x: tx, y: ty });
           continue;
         }
 
+        // Oasis libre → usar planificador central sin héroe; fuera del sistema de iconos/decays
         if (ttype === 3){
-          // Oasis libre → usar planificador unificado SIN héroe (tscm)
-          // 1) Obtener did desde el GQL (ownerVillage.id) y coords desde el cache
-          const did = farmList?.ownerVillage?.id|0;
-          const vMatch = findVillageByDid(did);
+          const didOwner = farmList?.ownerVillage?.id|0;
 
-          if (!vMatch){
-            // intento de rescaneo rápido por si el cache estaba vacío o incompleto
+          // coords de la aldea dueña (cacheado)
+          let vmLocal = findVillageByDid(didOwner);
+          if (!vmLocal){
+            // intento de rescaneo por si el cache estaba vacío
             try{
               const rescanned = scanAllVillagesFromSidebar();
               if (Object.keys(rescanned).length) setVillagesMap(rescanned);
-            }catch(e){ /* ignore */ }
+            }catch{}
+            vmLocal = findVillageByDid(didOwner);
           }
-
-          const vm = vMatch || findVillageByDid(did);
-          if (!vm){
-            console.log("[cand] free oasis: cannot resolve coords from did", { did, slotId: sl.id });
+          if (!vmLocal){
+            console.log("[cand] free oasis: cannot resolve coords from did", { did: didOwner, slotId: sl.id });
             continue;
           }
 
-          // 2) available desde pool (coherente con tu sistema de reservas)
+          // presupuesto disponible (coherente con pool/whitelist)
           const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-          const pool = getBudgetPool(villageUnits);
-          const available = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
+          const poolAvail = getBudgetPool(didOwner, villageUnits);
+          const available = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(poolAvail?.units||{}) };
 
-          // 3) whitelist & lossTarget
-          const wl = getWhitelist();
-          const lossTarget = 0.02;
+          const wlLocal = getWhitelist();
+          const lossTarget = 0.02; // conservador
 
-          // 4) plan del helper central
           const oX = sl?.target?.x|0, oY = sl?.target?.y|0;
-          let plan=null;
+
+          let plan = null;
           try{
-            plan = await tscm.utils.planOasisRaidNoHero(vm.did, vm.x, vm.y, oX, oY, available, wl, lossTarget);
+            plan = await tscm.utils.planOasisRaidNoHero(vmLocal.did, vmLocal.x, vmLocal.y, oX, oY, available, wlLocal, lossTarget);
           }catch(e){
             console.log("[cand] planOasisRaidNoHero error", sl.id, e);
             continue;
           }
 
-          let normalized = null; // <- hoist aquí para usarlo después
           if (!plan?.ok){
-            console.log("[cand] free oasis → plan no-ok, disable + block", sl.id, plan?.reason);
-            updates.push({ listId: flId, id: sl.id, x: oX, y: oY, active: true });
-            writeSlotState(sl.id, { ...blockForHours(12), lastIcon: 2 });
+            console.log("[cand] free oasis → plan no-ok (skip, no icon/blocks)", sl.id, plan?.reason);
             continue;
-          }else{
-            normalized = normalizeUnits(plan.send);
-            console.log("[cand] free oasis → plan ok", sl.id, { desired: normalized ? safeSumUnits(normalized) : 0, plan });
           }
 
-          // ok → marcar para STAGE 3 usando plan.send (sin héroe)
-          sl.__isFreeOasis = true;
-          // clonar para evitar prototipos/propiedades extrañas y mutaciones
-          sl.__oasisPlanSend = { units: normalized || {} }; // guardamos siempre con shape {units:{}}
-          sl.__oasisDesired  = normalized ? safeSumUnits(normalized) : 0;
+          // normalizar {units:{}} y marcar para STAGE 3
+          const normalized = normalizeUnits(plan.send) || {};
+          console.log("[cand] free oasis → plan ok", sl.id, { desired: safeSumUnits(normalized), plan });
+
+          sl.__isFreeOasis   = true;                // bandera para Stage 3
+          sl.__oasisPlanSend = { units: normalized };
+          sl.__oasisDesired  = safeSumUnits(normalized);
           candidates.push(sl);
           continue;
         }
 
-        // ttype 0/1: aldeas (incluye natars). NO getOasisVerdict.
-        // Si está bloqueado y el último icon fue 1, limpialo
-        if (curIcon === 1 && (st.blockedUntil > now()    || st.permaUntil > now())){
+        // A partir de acá: aldeas (0/1) → sí aplican reglas de iconos/blocks
+
+        // Icono 3: skip universal para aldeas
+        if (curIcon === 3){
+          console.log("[cand] skip icon3 (non-oasis)", sl.id);
+          writeSlotState(sl.id, { lastIcon: 3 });
+          continue;
+        }
+
+        // Si estaba bloqueado pero ahora es icon1, limpiar bloqueos "zombies"
+        if (curIcon === 1 && (st.blockedUntil > now() || st.permaUntil > now())){
           console.log("[cand] clean blocks on icon1", sl.id);
           writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
         }
 
-        // Respeta bloqueo actual
+        // Respetar bloqueos presentes en aldeas
         if (isBlocked(readSlotState(sl.id))){
           console.log("[cand] blocked", sl.id);
           continue;
         }
 
-        // Sin icono → candidato automático (ya filtrado type 2 arriba)
+        // Sin icono: candidato automático
         if (Number.isNaN(curIcon) || curIcon < 0){
           console.log("[cand] no icon → auto-candidate", sl.id);
         }
 
         candidates.push(sl);
+
       }catch(e){
         console.log("[cand] error", sl?.id, e);
       }
@@ -830,16 +807,29 @@ function scanAllVillagesFromSidebar(){
         }
 
         // Debitar del pool para mantener coherencia con tu presupuesto compartido
-        debitBudgetPool(pack);
+        debitBudgetPool(did, pack);
 
         // Estado & elección para SEND
+        // writeSlotState(slotId, {
+        //   lastIcon: 1,
+        //   lastOutcome: 'GOOD',
+        //   desiredCount: planned,
+        //   lastSentTs: now(),
+        //   lastGoodTs: now()
+        // });
         writeSlotState(slotId, {
-          lastIcon: 1,
+          // No tocar lastIcon para mantenerlos fuera del sistema de iconos
           lastOutcome: 'GOOD',
           desiredCount: planned,
           lastSentTs: now(),
           lastGoodTs: now()
         });
+
+
+
+
+
+
         chosenTargets.push(slotId);
 
         // Burst si corresponde
@@ -882,7 +872,7 @@ function scanAllVillagesFromSidebar(){
           }
 
           chosenTargets.push(slotId);
-          debitBudgetPool(pack);
+          debitBudgetPool(did, pack);
 
           const goodish = /muy bueno|bueno/i.test(decision.rating) || decision.barrida === true;
           writeSlotState(slotId, {
@@ -912,7 +902,7 @@ function scanAllVillagesFromSidebar(){
 
           }
           chosenTargets.push(slotId);
-          debitBudgetPool(pack);
+          debitBudgetPool(did, pack);
 
           writeSlotState(slotId, { lastIcon: 2, lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
         } else {
@@ -934,7 +924,7 @@ function scanAllVillagesFromSidebar(){
 
         }
         chosenTargets.push(slotId);
-        debitBudgetPool(pack);
+        debitBudgetPool(did,pack);
 
         if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
         writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
@@ -949,7 +939,7 @@ function scanAllVillagesFromSidebar(){
           updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
         }
         chosenTargets.push(slotId);
-        debitBudgetPool(pack);
+        debitBudgetPool(did,pack);
         writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'MID', desiredCount: planned, lastSentTs: now() });
 
       } else if (lo.outcome==='LOW' || lo.outcome==='ZERO'){
@@ -962,7 +952,7 @@ function scanAllVillagesFromSidebar(){
           updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
         }
         chosenTargets.push(slotId);
-        debitBudgetPool(pack);
+        debitBudgetPool(did,pack);
         writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: lo.outcome, desiredCount: planned, lastSentTs: now() });
 
       } else {
@@ -976,7 +966,7 @@ function scanAllVillagesFromSidebar(){
           updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
         }
         chosenTargets.push(slotId);
-        debitBudgetPool(pack);
+        debitBudgetPool(did,pack);
         writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'UNKNOWN', desiredCount: planned, lastSentTs: now() });
       }
     }
@@ -992,93 +982,109 @@ function scanAllVillagesFromSidebar(){
   const burstTimers = {}; // key `${flId}_${slotId}` : { left:int, t:any }
 
   function scheduleBurst(flId, slotId, left, dmin, dmax){
-    const key=`${flId}_${slotId}`;
-    if (left<=0) return;
+    const key = `${flId}_${slotId}`;
+    if (left <= 0) return;
     clearBurst(key);
-    const delay = (Math.floor(Math.random()*(Math.max(dmax,dmin)-Math.min(dmax,dmin)+1)) + Math.min(dmax,dmin)) * 1000;
+
+    const delay = (Math.floor(Math.random() * (Math.max(dmax, dmin) - Math.min(dmax, dmin) + 1)) + Math.min(dmax, dmin)) * 1000;
+
     burstTimers[key] = {
       left,
-      t: setTimeout(async ()=>{
-        try{
-          LOG('log','Burst tick',{flId, slotId, left});
+      t: setTimeout(async () => {
+        try {
+          LOG('log', 'Burst tick', { flId, slotId, left });
+
           const gql = await gqlFarmListDetails(flId);
           const farmList = gql?.farmList;
-          const did = farmList?.ownerVillage?.id|0;
+          const did = farmList?.ownerVillage?.id | 0;
           const vm  = findVillageByDid(did);
           if (!vm) return;
 
-
-
           if (gql?.weekendWarrior?.isNightTruce) return;
           if (!farmList) return;
-          const sl = (farmList.slots||[]).find(s=>s.id===slotId);
+
+          const sl = (farmList.slots || []).find(s => s.id === slotId);
           if (!sl || sl.isSpying) return;
 
+          const isOasis = ((sl?.target?.type | 0) === 3);
+
+          // respeta overload window; oasis y aldeas comparten esta válvula
           if (sl.isRunning){
             const over = cfgGetBool(KEY_CFG_OVERLOAD, false);
-            if (!over){
-              return;
-            } else {
-              if (!canOverloadSlot(sl)){
-                console.log("[burst] overload filtered out", sl.id, { running: sl.runningAttacks, nextAttackAt: sl.nextAttackAt });
+            if (!over) return;
+            if (!canOverloadSlot(sl)) return;
+          }
+
+          const st      = readSlotState(slotId);
+          const curIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
+
+          // Para oasis: ignorar bloqueos e icono 3 (siempre pueden burstear)
+          if (!isOasis){
+            // válvula de bloqueo normal para aldeas
+            if (isBlocked(st)) {
+              const muchoTiempo = (now() - (st.lastGoodTs || 0)) > 6 * 3600 * 1000; // 6h
+              if (curIcon === 1 || muchoTiempo) {
+                writeSlotState(slotId, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: curIcon });
+              } else {
                 return;
               }
             }
+            // si el último icono es 3 (aldea), no burstear
+            if (parseInt(sl?.lastRaid?.icon ?? -1, 10) === 3) return;
           }
-            const st = readSlotState(slotId);
-            const curIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
 
-            // Válvula anti-zombie: si está bloqueado pero hoy es icon1, o si pasó mucho desde el último GOOD, limpiamos bloqueo
-            if (isBlocked(st)) {
-                const muchoTiempo = (now() - (st.lastGoodTs || 0)) > 6 * 3600 * 1000; // 6h, ajustable
-                if (curIcon === 1 || muchoTiempo) {
-                    writeSlotState(slotId, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: curIcon });
-                } else {
-                    return;
-                }
-            }
-
-
-          // Evaluate again if still GOOD (or at least not terrible)
-          //const myHistory = getHistory();
           const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
-          //const dx = dist(farmList.ownerVillage.x|0, farmList.ownerVillage.y|0, sl?.target?.x|0, sl?.target?.y|0);
-          const dx = dist(vm.x, vm.y, sl?.target?.x|0, sl?.target?.y|0);
-          //const lo = lootOutcome(sl.lastRaid, myHistory[slotId]||0);
-          if (parseInt(sl?.lastRaid?.icon??-1,10)===3) return;
+          const dx    = dist(vm.x, vm.y, sl?.target?.x|0, sl?.target?.y|0);
 
-          const wl = getWhitelist();
+          const wl  = getWhitelist();
           const cfg = {
             whitelist: wl,
             allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),
             allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),
           };
-          // usar desired actual (agresivo)
-          const desired = Math.max((st.desiredCount||5)+1, 6);
-          const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-          const pool = getBudgetPool(villageUnits);
-          const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
-          const pack = buildPack(desired, dx, tribe, budget, cfg);
-          const planned = sumUnits(pack);
-          if (planned<=0) return;
 
-          // PUT if differs
-          if (unitDiffers(sl?.troop||{}, pack)){
-            await putUpdateSlots(flId, [{ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: pack }]);
+          // agresivo pero acotado
+          const desired = Math.max((st.desiredCount || 5) + 1, 6);
+
+          const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
+          const pool   = getBudgetPool(did, villageUnits);
+          const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units || {}) };
+
+          const pack    = buildPack(desired, dx, tribe, budget, cfg);
+          const planned = sumUnits(pack);
+          if (planned <= 0) return;
+
+          // PUT solo si cambió el pack
+          if (unitDiffers(sl?.troop || {}, pack)) {
+            await putUpdateSlots(flId, [{
+              listId: flId,
+              id: slotId,
+              x: sl?.target?.x,
+              y: sl?.target?.y,
+              active: true,
+              abandoned: false,
+              units: toFullUnitPack(pack)
+            }]);
           }
-          debitBudgetPool(pack);
+
+          debitBudgetPool(did, pack);
           await sendTargets(flId, [slotId]);
+
           writeSlotState(slotId, { lastSentTs: now(), desiredCount: planned });
 
-          // schedule next burst if still left
-          scheduleBurst(flId, slotId, left-1, dmin, dmax);
+          // próximo burst si quedan
+          scheduleBurst(flId, slotId, left - 1, dmin, dmax);
 
-        }catch(e){
-          LOG('warn','Burst error',e);
+        } catch (e) {
+          LOG('warn', 'Burst error', e);
         }
       }, delay)
     };
   }
+
+
+
+
   function clearBurst(key){
     if (burstTimers[key]?.t) clearTimeout(burstTimers[key].t);
     delete burstTimers[key];
@@ -1089,7 +1095,7 @@ function scanAllVillagesFromSidebar(){
   // ───────────────────────────────────────────────────────────────────
   const state = {}; // per FL
   function ensure(flId){
-    if (!state[flId]) state[flId]={ t:null, cdt:null, inflight:false };
+    if (!state[flId]) state[flId]={ t:null, cdt:null, inflight:false, cooldownUntil:0, lastRunTs:0 };
     return state[flId];
   }
   async function processList(flId){
@@ -1162,11 +1168,19 @@ function scanAllVillagesFromSidebar(){
     st.t = setTimeout(async ()=>{
       if (!running || !amIMaster()) return;
       if (st.inflight){ schedule(flId, now()+1000); return; }
+      // ❗ Anti-doble corrida pegada: respeta cooldown corto
+      if (now() < (st.cooldownUntil||0)) { 
+        schedule(flId, st.cooldownUntil + 50);
+        return;
+      }
       try{
         st.inflight=true;
+        st.lastRunTs = now();
         await processList(flId);
       } finally {
         st.inflight=false;
+        // ❗ aplica cooldown de 2.5s para evitar re-entrada del “kick”
+        st.cooldownUntil = now() + 2500;
         const next = now() + getIntervalMs(flId) + Math.floor(Math.random()*15000);
         schedule(flId, next);
       }
@@ -1289,18 +1303,23 @@ function scanAllVillagesFromSidebar(){
       const ids = runningIds.length ? runningIds.slice() : selectedIds();
       if (!ids.length) return;
       const nm = getNextMap();
-      ids.forEach(id => nm[id] = 0);           // marca todos como “pendiente ya”
+      ids.forEach(id => {
+        const st = ensure(id);
+        if (st.inflight) return;               // ❗ No reprogramar si está corriendo
+        nm[id] = 0;                            // pendiente ya
+        schedule(id, now() + 50);
+      });
       setNextMap(nm);
-      // reprograma inmediata cada lista
-      ids.forEach(id => schedule(id, now() + 50));
       LOG('log','Cycle kick (countdown==0)',{lists: ids.length});
     } finally {
       cycleKickInFlight = false;
     }
   }
 
-  function getBudgetPool(villageUnits){
-    let pool = LS.get(KEY_BUDGET_POOL, null);
+  function getBudgetPool(did, villageUnits){
+    const KEY = KEY_BUDGET_POOL_PREFIX + String(did||0);
+    let pool = LS.get(KEY, null);
+
     const fresh = pool && (now() - (pool.ts||0) < BUDGET_POOL_TTL_MS);
     if (!fresh){
       // inicializa pool a (100 - reserve)% de las tropas actuales en aldea
@@ -1312,18 +1331,19 @@ function scanAllVillagesFromSidebar(){
         units[k] = Math.floor(v * factor);
       }
       pool = { ts: now(), units };
-      LS.set(KEY_BUDGET_POOL, pool);
+      LS.set(KEY, pool);
     }
     return pool;
   }
-  function debitBudgetPool(pack){
-    const pool = LS.get(KEY_BUDGET_POOL, null);
+  function debitBudgetPool(did, pack){
+    const KEY = KEY_BUDGET_POOL_PREFIX + String(did||0);
+    const pool = LS.get(KEY, null);
     if (!pool) return;
     for (const k of Object.keys(pool.units||{})){
       const use = pack?.[k]|0;
       if (use>0) pool.units[k] = Math.max(0, (pool.units[k]|0)-use);
     }
-    LS.set(KEY_BUDGET_POOL, pool);
+    LS.set(KEY, pool);
   }
 
 
@@ -1499,16 +1519,18 @@ function scanAllVillagesFromSidebar(){
       KEY_SLOT_STATE, KEY_STATS, KEY_SELECTED_MODE, KEY_SELECTED_IDS,
       KEY_DRYRUN, KEY_CFG_WHITELIST, KEY_CFG_FALLBACK, KEY_CFG_CROSS,
       KEY_CFG_ICON2DECAYH, KEY_CFG_BURST_DMIN, KEY_CFG_BURST_DMAX, KEY_CFG_BURST_N,
-      KEY_MASTER, KEY_VILLAGES,
-      KEY_BUDGET_POOL, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,
-      KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN
+      KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN, KEY_MASTER,
+      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE
     ].forEach(k=>LS.del(k));
 
     // Apaga timers, bursts, y UI
     try{
-      Object.values(state).forEach(st=>{ if(st.t) clearTimeout(st.t); if(st.cdt) clearInterval(st.cdt); });
-      Object.keys(burstTimers).forEach(k=>clearBurst(k));
-      if (uiTickTimer){ stopUiTick(); }
+      const toDel = [];
+      for (let i=0;i<localStorage.length;i++){
+        const k = localStorage.key(i);
+        if (k && k.startsWith(KEY_BUDGET_POOL_PREFIX)) toDel.push(k);
+      }
+      toDel.forEach(k=> localStorage.removeItem(k));
     }catch{}
 
     // Recontruye UI: quita TODOS los selects extra y resetea el primary
@@ -1589,7 +1611,13 @@ function scanAllVillagesFromSidebar(){
     elCount.innerHTML = html;
 
     // NUEVO: si alguno llegó a 0, dispara ciclo inmediato
-    const anyZero = ids.some(id => ((next?.[id]||0) - now()) <= 0);
+    const anyZero = ids.some(id => {
+      const st = ensure(id);
+      const left = (next?.[id]||0) - now();
+      // Si justo terminamos hace menos de 2.5s, no patear
+      if (now() < (st.cooldownUntil||0)) return false;
+      return left <= 0;
+    });
     if (anyZero && running && amIMaster()){
       kickPendingCycle();
     }
