@@ -125,24 +125,52 @@
   function getVillagesMap(){ return LS.get(KEY_VILLAGES, {}) || {}; }
   function setVillagesMap(m){ LS.set(KEY_VILLAGES, m); }
 
-  function normalizeNumText(s){ return String(s||'').replace(/[^\d\-]/g,''); }
 
-  /** Escanea TODAS las aldeas del sidebar y cachea {did:{x,y}} */
-  function scanAllVillagesFromSidebar(){
-    const out = {};
-    document.querySelectorAll(".listEntry.village").forEach(el=>{
-      const did = Number(el.dataset.did || el.getAttribute("data-did"));
-      if (!Number.isFinite(did)) return;
+function stripBidiAndJunk(txt){
+  // Reemplaza el minus unicode y elimina marcadores bidi + paréntesis/pipes/espacios raros
+  return txt
+    .replace(/\u2212/g, "-")                                 // "−" → "-"
+    .replace(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g, "") // quita bidi marks
+    .replace(/[()|]/g, "")                                    // quita paréntesis y pipe
+    .replace(/\s+/g, "")                                      // quita espacios/nbsp
+}
 
-      const cw = el.querySelector(".coordinatesGrid .coordinatesWrapper");
-      const xTxt = normalizeNumText(cw?.querySelector(".coordinateX")?.textContent || "");
-      const yTxt = normalizeNumText(cw?.querySelector(".coordinateY")?.textContent || "");
-      const x = parseInt((xTxt.match(/-?\d+/)||["0"])[0], 10);
-      const y = parseInt((yTxt.match(/-?\d+/)||["0"])[0], 10);
-      if (Number.isFinite(x) && Number.isFinite(y)) out[did] = { x, y };
-    });
-    return out;
-  }
+function scanAllVillagesFromSidebar(){
+  const out = {};
+  document.querySelectorAll(".listEntry.village").forEach(el=>{
+    const did = Number(el.dataset.did || el.getAttribute("data-did"));
+    if (!Number.isFinite(did)) return;
+
+    const cw = el.querySelector(".coordinatesGrid .coordinatesWrapper");
+    const rawX = cw?.querySelector(".coordinateX")?.textContent || "";
+    const rawY = cw?.querySelector(".coordinateY")?.textContent || "";
+
+    console.log("rawX:", rawX, "rawY:", rawY);
+
+    const sx = stripBidiAndJunk(rawX);
+    const sy = stripBidiAndJunk(rawY);
+
+    console.log("stripped sx:", sx, "sy:", sy);
+
+    // Extrae el primer número con signo, permitiendo basura intermedia ya eliminada
+    const xMatch = (sx.match(/^-?\d+/) || ["0"])[0];
+    const yMatch = (sy.match(/^-?\d+/) || ["0"])[0];
+
+    console.log("regex xMatch:", xMatch, "yMatch:", yMatch);
+
+    const x = parseInt(xMatch, 10);
+    const y = parseInt(yMatch, 10);
+
+    console.log("parsed x:", x, "y:", y);
+
+    if (Number.isFinite(x) && Number.isFinite(y)) out[did] = { x, y };
+  });
+  console.log("final out:", out);
+  return out;
+}
+
+
+
 
   /** Devuelve {did,x,y} por did; null si no existe */
   function findVillageByDid(did){
