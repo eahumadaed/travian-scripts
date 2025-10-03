@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐎 Auto Training Troop (Toolbox UI) — Travian
-// @version      2.0.2
+// @version      2.0.4
 // @description  [FIXED] UI rediseñada como toolbox lateral. Muestra próxima tropa en modo colapsado, expandible. Evita duplicados en build.php. Incluye botón "Entrenar ahora" (sin resetear contador) y estadísticas de tropas entrenadas por tarea.
 // @match        https://*.travian.com/*
 // @run-at       document-end
@@ -380,7 +380,10 @@
   function injectControls() {
     const gid = activeGid();
     if (pageType() !== "build" || !gid || !ALLOWED_GIDS.has(gid)) return;
-    const did = currentActiveDid(); if (!did) return;
+
+    const did = currentActiveDid();
+    if (!did) return;
+
     const existingTasksForVillage = readTasks().filter(t => t.did === did);
 
     document.querySelectorAll(".innerTroopWrapper[data-troopid]").forEach((wrapper) => {
@@ -397,27 +400,49 @@
       const row = document.createElement("div");
       row.className = "at-row";
       row.style.cssText = "margin-top:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;";
-      row.innerHTML = `<label style="font-size:12px; opacity:0.8;">Auto:</label>
+      row.innerHTML = `
+        <label style="font-size:12px; opacity:0.8;">Auto:</label>
         <select class="at-interval" style="width:90px; padding:2px 6px; background:#111; color:#eee; border:1px solid #444; border-radius:6px;">
           ${INTERVAL_OPTIONS.map(m => `<option value="${m}">${m} min</option>`).join("")}
         </select>
-        <button type="button" class="at-add at-btn" style="background:#1976d2; color:#fff;">Auto train</button>`;
+        <button type="button" class="at-add at-btn" style="background:#1976d2; color:#fff;">Auto train</button>
+      `;
       cta.appendChild(row);
 
       row.querySelector(".at-add").addEventListener("click", () => {
+        const minutes = parseInt(row.querySelector(".at-interval").value, 10);
+        const g = readGlobal();
+        // Base temporal: si está pausado, usamos pausedAt para "congelar" el reloj del nextRun
+        const base = (g.paused && g.pausedAt) ? g.pausedAt : nowEpoch();
+
         const task = {
-          id: `${did}-${gid}-${troopId}-${Date.now()}`, troopId, troopName, villageName: getVillageNameByDid(did),
-          did, gid, intervalMin: parseInt(row.querySelector(".at-interval").value, 10),
-          nextRun: nowEpoch() + parseInt(row.querySelector(".at-interval").value, 10) * 60,
-          enabled: true, createdAt: nowEpoch(), trainedCount: 0,
+          id: `${did}-${gid}-${troopId}-${Date.now()}`,
+          troopId,
+          troopName,
+          villageName: getVillageNameByDid(did),
+          did,
+          gid,
+          intervalMin: minutes,
+          nextRun: base + minutes * 60,
+          enabled: true,
+          createdAt: nowEpoch(),
+          trainedCount: 0,
         };
-        const tasks = readTasks(); tasks.push(task); writeTasks(tasks);
-        ensureToolbox(); renderPanel(); renderSidebarAndHeader();
+
+        const tasks = readTasks();
+        tasks.push(task);
+        writeTasks(tasks);
+
+        ensureToolbox();
+        renderPanel();
+        renderSidebarAndHeader();
         log(`Task created: ${JSON.stringify(task)}`);
+
         row.remove();
       });
     });
   }
+
 
   async function executeTraining(task) {
     const url = `/build.php?gid=${task.gid}&newdid=${task.did}`;

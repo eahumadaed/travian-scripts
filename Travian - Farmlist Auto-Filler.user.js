@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🧭 Farm Finder & Farmlist Filler (Smart Oasis)
-// @version      2.0.1
+// @version      2.0.3
 // @description  Escanea anillos/9-puntos desde la aldea activa, cachea mapa (1h), filtra Aldeas/Natares/Oasis (con o sin animales), UI con modales, exclusión por alianza, orden visual; farmlist con bloque de tropas unificado y modo inteligente para Oasis (sin héroe) con 1 GQL por lista.
 // @match        https://*/karte.php*
 // @run-at       document-idle
@@ -44,7 +44,12 @@
   const HUMAN_DELAY_MS       = [800, 1500];
   const PROFILE_DELAY_MS     = [350, 700];
   const CREATE_LIST_DELAY_MS = [700, 1200];
-  const ADD_SLOT_DELAY_MS    = [100, 500];
+  const ADD_SLOT_DELAY_MS    = [100, 200];
+  // === Toroide Travian ===
+  const MAP_LIMIT = 200;
+  const MAP_SIZE  = (MAP_LIMIT * 2) + 1; // 401
+
+
 
   const DEBUG_VERBOSE = true;
   const _farmTroopsCache = new Map();
@@ -213,7 +218,22 @@ query($id: Int!, $onlyExpanded: Boolean){
     return `[${DATE_FMT()} ${hh}:${mm}:${ss}]`;
   };
   const sleep = (min, max) => new Promise(r => setTimeout(r, Math.floor(min + Math.random() * (max - min))));
-  const distance = (x1, y1, x2, y2) => Math.hypot(x1 - x2, y1 - y2);
+  const distance = (x1, y1, x2, y2) => toroidalDistance(x1, y1, x2, y2);
+  const wrapCoord = (v, L = MAP_LIMIT, N = MAP_SIZE) =>
+    ((((v + L) % N) + N) % N) - L;
+
+  const wrapXY = (x, y) => ({ x: wrapCoord(x), y: wrapCoord(y) });
+
+  const toroidalDistance = (x1, y1, x2, y2) => {
+    const dxRaw = Math.abs(x1 - x2);
+    const dyRaw = Math.abs(y1 - y2);
+    const dx = Math.min(dxRaw, MAP_SIZE - dxRaw);
+    const dy = Math.min(dyRaw, MAP_SIZE - dyRaw);
+    return Math.hypot(dx, dy);
+  };
+
+
+
   const normalizeNumText = (txt) =>
     (txt || "")
       .replace(/\u2212/g, "-")
@@ -237,7 +257,11 @@ query($id: Int!, $onlyExpanded: Boolean){
   /******************************************************************
    * CACHE MAPA
    ******************************************************************/
-  const cacheKeyFor = (cx,cy,zoom,step,maxDist,did) => `${location.host}::${did}::${cx}|${cy}::z${zoom}::step${step}::d${maxDist}`;
+  const cacheKeyFor = (cx,cy,zoom,step,maxDist,did) => {
+    const c = wrapXY(cx, cy);
+    return `${location.host}::${did}::${c.x}|${c.y}::z${zoom}::step${step}::d${maxDist}`;
+  };
+
   function cacheLoad(){
     const c = lsGetJSON(LS.MAP_CACHE,null);
     state.cache = c;
@@ -290,20 +314,29 @@ query($id: Int!, $onlyExpanded: Boolean){
     }
   };
 
-  const fetchMapChunk = async (x, y, zoom = DEFAULT_ZOOM, ignorePositions = []) => {
-    guardAbort();
-    const body = { data: { x, y, zoomLevel: zoom, ignorePositions } };
-    const res = await fetchWithAbort(MAP_ENDPOINT, {
-      method: "POST",
-      credentials: "include",
-      headers: COMMON_HEADERS,
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`map/position ${res.status}`);
-    const json = await res.json();
-    const items = json?.tiles || json?.data || json || [];
-    return Array.isArray(items) ? items : [];
-  };
+    const fetchMapChunk = async (x, y, zoom = DEFAULT_ZOOM, ignorePositions = []) => {
+      guardAbort();
+      const nx = wrapCoord(x);
+      const ny = wrapCoord(y);
+      const ign = Array.isArray(ignorePositions)
+        ? ignorePositions.map(p => ({ x: wrapCoord(p.x), y: wrapCoord(p.y) }))
+        : [];
+
+      const body = { data: { x: nx, y: ny, zoomLevel: zoom, ignorePositions: ign } };
+      const res = await fetchWithAbort(MAP_ENDPOINT, {
+        method: "POST",
+        credentials: "include",
+        headers: COMMON_HEADERS,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`map/position ${res.status}`);
+      const json = await res.json();
+      const items = json?.tiles || json?.data || json || [];
+      return Array.isArray(items) ? items : [];
+    };
+
+
+
     const KEYS_UNITS = ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"];
 
     function normalizeUnits(u){
@@ -326,12 +359,16 @@ query($id: Int!, $onlyExpanded: Boolean){
   function dedupeByXY(arr) {
     const seen = new Set();
     return arr.filter(r => {
-      const k = `${r.x}|${r.y}`;
+      const w = wrapXY(r.x, r.y);
+      const k = `${w.x}|${w.y}`;
       if (seen.has(k)) return false;
       seen.add(k);
+      // también pisa r.x/r.y con la versión canónica
+      r.x = w.x; r.y = w.y;
       return true;
     });
   }
+
   function labelFor(dx, dy) {
     const sx = dx === 0 ? "" : (dx > 0 ? "E" : "W");
     const sy = dy === 0 ? "" : (dy > 0 ? "N" : "S");
@@ -360,7 +397,9 @@ query($id: Int!, $onlyExpanded: Boolean){
       const x = cx + dx, y = cy + dy;
       const ring = Math.ceil(Math.hypot(dx, dy) / inc);
       log(`Scanning map chunk @ (${x}|${y}) [call ${i+1}/${points.length}] ring=${ring}`);
-      const chunk = await fetchMapChunk(x, y, DEFAULT_ZOOM, []);
+      const nx = wrapCoord(x);
+      const ny = wrapCoord(y);
+      const chunk = await fetchMapChunk(nx, ny, DEFAULT_ZOOM, []);
       log(`→ chunk (${x}|${y}) returned ${Array.isArray(chunk) ? chunk.length : 0} tiles`);
       all.push(...chunk);
       await sleep(...HUMAN_DELAY_MS);
@@ -621,11 +660,12 @@ query($id: Int!, $onlyExpanded: Boolean){
     document.addEventListener("click", (ev) => {
       const btn = ev.target.closest("button[data-action='ver']");
       if (btn) {
-        const x = btn.dataset.x, y = btn.dataset.y;
         const form = document.getElementById("mapCoordEnter");
         if (!form) { log("Map form not found. Navegar manualmente."); return; }
-        form.querySelector("#xCoordInputMap").value = x;
-        form.querySelector("#yCoordInputMap").value = y;
+        const x = btn.dataset.x|0, y = btn.dataset.y|0;
+        const w = wrapXY(x, y);
+        form.querySelector("#xCoordInputMap").value = w.x;
+        form.querySelector("#yCoordInputMap").value = w.y;
         log(`Jump to (${x}|${y})`);
         form.querySelector("button[type='submit']").click();
       }
@@ -706,6 +746,7 @@ query($id: Int!, $onlyExpanded: Boolean){
         <div><b>Buscar Oasis</b></div>
         <div>
           <label><input type="radio" name="ff_o_mode" value="0" ${prefs.mode===0?'checked':''}> Sin animales (0)</label><br>
+          <label><input type="radio" name="ff_o_mode" value="-2" ${prefs.mode===-2?'checked':''}> Mixto (libres y vacíos)</label><br>
           <label><input type="radio" name="ff_o_mode" value="-1" ${prefs.mode===-1?'checked':''}> Con animales (todos) (-1)</label><br>
           <label><input type="radio" name="ff_o_mode" value="N" ${(![0,-1].includes(prefs.mode))?'checked':''}> Con animales (máximo N): </label>
           <input type="number" id="ff_o_maxN" min="1" value="${prefs.maxN||5}" style="width:80px;">
@@ -725,6 +766,7 @@ query($id: Int!, $onlyExpanded: Boolean){
     function getOasisModeFromRadios(){
       const v = (UI.modalBody.querySelector("input[name='ff_o_mode']:checked")?.value) || "0";
       if(v==="0") return 0;
+      if(v==="-2") return -2;
       if(v==="-1") return -1;
       return Math.max(1, parseInt(document.getElementById("ff_o_maxN").value,10)||5);
     }
@@ -1063,29 +1105,32 @@ query($id: Int!, $onlyExpanded: Boolean){
       const maxDist = state.maxDist;
 
       const prefs = state.oasisPrefs || { mode:0, maxN:5, smart:false, lossTarget:2 };
-      const mode = prefs.mode; // 0 | -1 | N>0
+      const mode = prefs.mode; // 0 | -1 | -2 | N>0
       const maxAnimals = (mode===0) ? 0 : (mode===-1 ? Infinity : Math.max(1, prefs.maxN||5));
+
+      // Predicado según modo
+      const predicate = (animals) => {
+        if (mode === 0)  return animals.total === 0;                 // solo vacíos
+        if (mode === -1) return animals.total > 0;                   // solo con animales
+        if (mode === -2) return animals.total >= 0;                  // mixto: todos los desocupados
+        return animals.total > 0 && animals.total <= maxAnimals;     // N máximo
+      };
 
       const oasis = [];
       let checked = 0, kept = 0;
 
       for (const rec of entries) {
         guardAbort();
-        if (rec.did !== -1) continue; // oasis
-        checked++;
-
+        if (rec.did !== -1) continue;               // solo oasis
         // ocupado si tiene uid (jugador)
         if (typeof rec.uid !== "undefined") continue;
+
+        checked++;
 
         const animals = animalsFromText(rec.htmlText);
         const dist = distance(state.active.x, state.active.y, rec.x, rec.y);
 
-        const cond =
-          (mode === 0 && animals.total === 0) ||
-          (mode !== 0 && animals.total > 0 && animals.total <= maxAnimals) ||
-          (mode === -1 && animals.total > 0); // redundante con max=Infinity, pero claro
-
-        if (dist <= maxDist && ((mode===-1 && animals.total>0) || (mode===0 && animals.total===0) || (mode>0 && animals.total>0 && animals.total<=maxAnimals))) {
+        if (dist <= maxDist && predicate(animals)) {
           oasis.push({
             player: "Oasis",
             alliance: "-",
@@ -1097,10 +1142,16 @@ query($id: Int!, $onlyExpanded: Boolean){
           });
           kept++;
         }
-        await sleep(5, 15);
+
+        await sleep(5, 15); // human-like pace
       }
 
-      log(`Oasis scan: checked=${checked} kept=${kept} mode=${mode===0?'0 (sin)':''}${mode===-1?'-1 (todos)':''}${mode>0?('≤'+maxAnimals):''}`);
+      log(`Oasis scan: checked=${checked} kept=${kept} mode=${
+        mode===0 ? '0 (sin)' :
+        mode===-1 ? '-1 (con animales)' :
+        mode===-2 ? 'mixto' :
+        ('≤'+maxAnimals)
+      }`);
 
       oasis.sort((a,b) => a.dist - b.dist);
       state.rows = oasis.slice(0, state.maxLists * SLOTS_PER_LIST);
@@ -1125,7 +1176,14 @@ query($id: Int!, $onlyExpanded: Boolean){
     for (let i = 0; i < entries.length; i++) {
       guardAbort();
       const e = entries[i];
-      const payload = { slots: [{ listId, x:e.x, y:e.y, units:e.units, active:true }] };
+
+
+      const w = wrapXY(e.x, e.y); // o data.x/data.y según tu variable
+      const payload = { slots: [{ listId, x: w.x, y: w.y, units: e.units, active: true }] };
+
+
+
+      //const payload = { slots: [{ listId, x:e.x, y:e.y, units:e.units, active:true }] };
       const res = await fetchWithAbort(FL_SLOT_ENDPOINT, {
         method: "POST",
         credentials: "include",
