@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.6
+// @version       2.1.7
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -56,6 +56,33 @@
       "x-requested-with":"XMLHttpRequest",
       "x-version": API_VER,
     };
+  }
+  // Cache mini para evitar GQLs repetidos en ráfagas cortas (ms)
+  const __GQL_CACHE = Object.create(null);
+
+  async function gqlFarmListDetailsCached(flId, ttlMs = 3500){
+    const rec = __GQL_CACHE[flId];
+    const tnow = Date.now();
+
+    // Reutiliza data fresca
+    if (rec && rec.data && (tnow - rec.ts) < ttlMs) return rec.data;
+
+    // Reutiliza la misma promesa si ya hay un fetch en curso
+    if (rec && rec.promise) return rec.promise;
+
+    const p = gqlFarmListDetails(flId)
+      .then(d => {
+        __GQL_CACHE[flId] = { ts: Date.now(), data: d, promise: null };
+        return d;
+      })
+      .catch(err => {
+        // No conservar promise fallida
+        __GQL_CACHE[flId] = null;
+        throw err;
+      });
+
+    __GQL_CACHE[flId] = { ts: tnow, data: null, promise: p };
+    return p;
   }
 
 
@@ -840,7 +867,7 @@ function scanAllVillagesFromSidebar(){
         });
         chosenTargets.push(slotId);
         // Burst si corresponde
-        if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
+        //if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
         continue;
       }
 
@@ -1001,7 +1028,7 @@ function scanAllVillagesFromSidebar(){
         try {
           LOG('log', 'Burst tick', { flId, slotId, left });
 
-          const gql = await gqlFarmListDetails(flId);
+          const gql = await gqlFarmListDetailsCached(flId, 2500); // <- ver sección 2
           const farmList = gql?.farmList;
           const did = farmList?.ownerVillage?.id | 0;
           const vm  = findVillageByDid(did);
@@ -1012,6 +1039,9 @@ function scanAllVillagesFromSidebar(){
 
           const sl = (farmList.slots || []).find(s => s.id === slotId);
           if (!sl || sl.isSpying) return;
+
+
+          if ((sl?.target?.type|0) === 3) return;
 
           const isOasis = ((sl?.target?.type | 0) === 3);
 
@@ -1108,7 +1138,7 @@ function scanAllVillagesFromSidebar(){
   async function processList(flId){
     let gql;
     try{
-      gql = await gqlFarmListDetails(flId);
+      gql = await gqlFarmListDetailsCached(flId, 3500);
     }catch(e){
       LOG('error','GQL fail',e);
       return;
@@ -1165,6 +1195,7 @@ function scanAllVillagesFromSidebar(){
         scheduleBurst(flId, b.slotId, b.bursts|0, dmin, dmax);
       }
     }catch(e){ LOG('warn','Burst schedule error',e); }
+    
   }
 
   function schedule(flId, targetTs){
