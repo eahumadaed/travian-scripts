@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.14
+// @version       2.1.15
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -480,6 +480,10 @@ function scanAllVillagesFromSidebar(){
     return a;
   }
 
+  function getStats(){ return LS.get(KEY_STATS,{}); } 
+  function setStats(s){ LS.set(KEY_STATS,s); } 
+  function toMsEpoch(t){ const n = Number(t)||0; if (n<=0) return 0; return n < 1e12 ? n*1000 : n; }
+
 
   function addStats(flId, flName, slotId, raid){
     if (!raid) return;
@@ -511,7 +515,6 @@ function scanAllVillagesFromSidebar(){
       addSeenReport(reportId);
       return;
     }
-
     const s = getStats();
     if (!s[wk]) s[wk] = { _window: { start, end } };
     if (!s[wk][flId]) s[wk][flId] = { name: flName || String(flId), total: 0, perSlotTs: {} };
