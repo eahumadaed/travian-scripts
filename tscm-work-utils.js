@@ -1053,23 +1053,47 @@
 
     // Escoge UNA sola unidad para oasis vacío
     function _pickUnitForEmpty(tribe, available, whitelist, dist){
-        const groups = utils.getTribeUnitGroups ? utils.getTribeUnitGroups(tribe) : { cav:["t4","t6","t5"], inf:["t3","t2","t1"] };
-        const ua     = utils.getUnitsAttack ? utils.getUnitsAttack(tribe) : null;
-        const pref = dist >= 10
+    const groups = utils.getTribeUnitGroups 
+        ? utils.getTribeUnitGroups(tribe) 
+        : { cav:["t4","t6","t5"], inf:["t3","t2","t1"] };
+    const ua = utils.getUnitsAttack ? utils.getUnitsAttack(tribe) : null;
+
+    // Preferencia por tipo según distancia
+    const pref = dist >= 10
         ? [ ...(groups.cav||[]), ...(groups.inf||[]) ]
         : [ ...(groups.inf||[]), ...(groups.cav||[]) ];
-        const allowed = u => (!whitelist || whitelist[u]) && (available[u]|0) >= MIN_WAVE && (!ua || (ua[u]|0)>0);
-        for(const u of pref){ if(allowed(u)) return u; }
-        // fallback: más stock dentro de whitelist
-        let best=null, bestCnt=0;
-        for(const u of ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"]){
+
+    // Determinar mínimo según tipo
+    const minFor = (u) => {
+        if ((groups.cav||[]).includes(u)) return 5;  // caballería
+        if ((groups.inf||[]).includes(u)) return 10; // infantería
+        return MIN_WAVE; // fallback general
+    };
+
+    // Elegir unidad prioritaria dentro de las que cumplen requisitos
+    const allowed = u => {
+        const minWave = minFor(u);
+        return (!whitelist || whitelist[u]) &&
+            (available[u]|0) >= minWave &&
+            (!ua || (ua[u]|0)>0);
+    };
+
+    for(const u of pref){ 
+        if(allowed(u)) return u; 
+    }
+
+    // Fallback: más stock dentro de whitelist
+    let best=null, bestCnt=0;
+    for(const u of ["t1","t2","t3","t4","t5","t6","t7","t8","t9","t10"]){
         if(whitelist && !whitelist[u]) continue;
         if(ua && !(ua[u]|0)) continue;
         const c = (available[u]|0);
         if(c > bestCnt){ best=u; bestCnt=c; }
-        }
-        return (bestCnt>=MIN_WAVE) ? best : null;
     }
+    const minWave = minFor(best);
+    return (bestCnt >= minWave) ? best : null;
+    }
+
 
     /**
      * Plan unificado SIN héroe para oasis con cache global y barrido “cluz”.

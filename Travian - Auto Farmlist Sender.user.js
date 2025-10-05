@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.9
+// @version       2.1.11
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -117,6 +117,7 @@
   const KEY_CFG_BURST_N     = KEY_ROOT + 'cfg_burst_n';         // int
   const KEY_MASTER          = KEY_ROOT + 'master';             // { id, ts }
   const KEY_KICK_GUARD = KEY_ROOT + 'kick_guard'; // { flId: tsUntil }
+  const KEY_STATS_SEEN_REPORTS = KEY_ROOT + 'stats_seen_reports'; // Set-like: { "45210267": true, ... }
 
   const DEFAULT_INTERVAL_MS = 60*60*1000; // 1h
   const BURST_DEFAULT = { dmin:60, dmax:120, n:3 };
@@ -142,6 +143,21 @@
   function isKickGuardActive(flId){
     const g = getKickGuard();
     return (g[flId]||0) > now();
+  }
+
+  function getSeenReports(){
+    return LS.get(KEY_STATS_SEEN_REPORTS, {}) || {};
+  }
+  function hasSeenReport(reportId){
+    if (!Number.isFinite(reportId)) return false;
+    const m = getSeenReports();
+    return !!m[reportId];
+  }
+  function addSeenReport(reportId){
+    if (!Number.isFinite(reportId)) return;
+    const m = getSeenReports();
+    m[reportId] = true;
+    LS.set(KEY_STATS_SEEN_REPORTS, m);
   }
 
 
@@ -418,35 +434,42 @@ function scanAllVillagesFromSidebar(){
   function setNextMap(m){ LS.set(KEY_NEXTSEND,m); }
   function setNextSendAt(flId, tsn){ const m=getNextMap(); m[flId]=tsn; setNextMap(m); }
 
-  // ───────────────────────────────────────────────────────────────────
-  // STATS (Weekly reset: Sunday 23:59:59, tz local)
-  // ───────────────────────────────────────────────────────────────────
+  // Semana local: inicia lunes 00:01 (America/Santiago: la Date del browser ya es local)
+  // weekKey = string con el "inicio" (YYYY-MM-DD_00:01)
   function weekKeyNow(){
-    // Genera un key con el domingo de esta semana a las 23:59:59
-    const d = new Date();
-    const day = d.getDay(); // 0=Sunday
-    const diffToSun = (7 - day) % 7; // days ahead to next Sunday (0 if Sunday)
-    const sun = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diffToSun, 23, 59, 59, 999);
-    const y = sun.getFullYear();
-    const m = String(sun.getMonth()+1).padStart(2,'0');
-    const da = String(sun.getDate()).padStart(2,'0');
-    return `${y}-${m}-${da}_SUNDAY235959`;
-  }
-  function getStats(){ return LS.get(KEY_STATS,{}); }
-  function setStats(s){ LS.set(KEY_STATS,s); }
-  function toMsEpoch(t){
-    const n = Number(t)||0;
-    if (n<=0) return 0;
-    return n < 1e12 ? n*1000 : n;
+    const now = new Date();
+
+    // Normaliza a local "hoy" 00:01
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 1, 0, 0);
+    // 0=Dom,1=Lun,...6=Sab → queremos el lunes de ESTA semana
+    // Si hoy es lunes y hora >= 00:01 => esta misma; si antes de 00:01, usamos el lunes anterior
+    const day = todayStart.getDay();
+    // Distancia en días desde hoy al lunes más reciente (incluye hoy si es lunes)
+    const diffToMonday = (day === 0) ? 6 : (day - 1); // Dom->6, Lun->0, Mar->1, etc.
+    const mondayStart = new Date(
+      todayStart.getFullYear(),
+      todayStart.getMonth(),
+      todayStart.getDate() - diffToMonday, // retrocede hasta lunes
+      0, 1, 0, 0
+    );
+
+    const y = mondayStart.getFullYear();
+    const m = String(mondayStart.getMonth() + 1).padStart(2, '0');
+    const d = String(mondayStart.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}_MON0001`;
   }
 
+  // Dado un weekKey (inicio), ventana = [lunes 00:01, próximo lunes 00:01)
   function weekWindowByKey(wkKey){
-    // wkKey = "YYYY-MM-DD_SUNDAY235959" (fin de ventana, domingo local a 23:59:59.999)
-    const [y,m,d] = wkKey.split('_')[0].split('-').map(n=>parseInt(n,10));
-    const end = new Date(y, (m-1), d, 23, 59, 59, 999).getTime();
-    const start = end - (6*24*3600*1000) - (23*3600*1000 + 59*60*1000 + 59*1000 + 999); // Lunes 00:00:00.000
-    return { start, end };
+    // wkKey: "YYYY-MM-DD_MON0001"
+    const [ymd] = wkKey.split('_');
+    const [y, m, d] = ymd.split('-').map(n => parseInt(n, 10));
+    const start = new Date(y, (m - 1), d, 0, 1, 0, 0).getTime();
+    // próximo lunes 00:01
+    const end = start + 7 * 24 * 3600 * 1000; // exclusivo
+    return { start, end }; // [start, end)
   }
+
 
   function shuffle(arr){
     const a = arr.slice();
@@ -461,29 +484,52 @@ function scanAllVillagesFromSidebar(){
   function addStats(flId, flName, slotId, raid){
     if (!raid) return;
 
-    const raidTs = toMsEpoch(raid.time);
-    if (raidTs<=0) return;
+    const reportId = raid.reportId | 0;
+    if (!reportId) return;
 
+    // ❌ Si ya lo contamos antes (aunque venga desde otra farmlist), no sumamos de nuevo
+    if (hasSeenReport(reportId)) return;
+
+    // raid.time viene en epoch (segundos). Pasamos a ms:
+    const raidTs = (Number(raid.time) || 0) * 1000;
+    if (raidTs <= 0) return;
+
+    // Ventana semanal local (lunes 00:01 → próximo lunes 00:01)
     const wk = weekKeyNow();
     const { start, end } = weekWindowByKey(wk);
-    if (raidTs < start || raidTs > end) return; // ← filtra raids fuera de ventana
+    if (raidTs < start || raidTs >= end) {
+      // Fuera de esta semana: no lo contamos en el bucket actual,
+      // pero podemos marcarlo como visto igual para que no duplique si aparece en otra FL
+      addSeenReport(reportId);
+      return;
+    }
 
     const rr = raid.raidedResources || {};
-    const got = (rr.lumber|0)+(rr.clay|0)+(rr.iron|0)+(rr.crop|0);
-    if (got<=0) return;
+    const got = (rr.lumber|0) + (rr.clay|0) + (rr.iron|0) + (rr.crop|0);
+    if (got <= 0) {
+      // Aun así, marcamos como visto para no recontar si reaparece
+      addSeenReport(reportId);
+      return;
+    }
 
     const s = getStats();
-    if (!s[wk]) s[wk] = { _window:{start,end} };
-    if (!s[wk][flId]) s[wk][flId] = { name: flName||String(flId), total:0, perSlotTs:{} };
+    if (!s[wk]) s[wk] = { _window: { start, end } };
+    if (!s[wk][flId]) s[wk][flId] = { name: flName || String(flId), total: 0, perSlotTs: {} };
 
-    const lastAcc = s[wk][flId].perSlotTs[slotId]|0;
-    if (raidTs>lastAcc){
+    const lastAcc = s[wk][flId].perSlotTs[slotId] | 0;
+    if (raidTs > lastAcc) {
       s[wk][flId].total += got;
       s[wk][flId].perSlotTs[slotId] = raidTs;
       setStats(s);
-      LOG('log','Stats add',{flId, slotId, got, week:wk});
+      // ✅ Marcamos el reporte como “ya contado” globalmente
+      addSeenReport(reportId);
+      LOG('log','Stats add',{flId, slotId, got, week:wk, reportId});
+    } else {
+      // Igual marcamos como visto para evitar duplicado entre listas
+      addSeenReport(reportId);
     }
   }
+
 
   function statsSummaryHTML(){
     const s = getStats();
@@ -1372,6 +1418,41 @@ function scanAllVillagesFromSidebar(){
   }
 
 
+  function renderWhitelistForTribe() {
+    const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
+    const wl = getWhitelist();
+    const wlWrap = document.getElementById('io-wl');
+    wlWrap.innerHTML = '';
+
+    const groups = TRIBE_UNIT_GROUPS[tribe] || TRIBE_UNIT_GROUPS.GAUL;
+    const allKeys = [...new Set([...groups.inf, ...groups.cav])]; // mezcla sin duplicados
+
+    allKeys.forEach(k => {
+      const lbl = document.createElement('label');
+      lbl.innerHTML = `<input type="checkbox" data-unit="${k}" ${wl[k] ? 'checked' : ''}> ${k.toUpperCase()}`;
+      const cb = lbl.querySelector('input');
+      cb.onchange = () => {
+        const cur = getWhitelist();
+        cur[k] = !!cb.checked;
+        LS.set(KEY_CFG_WHITELIST, cur);
+      };
+      wlWrap.appendChild(lbl);
+    });
+
+    // Extra opcional: muestra “unidades no raideables” grises (t9/t10) si existen
+    const nonRaidables = ['t9', 't10'];
+    nonRaidables.forEach(k => {
+      if (wl[k] !== undefined && !allKeys.includes(k)) {
+        const lbl = document.createElement('label');
+        lbl.innerHTML = `<input type="checkbox" data-unit="${k}" disabled> ${k.toUpperCase()}`;
+        lbl.style.opacity = 0.4;
+        wlWrap.appendChild(lbl);
+      }
+    });
+  }
+
+
+
   function getBudgetPool(did, villageUnits){
     const KEY = KEY_BUDGET_POOL_PREFIX + String(did||0);
     let pool = LS.get(KEY, null);
@@ -1461,27 +1542,33 @@ function scanAllVillagesFromSidebar(){
       </div>
 
       <div class="tab hidden" id="tab-cfg">
-        <div class="cfg-grid">
-          <div>Icon2 decay (h): <input type="number" id="io-cfg-decay" min="1" style="width:60px"></div>
-          <div>Burst N: <input type="number" id="io-cfg-bn" min="0" style="width:60px"></div>
-          <div>Burst delay s (min-max): <input type="number" id="io-cfg-bmin" min="1" style="width:60px"> – <input type="number" id="io-cfg-bmax" min="1" style="width:60px"></div>
-          <div><label><input type="checkbox" id="io-cfg-fb"> Allow fallback (same group)</label></div>
-          <div><label><input type="checkbox" id="io-cfg-xfb"> Allow cross-group fallback</label></div>
-          <div><label><input type="checkbox" id="io-cfg-overload"> Overload (re-send even if running)</label></div>
-          <div>Overload: max running <input type="number" id="io-over-max" min="1" style="width:60px"> (default 2)</div>
-          <div>Overload: window min <input type="number" id="io-over-win" min="1" style="width:60px"> (default 10)</div>
+        <div class="cfg-section">
+          <div class="sec-h">Configuraciones principales</div>
 
-          <div><label><input type="checkbox" id="io-cfg-rand"> Randomize farmlist order</label></div>
-          <div>Reserve troops at home (%): <input type="number" id="io-cfg-reserve" min="0" max="100" style="width:60px"></div>
+          <div class="cfg-list">
+            <label><input type="checkbox" id="io-cfg-overload"> Overload (re-send even if running)</label>
+            <label><input type="checkbox" id="io-cfg-fb"> Allow fallback (same group)</label>
+            <label><input type="checkbox" id="io-cfg-xfb"> Allow cross-group fallback</label>
+            <label><input type="checkbox" id="io-cfg-rand"> Randomize farmlist order</label>
+          </div>
+
+          <div class="cfg-inputs">
+            <div>Icon2 decay (h): <input type="number" id="io-cfg-decay" min="1" style="width:60px"></div>
+            <div>Burst N: <input type="number" id="io-cfg-bn" min="0" style="width:60px"></div>
+            <div>Burst delay s (min-max): 
+              <input type="number" id="io-cfg-bmin" min="1" style="width:60px"> – 
+              <input type="number" id="io-cfg-bmax" min="1" style="width:60px">
+            </div>
+            <div>Overload: max running <input type="number" id="io-over-max" min="1" style="width:60px"> (default 2)</div>
+            <div>Overload: window min <input type="number" id="io-over-win" min="1" style="width:60px"> (default 10)</div>
+            <div>Reserve troops at home (%): <input type="number" id="io-cfg-reserve" min="0" max="100" style="width:60px"></div>
+          </div>
+        </div>
 
         </div>
         <div class="section">
           <div class="sec-h">Whitelist de tropas</div>
-          <div id="io-wl" class="wl-grid">
-            ${['t1','t2','t3','t4','t5','t6','t7','t8','t9','t10'].map(k=>`
-              <label><input type="checkbox" data-unit="${k}"> ${k.toUpperCase()}</label>
-            `).join('')}
-          </div>
+          <div id="io-wl" class="wl-grid"></div>
         </div>
       </div>
 
@@ -1516,6 +1603,26 @@ function scanAllVillagesFromSidebar(){
     .tab.hidden{ display:none; }
     .cfg-grid{ display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:6px 0; }
     .wl-grid{ display:grid; grid-template-columns:repeat(5, 1fr); gap:4px; }
+    #icononly-ui .cfg-section {
+      margin-top: 6px;
+      padding: 6px;
+      border: 1px dashed #bbb;
+      border-radius: 8px;
+    }
+
+    #icononly-ui .cfg-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    #icononly-ui .cfg-inputs {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
   `);
 
   // Expand/Collapse
@@ -1576,7 +1683,7 @@ function scanAllVillagesFromSidebar(){
       KEY_DRYRUN, KEY_CFG_WHITELIST, KEY_CFG_FALLBACK, KEY_CFG_CROSS,
       KEY_CFG_ICON2DECAYH, KEY_CFG_BURST_DMIN, KEY_CFG_BURST_DMAX, KEY_CFG_BURST_N,
       KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN, KEY_MASTER,
-      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD
+      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD,KEY_STATS_SEEN_REPORTS
     ].forEach(k=>LS.del(k));
 
     // Apaga timers, bursts, y UI
@@ -1856,6 +1963,7 @@ function scanAllVillagesFromSidebar(){
 
   function initUI(){
     cfgLoadUI();
+    renderWhitelistForTribe();
     cfgWire();
     if (!getAllFarmlists().length) { /* lazy load below */ }
     fillPrimary();
