@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.12
+// @version       2.1.13
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -1610,15 +1610,14 @@ function scanAllVillagesFromSidebar(){
             <div>Overload: window min <input type="number" id="io-over-win" min="1" style="width:60px"> (default 10)</div>
             <div>Reserve troops at home (%): <input type="number" id="io-cfg-reserve" min="0" max="100" style="width:60px"></div>
           </div>
-        </div>
-
-        </div>
-        <div class="section">
-          <div class="sec-h">Whitelist de tropas</div>
-          <div id="io-wl" class="wl-grid"></div>
+        
+          <div class="section">
+            <div class="sec-h">Whitelist de tropas</div>
+            <div id="io-wl" class="wl-grid"></div>
+          </div>
         </div>
       </div>
-
+      </div>
     </div>
   `;
   document.body.appendChild(ui);
