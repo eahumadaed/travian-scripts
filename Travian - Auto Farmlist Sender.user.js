@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.11
+// @version       2.1.12
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -647,6 +647,63 @@ function scanAllVillagesFromSidebar(){
   function cfgGetBool(key, def){ const v=LS.get(key, def); return !!v; }
   function cfgGetInt(key, def){ const v=LS.get(key, def); const n = parseInt(v,10); return Number.isFinite(n)?n:def; }
 
+
+
+  function priOrder(sl){
+    const st=readSlotState(sl.id);
+    const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
+    const mySent = history[sl.id]||0;
+    const lo = lootOutcome(sl.lastRaid, mySent);
+    const sinceLast = now() - (st.lastSentTs||0);
+    const sinceGood = now() - (st.lastGoodTs||0);
+    const bm = sl?.lastRaid?.bootyMax|0;
+
+    // Orden: icon1 primero, luego icon2, luego sin icono, y al final otros
+    const iconScore =
+      (icon===1)?0 :
+      (icon===2)?1 :
+      (icon<0)?2 : 3;
+
+    const outScore =
+      (lo.outcome==='GOOD')?0 :
+      (lo.outcome==='MID')?1 :
+      (lo.outcome==='LOW')?2 :
+      (lo.outcome==='ZERO')?3 : 4;
+
+    return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
+  }
+
+  function blockForHours(h){
+      const until = now() + (h|0)*3600*1000;
+      return { permaUntil: until, blockedUntil: until };
+  }
+
+  async function getReportDecision(sl){
+      const lr = sl?.lastRaid || {};
+      if (!lr?.reportId || !lr?.authKey) return null;
+      try{
+        const mini = await tscm.utils.fetchReportMini({ reportId: lr.reportId, authKey: lr.authKey });
+        console.log("[report-mini]", sl.id, mini);
+        return mini || null;
+      }catch(e){
+        console.log("[report-mini] error", sl?.id, e);
+        return null;
+      }
+  }
+
+  function isOasisOnlyList(farmList){
+    const slots = farmList?.slots || [];
+    if (!slots.length) return false;
+    return slots.every(s => ((s?.target?.type|0) === 3));
+  }
+
+  function everAttacked(sl, st, history){
+    const sent = history?.[sl?.id]||0;
+    const lastRaidTs = Number(sl?.lastRaid?.time)||0; // epoch (s)
+    return (sent>0) || (lastRaidTs>0);
+  }
+
+
   async function planForList(flId, gqlData){
     console.log(new Date().toISOString(), "[planForList] START flId=", flId);
 
@@ -679,23 +736,7 @@ function scanAllVillagesFromSidebar(){
     const updates = [];
     const candidates = [];
 
-    function blockForHours(h){
-      const until = now() + (h|0)*3600*1000;
-      return { permaUntil: until, blockedUntil: until };
-    }
 
-    async function getReportDecision(sl){
-      const lr = sl?.lastRaid || {};
-      if (!lr?.reportId || !lr?.authKey) return null;
-      try{
-        const mini = await tscm.utils.fetchReportMini({ reportId: lr.reportId, authKey: lr.authKey });
-        console.log("[report-mini]", sl.id, mini);
-        return mini || null;
-      }catch(e){
-        console.log("[report-mini] error", sl?.id, e);
-        return null;
-      }
-    }
 
     // -------------------------
     // STAGE 1: build candidates
@@ -783,6 +824,10 @@ function scanAllVillagesFromSidebar(){
           const normalized = normalizeUnits(plan.send) || {};
           console.log("[cand] free oasis → plan ok", sl.id, { desired: safeSumUnits(normalized), plan });
 
+          // marca oasis jamás atacado (para prioridad de armado)
+          const stLocal = readSlotState(sl.id);
+          sl.__neverAttacked = !everAttacked(sl, stLocal, history);
+
           sl.__isFreeOasis   = true;                // bandera para Stage 3
           sl.__oasisPlanSend = { units: normalized };
           sl.__oasisDesired  = safeSumUnits(normalized);
@@ -828,37 +873,39 @@ function scanAllVillagesFromSidebar(){
     // -------------------------
     // STAGE 2: ordering
     // -------------------------
-    function priOrder(sl){
-      const st=readSlotState(sl.id);
-      const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
-      const mySent = history[sl.id]||0;
-      const lo = lootOutcome(sl.lastRaid, mySent);
-      const sinceLast = now() - (st.lastSentTs||0);
-      const sinceGood = now() - (st.lastGoodTs||0);
-      const bm = sl?.lastRaid?.bootyMax|0;
+    if (isOasisOnlyList(farmList)) {
+      // 1) Primero los nunca atacados
+      // 2) Luego por cantidad de tropas planificadas (desc)
+      // 3) Como desempate, mayor bootyMax histórico (desc) y más antiguo good (para barrido constante)
+      candidates.sort((a,b)=>{
+        const aNA = (a.__neverAttacked ? 0 : 1);
+        const bNA = (b.__neverAttacked ? 0 : 1);
+        if (aNA !== bNA) return aNA - bNA;
 
-      // Orden: icon1 primero, luego icon2, luego sin icono, y al final otros
-      const iconScore =
-        (icon===1)?0 :
-        (icon===2)?1 :
-        (icon<0)?2 : 3;
+        const aDes = a.__oasisDesired|0;
+        const bDes = b.__oasisDesired|0;
+        if (aDes !== bDes) return bDes - aDes;
 
-      const outScore =
-        (lo.outcome==='GOOD')?0 :
-        (lo.outcome==='MID')?1 :
-        (lo.outcome==='LOW')?2 :
-        (lo.outcome==='ZERO')?3 : 4;
+        const aBm = a?.lastRaid?.bootyMax|0;
+        const bBm = b?.lastRaid?.bootyMax|0;
+        if (aBm !== bBm) return bBm - aBm;
 
-      return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
+        const aSt = readSlotState(a.id);
+        const bSt = readSlotState(b.id);
+        const aSinceGood = now() - (aSt?.lastGoodTs||0);
+        const bSinceGood = now() - (bSt?.lastGoodTs||0);
+        return bSinceGood - aSinceGood; // más antiguo good primero
+      });
+    } else {
+      // orden clásico para aldeas
+      candidates.sort((a,b)=>{
+        const A=priOrder(a), B=priOrder(b);
+        for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
+        return 0;
+      });
     }
 
-    candidates.sort((a,b)=>{
-      const A=priOrder(a), B=priOrder(b);
-      for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
-      return 0;
-    });
-
-    console.log("[planForList] ordered candidates:", candidates.map(c=>c.id));
+   console.log("[planForList] ordered candidates:", candidates.map(c=>c.id));
 
     // -------------------------
     // STAGE 3: processing plan
