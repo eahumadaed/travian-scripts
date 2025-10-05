@@ -1070,7 +1070,7 @@
     const OASIS_CACHE_PREFIX = "tscm_oasis_cache_v3";  // global por oasis
     const AREA_SCAN_PREFIX   = "tscm_area_scan_v1";    // por centro (aldea x|y)
     const TTL_MS  = 20 * 60 * 1000; // 30 min
-    const MIN_WAVE = 5;
+    const MIN_WAVE = 10;
 
     const _ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
 
@@ -1187,7 +1187,7 @@
         _mergeTilesIntoGlobal(g, data.tiles || []);
         _saveGlobal(g);
         }catch(e){
-        console.warn(`[${_ts()}] [OR-core] cluz scan error at (${x}|${y}):`, e);
+            console.warn(`[${_ts()}] [OR-core] cluz scan error at (${x}|${y}):`, e);
         }
     }
 
