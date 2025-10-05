@@ -787,7 +787,7 @@
         const clamp = (x,a,b)=> Math.max(a, Math.min(b, x));
 
         // ---- entradas ----
-        const lossTarget   = clamp( +smartInput.lossTarget || 0.02, 0.001, 0.5 ); // default 2%, [0.1%..50%]
+        const lossTarget   = clamp( +smartInput.lossTarget || 0.01, 0.001, 0.5 ); // default 2%, [0.1%..50%]
         const allowedUnits = (smartInput.allowedUnits && typeof smartInput.allowedUnits==="object") ? smartInput.allowedUnits : null;
 
         // Tribu y tablas
@@ -1069,7 +1069,7 @@
     // --- Config cache ---
     const OASIS_CACHE_PREFIX = "tscm_oasis_cache_v3";  // global por oasis
     const AREA_SCAN_PREFIX   = "tscm_area_scan_v1";    // por centro (aldea x|y)
-    const TTL_MS  = 30 * 60 * 1000; // 30 min
+    const TTL_MS  = 20 * 60 * 1000; // 30 min
     const MIN_WAVE = 5;
 
     const _ts = () => new Date().toISOString().replace('T',' ').replace('Z','');
@@ -1282,7 +1282,7 @@
         }
         try{
         const ret = utils.smartBuildWaveNoHero(counts, (available||{}), {
-            lossTarget: (typeof lossTarget === "number" ? lossTarget : 0.02),
+            lossTarget: (typeof lossTarget === "number" ? lossTarget : 0.01),
             allowedUnits: (whitelist || {})
         });
         let send=null, ok=false;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.4
+// @version       2.1.5
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -95,7 +95,7 @@
   const BURST_DEFAULT = { dmin:60, dmax:120, n:3 };
   const ICON2_DECAY_H = 48;
    // Distancia para elegir INF/CAV
-  const DIST_INF_MAX = 10;
+  const DIST_INF_MAX = 15;
   const KEY_CFG_OVERLOAD = KEY_ROOT + 'cfg_overload';
   const KEY_CFG_RANDOMIZE = KEY_ROOT + 'cfg_randomize';
   const KEY_CFG_RESERVE_PCT = KEY_ROOT + 'cfg_reserve_pct'; // 0..100 (global)
@@ -689,7 +689,7 @@ function scanAllVillagesFromSidebar(){
           const available = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(poolAvail?.units||{}) };
 
           const wlLocal = getWhitelist();
-          const lossTarget = 0.02; // conservador
+          const lossTarget = 0.01; // conservador
 
           const oX = sl?.target?.x|0, oY = sl?.target?.y|0;
 
@@ -838,14 +838,7 @@ function scanAllVillagesFromSidebar(){
           lastSentTs: now(),
           lastGoodTs: now()
         });
-
-
-
-
-
-
         chosenTargets.push(slotId);
-
         // Burst si corresponde
         if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
         continue;

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐎 Auto Training Troop (Toolbox UI) — Travian
-// @version      2.0.7
+// @version      2.0.6
 // @description  [FIXED] UI rediseñada como toolbox lateral. Muestra próxima tropa en modo colapsado, expandible. Evita duplicados en build.php. Incluye botón "Entrenar ahora" (sin resetear contador) y estadísticas de tropas entrenadas por tarea.
 // @match        https://*.travian.com/*
 // @run-at       document-end
@@ -9,9 +9,11 @@
 // @updateURL     https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Training%20Troop.user.js
 // @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Training%20Troop.user.js
 // @grant        unsafeWindow
+
 // ==/UserScript==
 
-(() => {
+(function () {
+
   "use strict";
   const TASK = 'auto-train';
   const TTL  = 5 * 60 * 1000;
@@ -34,6 +36,19 @@
   const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
   const UNIT_SPRITE_BASE = "https://cdn.legends.travian.com/gpack/"+API_VER+"/img_ltr/global/units/"+tribe.toLowerCase()+"/icon/"+tribe.toLowerCase()+"_small.png";
   const UNIT_ICON_SIZE = 16;
+  const HARD_MAX_PER_CLICK = 5; // tope duro por entrenamiento
+
+  function getHardMax() {
+    const g = readGlobal();
+    const v = Number(g.hardMax);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : 5; // default 5
+  }
+  function setHardMax(v) {
+    const g = readGlobal();
+    g.hardMax = Math.max(1, Math.floor(Number(v) || 5));
+    writeGlobal(g);
+  }
+
 
   function ts() { const d = new Date(), p = n => String(n).padStart(2, "0"); return `[${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`; }
   const log  = (...a) => console.log(`${ts()} [AutoTrain]`, ...a);
@@ -173,75 +188,97 @@
       .at-btn { border:none; padding:4px 8px; border-radius:8px; cursor:pointer; }
       .at-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     `;
+    style.textContent += `
+      #at-header .at-right { display:flex; align-items:center; gap:8px; }
+      #at-hardmax { width:56px; padding:2px 6px; background:#111; color:#eee; border:1px solid #444; border-radius:6px; text-align:right; }
+      #at-hardmax::-webkit-outer-spin-button, #at-hardmax::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    `;
     document.head.appendChild(style);
   }
 
-  function ensureToolbox() {
-    if (toolboxEl) return toolboxEl;
-    injectStyles();
+function ensureToolbox() {
+  if (toolboxEl) return toolboxEl;
+  injectStyles();
 
-    toolboxEl = document.createElement("div");
-    toolboxEl.id = "at-toolbox";
-    // La estructura HTML es la misma, pero el CSS la interpreta diferente
-    toolboxEl.innerHTML = `
-      <div id="at-sidebar">
-        <button id="at-btn-expand" title="Expandir/Colapsar">»</button>
-        <div id="at-next-due-sidebar" title="Próxima tropa">
-          <div id="at-next-due-chip"></div>
-          <div id="at-next-due-eta">--:--</div>
-        </div>
+  toolboxEl = document.createElement("div");
+  toolboxEl.id = "at-toolbox";
+
+  // 🧩 Sidebar + Panel (IDs únicos, sin duplicados)
+  toolboxEl.innerHTML = `
+    <div id="at-sidebar">
+      <button id="at-btn-expand" title="Expandir/Colapsar">»</button>
+      <div id="at-next-due-sidebar" title="Próxima tropa">
+        <div id="at-next-due-chip"></div>
+        <div id="at-next-due-eta">--:--</div>
       </div>
-      <div id="at-panel">
-        <div id="at-header">
-          <div style="font-weight:600;">Auto Training</div>
+    </div>
+
+    <div id="at-panel">
+      <div id="at-header">
+        <div style="font-weight:600;">Auto Training</div>
+        <div class="at-right">
+          <label title="Límite máximo por envío">Max/train</label>
+          <input id="at-hardmax" type="number" min="1" step="1" />
           <button id="at-toggle-global" class="at-btn">⏸️ Pause</button>
         </div>
-        <div id="at-body"><div id="at-list"></div></div>
       </div>
-    `;
-    document.body.appendChild(toolboxEl);
+      <div id="at-body"><div id="at-list"></div></div>
+    </div>
+  `;
+  document.body.appendChild(toolboxEl);
 
-    // Restaurar estado
-    const st = readUiState();
-    if (st.top) toolboxEl.style.top = st.top;
-    // Esta es la línea que parcheamos antes, ahora funcionará correctamente
-    toggleExpand(!!st.expanded, true);
+  // Restaurar estado UI
+  const st = readUiState();
+  if (st.top) toolboxEl.style.top = st.top;
+  toggleExpand(!!st.expanded, true);
 
-    makeVerticallyDraggable(toolboxEl.querySelector("#at-sidebar"), toolboxEl);
+  // Drag: solo si el handle existe
+  const handle = toolboxEl.querySelector("#at-sidebar");
+  if (handle) makeVerticallyDraggable(handle, toolboxEl);
 
-    toolboxEl.querySelector("#at-btn-expand").addEventListener("click", () => {
+  // Expand/Collapse: solo si el botón existe
+  const btnExpand = toolboxEl.querySelector("#at-btn-expand");
+  if (btnExpand) {
+    btnExpand.addEventListener("click", () => {
       toggleExpand(!toolboxEl.classList.contains("at-expanded"));
     });
+  }
 
-    toolboxEl.querySelector("#at-toggle-global").addEventListener("click", () => {
+  // Pause/Resume
+  const pauseBtn = toolboxEl.querySelector("#at-panel #at-toggle-global");
+  if (pauseBtn) {
+    pauseBtn.addEventListener("click", () => {
       const g = readGlobal();
       const now = nowEpoch();
       if (!g.paused) {
-        writeGlobal({ paused: true, pausedAt: now });
+        writeGlobal({ ...g, paused: true, pausedAt: now });
         log("Global paused.");
       } else {
         const delta = Math.max(0, now - (g.pausedAt || now));
         const tasks = readTasks();
         tasks.forEach(t => t.nextRun += delta);
         writeTasks(tasks);
-        writeGlobal({ paused: false, pausedAt: 0 });
+        writeGlobal({ ...g, paused: false, pausedAt: 0 });
         log(`Global resumed (+${delta}s to nextRun).`);
       }
       renderSidebarAndHeader();
       renderPanel();
     });
-
-    renderSidebarAndHeader();
-    return toolboxEl;
   }
+
+  renderSidebarAndHeader();
+  return toolboxEl;
+}
+
 
   // *** CAMBIO CLAVE *** La función ahora modifica clases en panel y toolbox
   function toggleExpand(expand, noSave = false) {
     ensureToolbox();
     const panel = toolboxEl.querySelector("#at-panel");
+    if (!panel) return; // 👈 evita NPE si el panel no existe por timing raro
     if (expand) {
       panel.classList.add("at-expanded");
-      toolboxEl.classList.add("at-expanded"); // Para la rotación del botón
+      toolboxEl.classList.add("at-expanded");
     } else {
       panel.classList.remove("at-expanded");
       toolboxEl.classList.remove("at-expanded");
@@ -253,35 +290,63 @@
     }
   }
 
+
+
   function clampIntoViewport() {
-    const r = toolboxEl.getBoundingClientRect();
-    // La altura del toolbox ahora es la altura del panel (500px)
-    const height = 500;
+    if (!toolboxEl) return;
     const pad = 8;
-    let top = r.top;
-    if (top + height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - height - pad);
-    if (r.top < pad) top = pad;
-    toolboxEl.style.top = `${top}px`;
+    const sidebar = toolboxEl.querySelector('#at-sidebar');
+    const sidebarH = sidebar?.getBoundingClientRect().height || 80;
+
+    // Solo garantizamos que el HANDLE quede visible.
+    let top = parseInt(toolboxEl.style.top || '120', 10);
+    const minTop = pad;
+    const maxTop = Math.max(pad, window.innerHeight - sidebarH - pad);
+    if (Number.isFinite(top)) {
+      top = Math.min(maxTop, Math.max(minTop, top));
+      toolboxEl.style.top = `${top}px`;
+    }
   }
 
   function saveUiPos() { const st = readUiState(); st.top = toolboxEl.style.top; writeUiState(st); }
 
-  function makeVerticallyDraggable(handle, root) {
-    let oy = 0, dragging = false;
-    handle.addEventListener("mousedown", (e) => { dragging = true; oy = e.clientY - root.offsetTop; e.preventDefault(); });
-    window.addEventListener("mousemove", (e) => { if (!dragging) return; root.style.top = (e.clientY - oy) + "px"; clampIntoViewport(); });
-    window.addEventListener("mouseup", () => { if (!dragging) return; dragging = false; saveUiPos(); });
-  }
+function makeVerticallyDraggable(handle, root) {
+  if (!handle || !root) return;  // 👈 evita addEventListener sobre null
+  let oy = 0, dragging = false;
+  handle.addEventListener("mousedown", (e) => { dragging = true; oy = e.clientY - root.offsetTop; e.preventDefault(); });
+  window.addEventListener("mouseup", () => { if (!dragging) return; dragging = false; saveUiPos(); });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    root.style.top = (e.clientY - oy) + "px";
+    clampIntoViewport(); // mantiene visible la lengüeta
+  });
+}
+
 
   function renderSidebarAndHeader() {
     ensureToolbox();
     const g = readGlobal();
-    const btn = toolboxEl.querySelector("#at-toggle-global");
+    const btn = toolboxEl.querySelector("#at-panel #at-toggle-global");
     const chip = toolboxEl.querySelector("#at-next-due-chip");
     const etaSpan = toolboxEl.querySelector("#at-next-due-eta");
 
+    // Estado del botón
     if (g.paused) { btn.style.background = "#b44"; btn.style.color = "#fff"; btn.textContent = "▶️ Resume"; }
     else { btn.style.background = "#2d7"; btn.style.color = "#111"; btn.textContent = "⏸️ Pause"; }
+
+    // NUEVO: input de hard max
+    const maxInp = toolboxEl.querySelector("#at-hardmax");
+    if (maxInp) {
+      // setear valor actual sin re-disparar evento
+      if (String(maxInp.value) !== String(getHardMax())) maxInp.value = String(getHardMax());
+      if (!maxInp._atBound) {
+        maxInp._atBound = true;
+        maxInp.addEventListener("change", () => {
+          setHardMax(maxInp.value);
+          log(`Hard max actualizado a ${getHardMax()}`);
+        });
+      }
+    }
 
     const next = getNextDueTask();
     if (next) {
@@ -297,6 +362,7 @@
       etaSpan.parentElement.title = "No hay tareas activas";
     }
   }
+
 
   function renderPanel() {
     ensureToolbox();
@@ -431,7 +497,7 @@
           did,
           gid,
           intervalMin: minutes,
-          nextRun: base + minutes * 60,
+          nextRun: base + randInt(1, minutes * 60),
           enabled: true,
           createdAt: nowEpoch(),
           trainedCount: 0,
@@ -470,10 +536,31 @@
 
     let maxTrain = 0;
     const details = targetInput.closest(".details") || doc;
-    const maxLink = details.querySelector('.cta a[onclick*="document.snd"]') || details.querySelector("a[href^='#'][onclick*='(this.value,']");
-    if (maxLink) maxTrain = parseInt(maxLink.textContent, 10) || 0;
-    if (isNaN(maxTrain)) maxTrain = 0;
-    if (maxTrain <= 0) { log(`Sin recursos/cola para ${task.troopId} en did=${task.did}.`); return { success: false, trained: 0 }; }
+    // NUEVO: buscar anchors numéricos confiables dentro del bloque
+    const numericAnchors = Array.from(details.querySelectorAll('a'))
+      .map(a => parseInt((a.textContent || '').trim(), 10))
+      .filter(n => Number.isFinite(n) && n > 0);
+    if (numericAnchors.length) {
+      maxTrain = numericAnchors[numericAnchors.length - 1]; // usa el último "/ N"
+    }
+
+    // Fallback legacy (por si en algún skin no hay anchors numéricos):
+    if (!maxTrain) {
+      const maxLinkLegacy =
+        details.querySelector('.cta a[onclick*="document.snd"]') ||
+        details.querySelector("a[href^='#'][onclick*='(this.value,']");
+      if (maxLinkLegacy) {
+        const n = parseInt(maxLinkLegacy.textContent, 10);
+        if (Number.isFinite(n) && n > 0) maxTrain = n;
+      }
+    }
+
+    if (maxTrain <= 0) {
+      log(`Sin recursos/cola (o no se detectó el máximo) para ${task.troopId} en did=${task.did}.`);
+      return { success: false, trained: 0 };
+    }
+
+    maxTrain = Math.min(maxTrain, getHardMax());
 
     const body = new URLSearchParams();
     body.append("action", "trainTroops");
@@ -511,6 +598,7 @@
 
   function tick() {
     try {
+      recoverStuckDueTasks();
       refreshCountdowns();
       if (readGlobal().paused) return;
 
@@ -539,6 +627,22 @@
       })();
     } catch (e) { err("tick() error:", e); }
   }
+  // Helper de recuperación:
+  function recoverStuckDueTasks() {
+    const g = readGlobal();
+    if (g.paused) return;
+    const now = nowEpoch();
+    const tasks = readTasks();
+    let changed = false;
+    for (const t of tasks) {
+      // Si quedó vencida (<= now) y habilitada, la empujamos a correr ya
+      if (t.enabled && t.nextRun <= now) {
+        t.nextRun = now; // asegura que tick la vea en due inmediatamente
+        changed = true;
+      }
+    }
+    if (changed) writeTasks(tasks);
+  }
 
   function init() {
     ensureToolbox(); renderPanel(); injectControls();
@@ -554,6 +658,7 @@
     });
     setInterval(tick, TICK_MS);
     clampIntoViewport();
+    recoverStuckDueTasks();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
