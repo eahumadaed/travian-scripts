@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.15
+// @version       2.1.16
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -276,9 +276,32 @@ function scanAllVillagesFromSidebar(){
   function dist(ax,ay,bx,by){ const dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
 
   function getWhitelist(){
-    const d = { t1:true,t2:true,t3:true,t4:true,t5:true,t6:true,t7:true,t8:true,t9:true,t10:true };
-    return LS.get(KEY_CFG_WHITELIST, d) || d;
+    const saved = LS.get(KEY_CFG_WHITELIST, null);
+    if (saved) return saved;
+
+    const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
+    const groups = TRIBE_UNIT_GROUPS[tribe] || TRIBE_UNIT_GROUPS.GAUL;
+
+    // unidades válidas (infantería + caballería)
+    const allowed = new Set([...(groups.inf||[]), ...(groups.cav||[])]);
+
+    // quitar scouts, arietes, catas, jefe y colonos
+    const SCOUT_BY_TRIBE = { GAUL:'t3', ROMAN:'t4', TEUTON:'t4' };
+    const NON_RAID = new Set(['t7','t8','t9','t10']);
+    allowed.delete(SCOUT_BY_TRIBE[tribe]);
+    for (const bad of NON_RAID) allowed.delete(bad);
+
+    // construir whitelist inicial (solo true para las permitidas)
+    const wl = {};
+    for (let i=1;i<=10;i++){
+      const key = 't'+i;
+      wl[key] = allowed.has(key);
+    }
+
+    LS.set(KEY_CFG_WHITELIST, wl);
+    return wl;
   }
+
 
   function buildPack(desired, dx, tribe, budget, cfg){
     const MIN_PACK = 5;
