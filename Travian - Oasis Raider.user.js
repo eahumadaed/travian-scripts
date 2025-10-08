@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.8
+// @version      2.0.9
 // @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
@@ -607,65 +607,158 @@
         </div>
       </div>
 
-      <style>
-        :root{
-          --or-bg:#282c34; --or-header-bg:#1d2025; --or-border:#444; --or-text:#abb2bf;
-          --or-green:#98c379; --or-red:#e06c75; --or-blue:#61afef; --or-yellow:#e5c07b;
-          --or-sidebar-width: 280px;
-        }
-        #${SIDEBAR_ID}{
-          position:fixed; top:100px; right:calc(-1 * var(--or-sidebar-width)); z-index:10000;
-          width:var(--or-sidebar-width); background:var(--or-bg); color:var(--or-text);
-          border:1px solid var(--or-border); border-right:none;
-          border-radius:10px 0 0 10px; box-shadow:-5px 0 15px rgba(0,0,0,0.4);
-          transition:right .4s ease-in-out; font-family:sans-serif; font-size:13px;
-        }
-        /* cambio solicitado */
-        #${SIDEBAR_ID}.open{ right:0; width:354px; }
+    <style>
+      /* Variables solo dentro del sidebar (no globales) */
+      #oasisRaiderSidebar{
+        --or-bg:#282c34; 
+        --or-header-bg:#1d2025; 
+        --or-border:#444; 
+        --or-text:#abb2bf;
+        --or-green:#98c379; 
+        --or-red:#e06c75; 
+        --or-blue:#61afef; 
+        --or-yellow:#e5c07b;
+        --or-sidebar-width: 280px;
+      }
 
-        #${IDs.TOGGLE_TAB}{
-          position:absolute; left:-40px; top:0; width:40px; padding:10px 0;
-          background:var(--or-header-bg); cursor:grab; user-select:none;
-          border:1px solid var(--or-border); border-right:none; border-radius:10px 0 0 10px;
-          display:flex; flex-direction:column; align-items:center; gap:8px;
-        }
-        #${IDs.TOGGLE_TAB}:active{ cursor:grabbing; }
-        #${IDs.TOGGLE_TAB}>span:nth-of-type(2){ font-size:20px; pointer-events:none; }
-        #${IDs.DOT}{ width:10px; height:10px; border-radius:50%; background:var(--or-red); }
-        #${IDs.MINI_TIMER}{ font-size:12px; line-height:1.1; font-weight:bold; color:var(--or-yellow); text-align:center; }
-        .or-header{ padding:8px 12px; background:var(--or-header-bg); font-weight:bold; font-size:15px; text-align:center; }
-        .or-body{ padding:12px; }
-        .controls{ display:flex; justify-content:space-between; margin-bottom:10px; }
-        .btn{ background:#3a3f4b; border:1px solid #555; color:var(--or-text); padding:5px 8px; border-radius:5px; cursor:pointer; }
-        .btn:hover{ filter:brightness(1.1); }
-        select,input[type=number]{ background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:12px; padding:3px; }
-        .alert{ margin:8px 0; padding:6px 8px; border-radius:5px; border:1px solid #884; background:rgba(224,108,117,.2); color:#ffb8b8; font-weight:bold; }
-        .status-grid{ display:grid; grid-template-columns:auto 1fr; gap:4px 8px; line-height:1.6; margin-bottom:10px; }
-        .next-list-container{ margin-top:8px; }
-        #${IDs.NEXT_LIST}, #${IDs.NEXT_EMPTY}{ margin-top:4px; line-height:1.6; font-size:12px; }
-        /* a{ color:var(--or-blue); text-decoration:none; } a:hover{text-decoration:underline;} */
-        .or-separator{ border-top:1px solid var(--or-border); margin:15px 0; }
-        .or-cfg-header{ cursor:pointer; font-weight:bold; margin-bottom:10px; }
-        #${IDs.CFG_PANEL}{ display:none; grid-gap:8px; }
-        #${IDs.CFG_PANEL} .cfg-row{ display:flex; justify-content:space-between; align-items:center; gap:10px; }
-        #or-unit-wrap{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-#or-cfg-scroll{height: 210px;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding-right: 8px;}
-        /* check visual */
-        #or-unit-wrap input[type="checkbox"]{ appearance:none; position:absolute; opacity:0; width:0; height:0; }
-        #or-unit-wrap label{ cursor:pointer; }
-        #or-unit-wrap label::before{
-          content:''; display:inline-block; width:14px; height:14px; margin-right:5px;
-          border:1px solid var(--or-border); background:var(--or-header-bg); border-radius:3px; transition:.2s;
-        }
-        #or-unit-wrap input[type="checkbox"]:checked + label::before{
-          background:var(--or-green); border-color:var(--or-green); content:'✔'; color:#111; text-align:center; line-height:14px; font-size:12px;
-        }
+      /* Contenedor principal */
+      #oasisRaiderSidebar{
+        position:fixed; 
+        top:100px; 
+        right:calc(-1 * var(--or-sidebar-width)); 
+        z-index:10000;
+        width:var(--or-sidebar-width); 
+        background:var(--or-bg); 
+        color:var(--or-text);
+        border:1px solid var(--or-border); 
+        border-right:none;
+        border-radius:10px 0 0 10px; 
+        box-shadow:-5px 0 15px rgba(0,0,0,0.4);
+        transition:right .4s ease-in-out; 
+        font-family:sans-serif; 
+        font-size:13px;
+      }
+      /* cambio solicitado */
+      #oasisRaiderSidebar.open{ right:0; width:354px; }
 
-        .hint{ color:#9aa0a6; font-size:12px; }
-      </style>
+      /* Pestaña de toggle/draggable */
+      #oasisRaiderSidebar #or-sidebar-toggle{
+        position:absolute; 
+        left:-40px; 
+        top:0; 
+        width:40px; 
+        padding:10px 0;
+        background:var(--or-header-bg); 
+        cursor:grab; 
+        user-select:none;
+        border:1px solid var(--or-border); 
+        border-right:none; 
+        border-radius:10px 0 0 10px;
+        display:flex; 
+        flex-direction:column; 
+        align-items:center; 
+        gap:8px;
+      }
+      #oasisRaiderSidebar #or-sidebar-toggle:active{ cursor:grabbing; }
+      #oasisRaiderSidebar #or-sidebar-toggle>span:nth-of-type(2){ 
+        font-size:20px; 
+        pointer-events:none; 
+      }
+      #oasisRaiderSidebar #or-dot{ 
+        width:10px; height:10px; border-radius:50%; background:var(--or-red); 
+      }
+      #oasisRaiderSidebar #or-mini-timer{ 
+        font-size:12px; line-height:1.1; font-weight:bold; color:var(--or-yellow); text-align:center; 
+      }
+
+      /* Estructura interna */
+      #oasisRaiderSidebar .or-header{ 
+        padding:8px 12px; background:var(--or-header-bg); font-weight:bold; font-size:15px; text-align:center; 
+      }
+      #oasisRaiderSidebar .or-body{ padding:12px; }
+
+      /* Controles / Botones */
+      #oasisRaiderSidebar .controls{ 
+        display:flex; justify-content:space-between; margin-bottom:10px; 
+      }
+      #oasisRaiderSidebar .btn{ 
+        background:#3a3f4b; border:1px solid #555; color:var(--or-text); padding:5px 8px; border-radius:5px; cursor:pointer; 
+      }
+      #oasisRaiderSidebar .btn:hover{ filter:brightness(1.1); }
+
+      /* Inputs solo dentro del sidebar */
+      #oasisRaiderSidebar select,
+      #oasisRaiderSidebar input[type=number]{ 
+        background:#333; color:#eee; border:1px solid #555; border-radius:4px; font-size:12px; padding:3px; 
+      }
+
+      /* Alertas internas */
+      #oasisRaiderSidebar .alert{ 
+        margin:8px 0; padding:6px 8px; border-radius:5px; 
+        border:1px solid #884; background:rgba(224,108,117,.2); color:#ffb8b8; font-weight:bold; 
+      }
+
+      /* Grids de estado */
+      #oasisRaiderSidebar .status-grid{ 
+        display:grid; grid-template-columns:auto 1fr; gap:4px 8px; line-height:1.6; margin-bottom:10px; 
+      }
+
+      /* Listas “Siguientes” */
+      #oasisRaiderSidebar .next-list-container{ margin-top:8px; }
+      #oasisRaiderSidebar #or-nexts, 
+      #oasisRaiderSidebar #or-nexts-empty{ 
+        margin-top:4px; line-height:1.6; font-size:12px; 
+      }
+
+      /* Separador */
+      #oasisRaiderSidebar .or-separator{ 
+        border-top:1px solid var(--or-border); margin:15px 0; 
+      }
+
+      /* Header de config */
+      #oasisRaiderSidebar .or-cfg-header{ 
+        cursor:pointer; font-weight:bold; margin-bottom:10px; 
+      }
+
+      /* Panel de config */
+      #oasisRaiderSidebar #or-cfg-panel{ 
+        display:none; grid-gap:8px; 
+      }
+      #oasisRaiderSidebar #or-cfg-panel .cfg-row{ 
+        display:flex; justify-content:space-between; align-items:center; gap:10px; 
+      }
+
+      /* Scroll interno del panel de config */
+      #oasisRaiderSidebar #or-cfg-scroll{
+        height:210px;
+        overflow-y:auto;
+        overflow-x:hidden;
+        padding-right:8px;
+      }
+
+      /* Wrapper de unidades */
+      #oasisRaiderSidebar #or-unit-wrap{ 
+        display:flex; gap:10px; flex-wrap:wrap; align-items:center; 
+      }
+
+      /* Checkboxes custom SOLO dentro del sidebar */
+      #oasisRaiderSidebar #or-unit-wrap input[type="checkbox"]{ 
+        appearance:none; position:absolute; opacity:0; width:0; height:0; 
+      }
+      #oasisRaiderSidebar #or-unit-wrap label{ cursor:pointer; }
+      #oasisRaiderSidebar #or-unit-wrap label::before{
+        content:''; display:inline-block; width:14px; height:14px; margin-right:5px;
+        border:1px solid var(--or-border); background:var(--or-header-bg); border-radius:3px; transition:.2s;
+      }
+      #oasisRaiderSidebar #or-unit-wrap input[type="checkbox"]:checked + label::before{
+        background:var(--or-green); border-color:var(--or-green); content:'✔'; color:#111; 
+        text-align:center; line-height:14px; font-size:12px;
+      }
+
+      /* Tips */
+      #oasisRaiderSidebar .hint{ color:#9aa0a6; font-size:12px; }
+    </style>
+
     `;
     document.body.appendChild(el);
     setupUIHandlers();

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper
-// @version      1.8.2
+// @version      1.8.3
 // @namespace    tscm
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
 // @include      *://*.travian.*
@@ -51,6 +51,113 @@
     const FP_DOM_DEBOUNCE_MS   = 1200;     // pequeña espera para evitar ráfagas
     const FP_MIN_INTERVAL_MS   = 60 * 1000; // cooldown entre asignaciones por DOM
     const LS_FP_LAST_KEY       = "HH_FREEPOINTS_DOM_LAST_TS";
+    const LS_BALANCE_STRATEGY = "HH_BALANCE_STRATEGY_V1";  // "normal" o "tribe.key"
+    const LS_ROTATION_STATE   = "HH_ROT_STATE_V1";         // guarda {strategy, order:[1..4], idx, ts}
+
+    const UNIT_COSTS_ALL = {
+        TEUTONS: {
+            clubswinger:      [95, 75, 40, 40],
+            spearman:         [145, 70, 85, 40],
+            axeman:           [130, 120, 170, 70],
+            scout:            [160, 100, 50, 50],
+            paladin:          [370, 270, 290, 75],
+            teutonic_knight:  [450, 515, 480, 80],
+            ram:              [1000, 300, 350, 70],
+            catapult:         [900, 1200, 600, 60],
+            chief:            [35500, 26600, 25000, 2720],
+            settler:          [5800, 4400, 4600, 520],
+        },
+        GAUL: {
+            phalanx:           [100, 130, 55, 30],
+            swordsman:         [140, 150, 185, 60],
+            pathfinder:        [170, 150, 20, 40],
+            theutates_thunder: [350, 450, 230, 60],
+            druidrider:        [360, 330, 280, 120],
+            haeduan:           [500, 620, 675, 170],
+        },
+        ROMANS: {
+            legionnaire:         [120, 100, 150, 30],
+            praetorian:          [100, 130, 160, 70],
+            imperian:            [150, 160, 210, 80],
+            equites_legati:      [140, 160, 20, 40],
+            equites_imperatoris: [550, 440, 320, 100],
+            equites_caesaris:    [550, 640, 800, 180],
+        },
+    };
+
+    const UNIT_LABELS = {
+    TEUTONS: {
+        clubswinger: "Clubswinger",
+        spearman: "Spearman",
+        axeman: "Axeman",
+        scout: "Scout",
+        paladin: "Paladin",
+        teutonic_knight: "Teutonic Knight",
+        ram: "Ram",
+        catapult: "Catapult",
+        chief: "Chief",
+        settler: "Settler",
+    },
+    GAUL: {
+        phalanx: "Phalanx",
+        swordsman: "Swordsman",
+        pathfinder: "Pathfinder",
+        theutates_thunder: "Theutates Thunder",
+        druidrider: "Druidrider",
+        haeduan: "Haeduan",
+    },
+    ROMANS: {
+        legionnaire: "Legionnaire",
+        praetorian: "Praetorian",
+        imperian: "Imperian",
+        equites_legati: "Equites Legati",
+        equites_imperatoris: "Equites Imperatoris",
+        equites_caesaris: "Equites Caesaris",
+    },
+    };
+
+    function getBalanceStrategy() {
+    return localStorage.getItem(LS_BALANCE_STRATEGY) || "normal";
+    }
+    function setBalanceStrategy(key) {
+    try { localStorage.setItem(LS_BALANCE_STRATEGY, key); } catch{}
+    }
+
+    // Dado tribe ("TEUTONS"/"GAUL"/"ROMANS"), retorna pares [{key, label}]
+    function getUnitsForTribe(tribe) {
+        let up = (tribe || "GAUL").toUpperCase();
+
+        // 🔧 normaliza variantes singulares
+        if (up === "TEUTON") up = "TEUTONS";
+        if (up === "GAULS") up = "GAUL";
+        if (up === "ROMAN") up = "ROMANS";
+
+        const costs = UNIT_COSTS_ALL[up] || {};
+        const labels = UNIT_LABELS[up] || {};
+        logI(`[getUnitsForTribe] normalized tribe=${up}, keys=`, Object.keys(costs));
+
+        return Object.keys(costs).map(k => ({ key: `${up}.${k}`, label: labels[k] || k }));
+    }
+
+
+    // Ordena recursos por “limitación” ascendente: menor stock/costo primero
+    function computeLimitationOrder(stock, costArr) {
+    const vec = [stock.wood|0, stock.clay|0, stock.iron|0, stock.crop|0];
+    const entries = [1,2,3,4].map(r => {
+        const need = costArr[r-1] || 1; // evitar /0
+        return { r, ratio: vec[r-1] / need };
+    });
+    entries.sort((a,b) => a.ratio - b.ratio || a.r - b.r);
+    return entries.map(e => e.r); // [rMin, ..., rMax] con r=1..4
+    }
+
+    // Lee/actualiza rotador
+    function getRotationState() {
+    try { return JSON.parse(localStorage.getItem(LS_ROTATION_STATE) || "{}"); } catch { return {}; }
+    }
+    function setRotationState(obj) {
+    try { localStorage.setItem(LS_ROTATION_STATE, JSON.stringify(obj)); } catch {}
+    }
 
 
 
@@ -229,11 +336,11 @@
         const css = `
             #hh-wrap { position: fixed; top: 80px; right: 0; z-index: 1000; display: flex; transform: translateX(calc(100% - 42px)); transition: transform 0.3s ease-in-out; }
             #hh-wrap.maximized { transform: translateX(0); }
-            #hh-header { width: 42px; height: 169px; background: #2c2c2e; border: 1px solid #555; border-right: none; border-radius: 10px 0 0 10px; cursor: pointer; user-select: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; box-shadow: -2px 2px 10px rgba(0,0,0,0.4); }
+            #hh-header { width: 42px; height: 70px; background: #2c2c2e; border: 1px solid #555; border-right: none; border-radius: 10px 0 0 10px; cursor: pointer; user-select: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; box-shadow: -2px 2px 10px rgba(0,0,0,0.4); }
             #hh-title { writing-mode: vertical-rl; font-weight: bold; color: #e1e1e3; }
             #hh-badge { font-size: 14px; font-weight: bold; }
-            #hh-ico-head { width: 24px; height: 24px; }
-            #hh-body { width: 220px; padding: 10px; background: #2c2c2e; color: #e1e1e3; border: 1px solid #555; border-left: none; border-radius: 0 10px 10px 0; display: flex; flex-direction: column; gap: 8px; }
+            #hh-ico-head { width: 17px; height: 17px; }
+            #hh-body { width: 220px; padding: 10px; background: #2c2c2e; color: #e1e1e3; border: 1px solid #555; border-left: none; border-radius: 0 10px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
             #hh-body * { box-sizing: border-box; }
             #hh-row { display:flex; gap:8px; align-items:center; }
             #hh-select, #hh-btn { width: 100%; padding: 6px; font-size: 12px; background: #3a3a3c; color: #e1e1e3; border: 1px solid #666; border-radius: 6px;height:27px; }
@@ -242,7 +349,7 @@
             #hh-ico-block { display:flex; align-items:center; gap:8px; margin-top:2px; }
             #hh-ico-large { width:22px; height:22px; }
             #hh-ico-label, #hh-countdown, #hh-info { font-size:12px; }
-            #hh-info { border-top: 1px dashed #555; padding-top: 6px; }
+            #hh-countdown { border-top: 1px dashed #555; padding-top: 6px; }
         `;
         const style = document.createElement("style"); style.id = "hh-styles"; style.textContent = css; document.head.appendChild(style);
     }
@@ -252,20 +359,94 @@
         const wrap = document.createElement("div"); wrap.id = "hh-wrap";
         wrap.innerHTML = `
             <div id="hh-header" title="Mostrar/Ocultar Hero Helper">
-                <span id="hh-title">🛡️ HÉROE</span><img id="hh-ico-head" alt="res" /><div id="hh-badge">—</div>
+                <span id="hh-title">🛡️</span><img id="hh-ico-head" alt="res" /><div id="hh-badge">—</div>
             </div>
             <div id="hh-body">
                 <div id="hh-row"><select id="hh-select" title="Cambiar producción manual"><option value="0">Todos</option><option value="1">Madera</option><option value="2">Barro</option><option value="3">Hierro</option><option value="4">Cereal</option></select></div>
                 <div id="hh-row"><button id="hh-btn" title="Activar/Desactivar modo automático">Auto: OFF</button></div>
                 <div id="hh-ico-block"><img id="hh-ico-large" alt="res"/><span id="hh-ico-label">Producción</span></div>
-                <div id="hh-countdown">Próximo refresh: —</div><div id="hh-info">Cargando...</div>
+                <div id="hh-row">
+                    <label for="hh-strategy">Estrategia:</label>
+                    <select id="hh-strategy" title="Estrategia de balanceo"></select>
+                </div>
+                <div id="hh-info">Cargando...</div>
+                <div id="hh-countdown">Próximo refresh: —</div>
+
             </div>`;
         document.body.appendChild(wrap);
-        ui = { container: wrap, header: $("#hh-header"), body: $("#hh-body"), selectResource: $("#hh-select"), btnAuto: $("#hh-btn"), countdown: $("#hh-countdown"), info: $("#hh-info"), badgeVillage: $("#hh-badge"), icoHead: $("#hh-ico-head"), icoLarge: $("#hh-ico-large"), icoLabel: $("#hh-ico-label") };
-        ui.header.addEventListener("click", onToggleMinimized); ui.btnAuto.addEventListener("click", onToggleAuto); ui.selectResource.addEventListener("change", onSelectManual);
-        applyMinimized(true, true); // <- Punto 2: Forzar minimizado al inicio
+
+        // 🔧 incluye strategy dentro de ui
+        ui = {
+            container: wrap,
+            header: $("#hh-header"),
+            body: $("#hh-body"),
+            selectResource: $("#hh-select"),
+            btnAuto: $("#hh-btn"),
+            countdown: $("#hh-countdown"),
+            info: $("#hh-info"),
+            badgeVillage: $("#hh-badge"),
+            icoHead: $("#hh-ico-head"),
+            icoLarge: $("#hh-ico-large"),
+            icoLabel: $("#hh-ico-label"),
+            strategy: $("#hh-strategy"), // ← nuevo
+        };
+
+        // listeners
+        ui.header.addEventListener("click", onToggleMinimized);
+        ui.btnAuto.addEventListener("click", onToggleAuto);
+        ui.selectResource.addEventListener("change", onSelectManual);
+
+        // ⚠️ popula estrategia AHORA que el nodo existe
+        populateStrategyByTribe();
+        ui.strategy.addEventListener("change", async () => {
+            setBalanceStrategy(ui.strategy.value);
+            setRotationState({}); // reset rotador
+            await repaint();
+            await autoBalanceIfNeeded("strategy-change");
+        });
+
+        applyMinimized(true, true); // minimizado al inicio
         repaint();
     }
+
+
+    function populateStrategyByTribe() {
+        if (!ui || !ui.strategy) {
+            logI("[populateStrategyByTribe] ui/strategy not ready, skip.");
+            return;
+        }
+
+        const tribe = (tscm.utils.getCurrentTribe() || "GAUL").toUpperCase();
+        logI("[populateStrategyByTribe] Tribe detected:", tribe);
+
+        const opts = [{ value: "normal", text: "Estrategia: Normal" }];
+        const units = getUnitsForTribe(tribe) || [];
+        logI("[populateStrategyByTribe] Units found:", units.length, units);
+
+        if (units.length) {
+            units.forEach(u => opts.push({ value: u.key, text: u.label }));
+        }
+
+        // Render opciones
+        ui.strategy.innerHTML = opts.map(o => `<option value="${o.value}">${o.text}</option>`).join("");
+        logI("[populateStrategyByTribe] Options rendered:", opts.map(o => o.value));
+
+        // Validar estrategia guardada
+        const cur = getBalanceStrategy();
+        const exists = !!opts.find(o => o.value === cur);
+        logI("[populateStrategyByTribe] Current saved strategy:", cur, "existsInList?", exists);
+
+        if (cur !== "normal" && !exists) {
+            setBalanceStrategy("normal");
+            logI("[populateStrategyByTribe] Strategy reset to 'normal' (mismatch with tribe options).");
+        }
+
+        const finalVal = getBalanceStrategy();
+        ui.strategy.value = finalVal;
+        logI("[populateStrategyByTribe] Final select value set to:", finalVal);
+    }
+
+
     function applyMinimized(min, silent = false) { const st = loadState(); st.minimized = !!min; saveState(st); ui.container.classList.toggle("maximized", !st.minimized); if (!silent) logI(st.minimized ? "Minimizado" : "Expandido"); }
     function onToggleMinimized() { applyMinimized(!loadState().minimized); }
     async function onToggleAuto() { const st = loadState(); st.autoMode = !st.autoMode; saveState(st); await repaint(); if (st.autoMode) await autoBalanceIfNeeded("toggle-auto"); }
@@ -293,6 +474,8 @@
 
     async function repaint() {
         if (!ui.container) buildUI();
+        if (ui.strategy) ui.strategy.value = getBalanceStrategy();
+
         const st = loadState();
         ui.btnAuto.textContent = st.autoMode ? "Auto: ON" : "Auto: OFF"; ui.btnAuto.classList.toggle("auto-on", st.autoMode);
         startOrUpdateCountdown();
@@ -323,17 +506,94 @@
         if (stock) { updateVillageStockInState(didHero, stock); return stock; }
         logI("❌ Fallback final: usando stockBar"); return tscm.utils.parseStockBar();
     }
+    // (autoBalanceIfNeeded) — con rotación por unidad + veto de cereal por piso (CROP_FLOOR)
     async function autoBalanceIfNeeded(source = "unknown") {
-        const st = loadState(); if (!st.autoMode) { return; }
-        const data = st.lastJson?.data || await fetchHeroJson(true, "auto-prep"); if (!data) return;
-        const stock = await readStockSmart(data); const target = decideTargetResource(stock); const current = currentProductionType(data);
-        if (target === current) { return; }
+        const st = loadState();
+        if (!st.autoMode) return;
+
+        // 1) Datos base
+        const data = st.lastJson?.data || await fetchHeroJson(true, "auto-prep");
+        if (!data) return;
+
+        const stock = await readStockSmart(data);
+        const strategy = getBalanceStrategy(); // "normal" o "TRIBE.unitKey" (p.ej. "TEUTONS.clubswinger")
+
+        let target;
+
+        if (strategy === "normal") {
+            // === Modo clásico ===
+            target = decideTargetResource(stock);
+        } else {
+            // === Modo plantilla por unidad (dinámico por tribu) ===
+            const [tribeKey, unitKey] = (strategy || "").split(".");
+            const costs = UNIT_COSTS_ALL?.[tribeKey]?.[unitKey];
+
+            if (!costs) {
+            // fallback si no hay costos
+            target = decideTargetResource(stock);
+            } else {
+            // A) Orden de limitación actual (menor stock/costo primero)
+            const order = computeLimitationOrder(stock, costs); // p.ej. [1,2,3,4]
+
+            // B) Cargar/normalizar rotación
+            let rot = getRotationState(); // {strategy, order:[..], idx, ts}
+            const nowMs = Date.now();
+
+            const sameStrategy = rot.strategy === strategy;
+            const sameOrder = sameStrategy && JSON.stringify(rot.order) === JSON.stringify(order);
+
+            if (!sameOrder) {
+                // Reinicia rotación cuando cambia la estrategia o cambia el orden “duro”
+                rot = { strategy, order, idx: 0, ts: nowMs };
+            } else {
+                // Avanza solo si pasó tu ventana mínima (histeresis de 20 min)
+                const canAdvance = (nowMs - (rot.ts || 0)) >= AUTO_MIN_INTERVAL_MS;
+                if (canAdvance) {
+                rot.idx = ((rot.idx | 0) + 1) % order.length;
+                rot.ts = nowMs;
+                }
+            }
+
+            target = order[rot.idx | 0];
+
+            // C) Sugerencia aplicada: Veto de cereal si ya está sobre el piso (CROP_FLOOR)
+            //    Si apunta a cereal (4) pero tenemos cereal cómodo, salta al siguiente no-cereal
+            if (target === 4 && (stock.crop | 0) >= CROP_FLOOR) {
+                const nonCrop = rot.order.filter(r => r !== 4);
+                if (nonCrop.length) {
+                // Reutiliza el mismo índice para mantener ritmo, pero sobre los no-cereal
+                target = nonCrop[rot.idx % nonCrop.length] || nonCrop[0];
+                }
+            }
+
+            setRotationState(rot);
+            }
+        }
+
+        // 2) Si ya estamos en ese recurso, nada que hacer
+        const current = currentProductionType(data);
+        if (target === current) return;
+
+        // 3) Histeresis global (anti “flapping” fuera del modo plantilla)
         const lastChange = st.cooldowns?.lastAutoChange || 0;
-        if (now() - lastChange < AUTO_MIN_INTERVAL_MS) { logI(`⏳ Histeresis: ${Math.round((now() - lastChange)/60000)} min (<20).`); return; }
-        logI(`⚖️ Balanceando de r${current} a r${target} (src=${source})`);
+        const elapsed = Date.now() - lastChange;
+        if (elapsed < AUTO_MIN_INTERVAL_MS) {
+            logI(`⏳ Histeresis global: ${Math.round(elapsed / 60000)} min (< ${Math.round(AUTO_MIN_INTERVAL_MS/60000)}).`);
+            return;
+        }
+
+        // 4) Aplicar cambio
+        logI(`⚖️ Balanceando de r${current} a r${target} (src=${source}, strategy=${strategy})`);
         const post = await postAttributesAlwaysBoth(target, currentAttackBehaviour(data));
-        if (post.ok) { const s2 = loadState(); s2.cooldowns.lastAutoChange = now(); saveState(s2); await fetchHeroJson(true, "auto-post-confirm"); await repaint(); }
+        if (post.ok) {
+            const s2 = loadState();
+            s2.cooldowns.lastAutoChange = Date.now();
+            saveState(s2);
+            await fetchHeroJson(true, "auto-post-confirm");
+            await repaint();
+        }
     }
+
     async function onSelectManual() { const st = loadState(); const val = parseInt((ui.selectResource.value||"0"),10); if (st.autoMode) return; const data = await fetchHeroJson(false,"manual-select") || st.lastJson?.data; const didDom =  tscm.utils.getCurrentDidFromDom(); const didHero = heroAssignedDid(data); if (!didDom || !didHero || didDom !== didHero) { logI("🚫 Select manual fuera de aldea del héroe."); await repaint(); return; } if (!data) return; const post = await postAttributesAlwaysBoth(val, currentAttackBehaviour(data)); if (post.ok) await fetchHeroJson(true,"manual-select-post"); await repaint(); }
     const DQ_LOCK_KEY = "HH_DQ_LOCK", DQ_LOCK_TTL = 45000; function tryAcquireLock(key = DQ_LOCK_KEY, ttl = DQ_LOCK_TTL) { try { const last = parseInt(localStorage.getItem(key) || "0", 10); if (now() - last < ttl) return false; localStorage.setItem(key, String(now())); return true; } catch { return true; } }
     async function maybeClaimDailyAndReload(){ try{ if (!/!/.test($("a.dailyQuests .indicator")?.textContent || "")) return; if (!tryAcquireLock()) return; const q=`query{ownPlayer{dailyQuests{achievedPoints rewards{id awardRedeemed points}}}}`; const dq = (await(await fetch("/api/v1/graphql",{method:"POST",credentials:"include",headers:makeStdHeaders(),body:JSON.stringify({query:q})})).json())?.data?.ownPlayer?.dailyQuests; const pending = (dq.rewards||[]).filter(r => !r.awardRedeemed && (r.points|0) <= (dq.achievedPoints|0)); if (!pending.length) return; for (const r of pending){ await fetch("/api/v1/daily-quest/award",{method:"POST",credentials:"include",headers:makeStdHeaders(),body:JSON.stringify({action:"dailyQuest",questId:r.id})}); await sleep(400); } logI("✅ DQs cobrados → recargando..."); location.reload(); }catch(e){ logI("⚠️ Error daily quests:", e); } }
@@ -373,7 +633,7 @@
                 body: BODY
             });
         } catch (err) {
-            console.warn(`[KeepAlive] ${nowStr()} error ❌`, err);
+            console.warn(`[KeepAlive] ${_nowStr()} error ❌`, err); // ← antes llamaba a nowStr()
         }
     }
 
@@ -435,7 +695,15 @@
     /******************************************************************
      * Init
      ******************************************************************/
-    function observeVillageList() { const root = $('.villageList'); if (!root) return; new MutationObserver(async () => { await repaint(); await autoBalanceIfNeeded("village-switch"); }).observe(root, { subtree: true, attributes: true, attributeFilter: ['class'] }); }
+    function observeVillageList() {
+        const root = $('.villageList'); if (!root) return;
+        new MutationObserver(async () => {
+            populateStrategyByTribe();
+            await repaint();
+            await autoBalanceIfNeeded("village-switch");
+        }).observe(root, { subtree: true, attributes: true, attributeFilter: ['class'] });
+    }
+
     async function init() {
         buildUI();
         observeVillageList();

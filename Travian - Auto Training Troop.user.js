@@ -1,10 +1,9 @@
 // ==UserScript==
 // @name         🐎 Auto Training Troop (Toolbox UI) — Travian
-// @version      2.0.6
+// @version      2.0.8
 // @description  [FIXED] UI rediseñada como toolbox lateral. Muestra próxima tropa en modo colapsado, expandible. Evita duplicados en build.php. Incluye botón "Entrenar ahora" (sin resetear contador) y estadísticas de tropas entrenadas por tarea.
 // @match        https://*.travian.com/*
 // @run-at       document-end
-// @grant        none
 // @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
 // @updateURL     https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Training%20Troop.user.js
 // @downloadURL  https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Training%20Troop.user.js
@@ -29,14 +28,17 @@
   const TICK_MS = 1000;
   const LOCK_TTL_MS = 25_000;
   const UID = crypto.getRandomValues(new Uint32Array(1))[0].toString(16);
-  const ALLOWED_GIDS = new Set(["19", "20", "21"]);
+  const ALLOWED_GIDS = new Set(["19", "20", "21", "29"]);
   const INTERVAL_OPTIONS = [5, 10, 15, 20, 30, 60];
   const DELAY_MIN_S = 10;
   const DELAY_MAX_S = 20;
   const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
   const UNIT_SPRITE_BASE = "https://cdn.legends.travian.com/gpack/"+API_VER+"/img_ltr/global/units/"+tribe.toLowerCase()+"/icon/"+tribe.toLowerCase()+"_small.png";
   const UNIT_ICON_SIZE = 16;
-  const HARD_MAX_PER_CLICK = 5; // tope duro por entrenamiento
+  const HUMAN_READ_MIN_MS = 1200;  // 1.2s
+  const HUMAN_READ_MAX_MS = 3500;  // 3.5s
+  const HUMAN_CLICK_MIN_MS = 300;  // 0.3s
+  const HUMAN_CLICK_MAX_MS = 900;  // 0.9s
 
   function getHardMax() {
     const g = readGlobal();
@@ -392,11 +394,14 @@ function makeVerticallyDraggable(handle, root) {
       const dueIn = g.paused && g.pausedAt ? Math.max(0, t.nextRun - g.pausedAt) : Math.max(0, t.nextRun - now);
       const isTrainable = t.enabled && !g.paused;
 
+      const gidLabel = ({ "19":"Barracks", "29":"Great Barracks", "20":"Stable", "21":"Workshop" })[t.gid] || `gid ${t.gid}`;
+
       row.innerHTML = `
         <div style="display:flex; justify-content:space-between; gap:6px; flex-wrap:wrap;">
           <div>
             <div><b>${t.troopName}</b> <span style="opacity:.75">(${t.troopId})</span></div>
             <div style="opacity:.8;">Aldea: ${t.villageName}</div>
+            <div style="opacity:.8;">Edificio: <b>${gidLabel}</b></div>
             <div>⏱️ Próx: <b class="at-eta">${hms(dueIn)}</b> ${t.enabled ? "" : "<span style='opacity:.6'>(paused)</span>"}</div>
             <div>⏩ Interv: ${t.intervalMin} min</div>
             <div>💪 Entrenado: <b>${t.trainedCount}</b></div>
@@ -458,11 +463,14 @@ function makeVerticallyDraggable(handle, root) {
     const did = currentActiveDid();
     if (!did) return;
 
+    // Trae todas las tareas de la aldea actual
     const existingTasksForVillage = readTasks().filter(t => t.did === did);
 
     document.querySelectorAll(".innerTroopWrapper[data-troopid]").forEach((wrapper) => {
       const troopId = wrapper.getAttribute("data-troopid");
-      if (existingTasksForVillage.some(t => t.troopId === troopId)) return;
+
+      // ✅ Evita duplicados SOLO si coinciden did + gid + troopId (permite Barracks + Great Barracks)
+      if (existingTasksForVillage.some(t => t.troopId === troopId && t.gid === gid)) return;
 
       const details = wrapper.closest(".details") || wrapper.parentElement;
       const cta = details?.querySelector(".cta");
@@ -486,7 +494,6 @@ function makeVerticallyDraggable(handle, root) {
       row.querySelector(".at-add").addEventListener("click", () => {
         const minutes = parseInt(row.querySelector(".at-interval").value, 10);
         const g = readGlobal();
-        // Base temporal: si está pausado, usamos pausedAt para "congelar" el reloj del nextRun
         const base = (g.paused && g.pausedAt) ? g.pausedAt : nowEpoch();
 
         const task = {
@@ -516,6 +523,7 @@ function makeVerticallyDraggable(handle, root) {
       });
     });
   }
+
 
 
   async function executeTraining(task) {
@@ -555,35 +563,64 @@ function makeVerticallyDraggable(handle, root) {
       }
     }
 
+    // ... viene de más arriba ...
     if (maxTrain <= 0) {
       log(`Sin recursos/cola (o no se detectó el máximo) para ${task.troopId} en did=${task.did}.`);
       return { success: false, trained: 0 };
     }
-
-    maxTrain = Math.min(maxTrain, getHardMax());
+    const hardMax = getHardMax();
+    const cap = Math.min(maxTrain, hardMax);
+    if (cap < 1) {
+      log(`Cap inválido para ${task.troopId}: cap=${cap}, maxTrain=${maxTrain}, hardMax=${hardMax}`);
+      return { success: false, trained: 0 };
+    }
+    const toTrain = randInt(1, cap);
 
     const body = new URLSearchParams();
     body.append("action", "trainTroops");
     body.append("checksum", checksum);
     body.append("s", doc.querySelector('form[name="snd"] input[name="s"]')?.value || "1");
     body.append("did", task.did);
-    inputs.forEach(inp => body.append(inp.name, inp.name === task.troopId ? String(maxTrain) : "0"));
+    inputs.forEach(inp => body.append(inp.name, inp.name === task.troopId ? String(toTrain) : "0"));
     body.append("s1", "ok");
+
+    // --- Delays humanos entre GET y POST ---
+    const readMs = randInt(HUMAN_READ_MIN_MS, HUMAN_READ_MAX_MS);
+    log(`Delay humano previo (reading UI): ~${(readMs/1000).toFixed(1)}s`);
+    await sleepWithLock(readMs);
+
+    const clickMs = randInt(HUMAN_CLICK_MIN_MS, HUMAN_CLICK_MAX_MS);
+    log(`Delay humano previo (click submit): ~${(clickMs/1000).toFixed(1)}s`);
+    await sleepWithLock(clickMs);
+    // --- fin delays humanos ---
 
     let ok = false;
     try {
-      const res = await fetch(url, { method: "POST", credentials: "include", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString(), });
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      });
       const txt = await res.text();
       ok = res.ok && /startTraining|trainUnits|name="snd"/.test(txt);
     } catch (e) { err("POST falló:", e); ok = false; }
 
+
     if (ok) {
-      log(`✅ Entrenamiento enviado: ${task.troopId} x${maxTrain} @did=${task.did}`);
+      log(`✅ Entrenamiento enviado: ${task.troopId} x${toTrain} @did=${task.did} (cap=${cap}, hardMax=${hardMax})`);
       const allTasks = readTasks();
       const taskIndex = allTasks.findIndex(t => t.id === task.id);
-      if (taskIndex > -1) { allTasks[taskIndex].trainedCount += maxTrain; writeTasks(allTasks); renderPanel(); }
-    } else { warn(`⚠️ No se pudo confirmar el entrenamiento para ${task.troopId} @did=${task.did}.`); }
-    return { success: ok, trained: ok ? maxTrain : 0 };
+      if (taskIndex > -1) {
+        allTasks[taskIndex].trainedCount += toTrain;
+        writeTasks(allTasks);
+        renderPanel();
+      }
+    } else {
+      warn(`⚠️ No se pudo confirmar el entrenamiento para ${task.troopId} @did=${task.did}.`);
+    }
+    return { success: ok, trained: ok ? toTrain : 0 };
+
   }
 
   function reprogram(task) {
