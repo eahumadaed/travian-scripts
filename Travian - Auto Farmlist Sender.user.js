@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.17
+// @version       2.1.20
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -97,6 +97,7 @@
   // KEYS & DEFAULT CONFIG
   // ───────────────────────────────────────────────────────────────────
   const KEY_ROOT            = 'tscm_iconbot_';
+  const KEY_CFG_WORLDSIZE   = KEY_ROOT + 'cfg_world_size'; // total de casillas en un eje: 401 o 801
   const KEY_FL_RAW          = KEY_ROOT + 'farmlist_raw';
   const KEY_HISTORY         = KEY_ROOT + 'send_history';      // {slotId: lastSentEpoch}
   const KEY_AUTOSEND        = KEY_ROOT + 'autosend';
@@ -118,6 +119,9 @@
   const KEY_MASTER          = KEY_ROOT + 'master';             // { id, ts }
   const KEY_KICK_GUARD = KEY_ROOT + 'kick_guard'; // { flId: tsUntil }
   const KEY_STATS_SEEN_REPORTS = KEY_ROOT + 'stats_seen_reports'; // Set-like: { "45210267": true, ... }
+  const KEY_CFG_PRENAV_PROB = KEY_ROOT + 'cfg_prenav_prob'; // 0..1
+  const KEY_CFG_DELAY_MIN   = KEY_ROOT + 'cfg_delay_min';   // ms
+  const KEY_CFG_DELAY_MAX   = KEY_ROOT + 'cfg_delay_max';   // ms
 
   const DEFAULT_INTERVAL_MS = 60*60*1000; // 1h
   const BURST_DEFAULT = { dmin:60, dmax:120, n:3 };
@@ -132,6 +136,31 @@
   const KEY_CFG_OVER_WINMIN     = KEY_ROOT + 'cfg_over_winmin';    // int min (default 10)
   const KEY_BUDGET_POOL_PREFIX = KEY_ROOT + 'budget_pool_v2_'; // por aldea: budget_pool_v2_<did>
   const BUDGET_POOL_TTL_MS = 90*1000;
+
+
+  const NET_BUCKET = { cap: 6, // máx 6 op en 10s
+                     winMs: 10000,
+                     ts: [] };
+
+  async function netGuard(){
+    const nowTs = Date.now();
+    NET_BUCKET.ts = NET_BUCKET.ts.filter(t => nowTs - t < NET_BUCKET.winMs);
+    if (NET_BUCKET.ts.length >= NET_BUCKET.cap){
+      // espera corta aleatoria y reintenta
+      await sleep(400 + Math.floor(Math.random()*600));
+      return netGuard();
+    }
+    NET_BUCKET.ts.push(nowTs);
+  }
+  async function guardedFetch(input, init){
+    await netGuard();
+    return fetch(input, init);
+  }
+
+  if (LS.get(KEY_CFG_PRENAV_PROB) == null) LS.set(KEY_CFG_PRENAV_PROB, 0.75); // 75% de los ciclos
+  if (LS.get(KEY_CFG_DELAY_MIN)   == null) LS.set(KEY_CFG_DELAY_MIN,  450);   // 0.45s
+  if (LS.get(KEY_CFG_DELAY_MAX)   == null) LS.set(KEY_CFG_DELAY_MAX,  1500);  // 1.5s
+
 
   function getKickGuard(){ return LS.get(KEY_KICK_GUARD, {}) || {}; }
   function setKickGuard(m){ LS.set(KEY_KICK_GUARD, m); }
@@ -159,6 +188,37 @@
     m[reportId] = true;
     LS.set(KEY_STATS_SEEN_REPORTS, m);
   }
+
+
+  function humanDelayOnce(){
+    const min = parseInt(LS.get(KEY_CFG_DELAY_MIN, 450),10);
+    const max = parseInt(LS.get(KEY_CFG_DELAY_MAX,1500),10);
+    const ms  = Math.floor(min + Math.random()*(Math.max(max,min)-min+1));
+    return sleep(ms);
+  }
+
+  // 10% de las veces mete una espera un poco más larga (2–5s)
+  async function humanDelay(){
+    await humanDelayOnce();
+    if (Math.random() < 0.10) await sleep(2000 + Math.floor(Math.random()*3000));
+  }
+
+  async function preNavigateMaybe(){
+    const p = Math.max(0, Math.min(1, Number(LS.get(KEY_CFG_PRENAV_PROB, 0.75))));
+    if (Math.random() > p) return;
+    try{
+      const url = '/build.php?gid=16&tt=99' + (Math.random() < 0.25 ? ('&cb=' + Date.now()%100000) : '');
+      LOG('log','PreNav GET '+url);
+      const ctl = new AbortController();
+      const t = setTimeout(()=>ctl.abort(), 5000); // 5s cap
+      await fetch(url, { method:'GET', credentials:'include', cache:'no-store', signal: ctl.signal });
+      clearTimeout(t);
+      await humanDelay();
+    }catch(e){
+      LOG('warn','PreNav error', e?.name === 'AbortError' ? 'timeout' : e);
+    }
+  }
+
 
 
   function canOverloadSlot(sl){
@@ -272,8 +332,39 @@ function scanAllVillagesFromSidebar(){
     return Object.keys(out).length ? out : null;
   }
 
+  function guessWorldSize(){
+    // Heurística simple: si ves coords fuera de ±200, asumimos 801
+    let radius = 200;
+    const vm = getVillagesMap();
+    for (const did in vm){
+      const {x,y} = vm[did] || {};
+      if (Math.abs(x|0) > 200 || Math.abs(y|0) > 200) { radius = 400; break; }
+    }
+    return radius * 2 + 1; // 401 o 801
+  }
 
-  function dist(ax,ay,bx,by){ const dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
+  function getWorldSize(){
+    let ws = parseInt(LS.get(KEY_CFG_WORLDSIZE, 0), 10);
+    if (!Number.isFinite(ws) || ws < 3){
+      ws = guessWorldSize();            // default 401 si no hay pistas
+      LS.set(KEY_CFG_WORLDSIZE, ws);
+    }
+    return ws;
+  }
+
+
+  function wrapDelta(a, b, size){
+    const raw = Math.abs((a|0) - (b|0));
+    // En 401: entre 200 y -200 → raw=400, size-raw=1 (correcto)
+    return Math.min(raw, size - raw);
+  }
+
+  function dist(ax, ay, bx, by){
+    const size = getWorldSize();       // 401 o 801
+    const dx = wrapDelta(ax, bx, size);
+    const dy = wrapDelta(ay, by, size);
+    return Math.hypot(dx, dy);
+  }
 
   function getWhitelist(){
     const saved = LS.get(KEY_CFG_WHITELIST, null);
@@ -453,6 +544,13 @@ function scanAllVillagesFromSidebar(){
   function getIntervals(){ return LS.get(KEY_INTERVALS,{}); }
   function setIntervals(m){ LS.set(KEY_INTERVALS,m); }
   function getIntervalMs(flId){ return getIntervals()?.[flId] || DEFAULT_INTERVAL_MS; }
+  function randDelayWithin(flId){
+    const base = getIntervalMs(flId);        // intervalo configurado para esa FL
+    const min  = 5 * 60 * 1000;              // 5 minutos
+    if (base <= min) return base;            // por si algún día usas <5m
+    const span = base - min;
+    return min + Math.floor(Math.random() * (span + 1));
+  }
 
   function getNextMap(){ return LS.get(KEY_NEXTSEND,{}); }
   function setNextMap(m){ LS.set(KEY_NEXTSEND,m); }
@@ -504,8 +602,8 @@ function scanAllVillagesFromSidebar(){
     return a;
   }
 
-  function getStats(){ return LS.get(KEY_STATS,{}); } 
-  function setStats(s){ LS.set(KEY_STATS,s); } 
+  function getStats(){ return LS.get(KEY_STATS,{}); }
+  function setStats(s){ LS.set(KEY_STATS,s); }
   function toMsEpoch(t){ const n = Number(t)||0; if (n<=0) return 0; return n < 1e12 ? n*1000 : n; }
 
 
@@ -611,7 +709,7 @@ function scanAllVillagesFromSidebar(){
     if (!slotUpdates.length) return true;
     if (isDry()){ LOG('warn','DRY → skip PUT',{listId, n:slotUpdates.length}); return true; }
     try{
-      const r = await fetch(PUT_SLOT_URL,{
+      const r = await guardedFetch(PUT_SLOT_URL,{
         method:'PUT',
         headers: headers(),
         body: JSON.stringify({ slots: slotUpdates }),
@@ -638,7 +736,7 @@ function scanAllVillagesFromSidebar(){
       return;
     }
     try{
-      const res = await fetch(SEND_URL,{
+      const res = await guardedFetch(SEND_URL,{
         method:'POST',headers:headers(),credentials:'include',
         body: JSON.stringify({ action:'farmList', lists:[{ id: flId, targets }] })
       });
@@ -750,10 +848,10 @@ function scanAllVillagesFromSidebar(){
       return true;
     }
 
-    const OASIS_WINDOW_MS = 6 * 60 * 60 * 1000; // 6h
-    const OASIS_MIN_CAV = 5;
+    const OASIS_WINDOW_MS = 3 * 60 * 60 * 1000; // 3h
+    const OASIS_MIN_CAV = 10;
     const OASIS_MIN_INF = 10;
-    const OASIS_MAX_SENDS_PER_CYCLE = 5; // límite total de oasis por ciclo (MIN + PLAN)
+    const OASIS_MAX_SENDS_PER_CYCLE = 50; // límite total de oasis por ciclo (MIN + PLAN)
 
 
   async function planForList(flId, gqlData){
@@ -846,7 +944,7 @@ function scanAllVillagesFromSidebar(){
           const wasRed   = iconIsRed(sl, stLocal);
 
           if (within6h && wasRed){
-            console.log(ts(), "[cand][oasis] within 6h & last red → skip", sl.id, { ageMs });
+            console.log(ts(), "[cand][oasis] within 3h & last red → skip", sl.id, { ageMs });
             continue;
           }
 
@@ -932,12 +1030,6 @@ function scanAllVillagesFromSidebar(){
         const poolUnits = budget;
 
         if (sl.__oasisMode === 'MIN'){
-          // ✅ Guard: respetar cupo global por ciclo
-          if (oasisSendsUsed >= OASIS_MAX_SENDS_PER_CYCLE){
-            console.log(ts(), "[proc][oasis][MIN] reached max sends this cycle → skip", slotId, { max: OASIS_MAX_SENDS_PER_CYCLE });
-            continue;
-          }
-
           // 5 cav si hay, si no 10 inf
           const cav = chooseCavUnit(poolUnits, wl);
           let pack = null;
@@ -965,8 +1057,6 @@ function scanAllVillagesFromSidebar(){
             lastGoodTs: now()
           });
           chosenTargets.push(slotId);
-
-          oasisSendsUsed += 1;
           continue;
         }
 
@@ -979,7 +1069,7 @@ function scanAllVillagesFromSidebar(){
 
           let plan = null;
           try{
-            plan = await tscm.utils.planOasisRaidNoHero(didOwner, vmX, vmY, sl?.target?.x|0, sl?.target?.y|0, poolUnits, wl, /*lossTarget*/ 0.01);
+            plan = await tscm.utils.planOasisRaidNoHero(didOwner, vmX, vmY, sl?.target?.x|0, sl?.target?.y|0, poolUnits, wl, 0.01);
           }catch(e){
             console.log(ts(), "[proc][oasis][PLAN] planner error", slotId, e);
             continue;
@@ -1278,6 +1368,10 @@ function scanAllVillagesFromSidebar(){
       LOG('error','GQL fail',e);
       return;
     }
+
+    await preNavigateMaybe();
+
+
     if (gql?.weekendWarrior?.isNightTruce){
       LOG('warn','NightTruce=TRUE → skip',{flId});
       return;
@@ -1316,11 +1410,14 @@ function scanAllVillagesFromSidebar(){
     if (plan.updates?.length){
       const ok = await putUpdateSlots(flId, plan.updates);
       if (!ok){ LOG('warn','PUT failed; continue to SEND'); }
-      await sleep(200);
+      await humanDelay();
+
     }
 
     // SEND
     await sendTargets(flId, chosen);
+
+    await humanDelay();
 
     // Schedule bursts
     try{
@@ -1330,7 +1427,7 @@ function scanAllVillagesFromSidebar(){
         scheduleBurst(flId, b.slotId, b.bursts|0, dmin, dmax);
       }
     }catch(e){ LOG('warn','Burst schedule error',e); }
-    
+
   }
 
   function schedule(flId, targetTs){
@@ -1342,7 +1439,7 @@ function scanAllVillagesFromSidebar(){
       if (!running || !amIMaster()) return;
       if (st.inflight){ schedule(flId, now()+1000); return; }
       // ❗ Anti-doble corrida pegada: respeta cooldown corto
-      if (now() < (st.cooldownUntil||0)) { 
+      if (now() < (st.cooldownUntil||0)) {
         schedule(flId, st.cooldownUntil + 50);
         return;
       }
@@ -1355,7 +1452,7 @@ function scanAllVillagesFromSidebar(){
         // ❗ aplica cooldown de 2.5s para evitar re-entrada del “kick”
         st.cooldownUntil = now() + 2500;
         setKickGuardFor(flId, 2500);
-        const next = now() + getIntervalMs(flId) + Math.floor(Math.random()*15000);
+        const next = now() + randDelayWithin(flId);
         schedule(flId, next);
       }
     }, delay);
@@ -1443,8 +1540,8 @@ function scanAllVillagesFromSidebar(){
             const st = ensure(flId);
             if (st.t) continue; // ya programado
             const saved = nm?.[flId] || 0;
-            const next = (saved===0) ? (nowTs + 50) :(saved>nowTs ? saved : (nowTs + getIntervalMs(flId) + Math.floor(Math.random()*15000)));
-            schedule(flId, next);
+            const next = (saved === 0) ? (nowTs + 50)
+                      : (saved > nowTs ? saved : (nowTs + randDelayWithin(flId)));            schedule(flId, next);
         }
         startUiTick();
         // UI refresco (si no existe)
@@ -1644,15 +1741,15 @@ function scanAllVillagesFromSidebar(){
           <div class="cfg-inputs">
             <div>Icon2 decay (h): <input type="number" id="io-cfg-decay" min="1" style="width:60px"></div>
             <div>Burst N: <input type="number" id="io-cfg-bn" min="0" style="width:60px"></div>
-            <div>Burst delay s (min-max): 
-              <input type="number" id="io-cfg-bmin" min="1" style="width:60px"> – 
+            <div>Burst delay s (min-max):
+              <input type="number" id="io-cfg-bmin" min="1" style="width:60px"> –
               <input type="number" id="io-cfg-bmax" min="1" style="width:60px">
             </div>
             <div>Overload: max running <input type="number" id="io-over-max" min="1" style="width:60px"> (default 2)</div>
             <div>Overload: window min <input type="number" id="io-over-win" min="1" style="width:60px"> (default 10)</div>
             <div>Reserve troops at home (%): <input type="number" id="io-cfg-reserve" min="0" max="100" style="width:60px"></div>
           </div>
-        
+
           <div class="section">
             <div class="sec-h">Whitelist de tropas</div>
             <div id="io-wl" class="wl-grid"></div>
@@ -1764,7 +1861,7 @@ function scanAllVillagesFromSidebar(){
 
 
   function hardReset(){
-    // Limpia todo lo tuyo  
+    // Limpia todo lo tuyo
     [
       KEY_FL_RAW, KEY_HISTORY, KEY_AUTOSEND, KEY_NEXTSEND, KEY_INTERVALS,
       KEY_SLOT_STATE, KEY_STATS, KEY_SELECTED_MODE, KEY_SELECTED_IDS,
@@ -1953,7 +2050,7 @@ function scanAllVillagesFromSidebar(){
             for (const id of ids){
                 const st = ensure(id);
                 if (st.t) clearTimeout(st.t);
-                const next = now() + ms + Math.floor(Math.random()*15000);
+                const next = now() + randDelayWithin(id);
                 schedule(id, next);
             }
         }
@@ -2022,17 +2119,23 @@ function scanAllVillagesFromSidebar(){
         // refresco visual siempre
         startUiTick()
 
-        // si ya somos master, procesamos first pass y programamos; si no, bootstrap al ganar master
         if (amIMaster()){
-            for (let i=0;i<ids.length;i++){
-                const flId = ids[i];
-                try{ await processList(flId); }catch(e){ LOG('error','first pass error',e); }
-                const next = now() + getIntervalMs(flId) + Math.floor(Math.random()*15000);
-                schedule(flId, next);
-                await sleep(1200);
+          const allMs = getIntervalMs(ids[0]); // ya seteaste el mismo intervalo a todas
+
+          for (const flId of ids){
+            try { 
+              await processList(flId);               // todas corren de inmediato
+            } catch (e) { 
+              LOG('error','first pass error', e); 
             }
-            hasBootstrapped = true;
+            const next = now() + randDelayWithin(flId);
+            schedule(flId, next);
+            await humanDelayOnce();                  // pequeño respiro para no saturar
+          }
+          hasBootstrapped = true;
+
         }
+
 
         LOG('log','Auto ON',{lists: ids.length, dry: isDry(), master: amIMaster()});
     };

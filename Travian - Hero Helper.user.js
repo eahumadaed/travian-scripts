@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper
-// @version      1.8.3
+// @version      1.8.4
 // @namespace    tscm
-// @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim.
+// @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim, auto-balanceo de recursos y auto-asignación de puntos libres.
 // @include      *://*.travian.*
 // @include      *://*/*.travian.*
 // @exclude      *://*.travian.*/report*
@@ -31,8 +31,9 @@
     const ONE_HOUR_MS = 1 * 60 * 60 * 1000;
     const FAST_SYNC_MAX_AGE = 30 * 1000;
     const ATTR_POST_THROTTLE = 5000;
-    const AUTO_MIN_INTERVAL_MS = 20 * 60 * 1000;
-
+    // Intervalos para el balanceo automático (MODIFICADO)
+    const NORMAL_INTERVAL_MS = 20 * 60 * 1000; // 20 minutos para modo normal
+    const TROOP_INTERVAL_MS  = 10 * 60 * 1000; // 10 minutos para modo tropa
     const NEAR_SPREAD_THRESHOLD = 200;
     const CROP_LAST = true;
     const CROP_FLOOR = 1000;
@@ -114,6 +115,67 @@
         equites_imperatoris: "Equites Imperatoris",
         equites_caesaris: "Equites Caesaris",
     },
+    };
+
+    const BUILDING_DATA = {
+        ALL_TRIBES_SHARED: {
+            academy:       { baseCost: [220, 160, 90, 40],   k: 1.26 },
+            smithy:        { baseCost: [180, 200, 450, 160],  k: 1.26 },
+            workshop:      { baseCost: [400, 500, 350, 80],   k: 1.26 },
+            townHall:      { baseCost: [1250, 1110, 820, 420], k: 1.26 },
+            residence:     { baseCost: [650, 400, 550, 280],  k: 1.26 },
+            palace:        { baseCost: [550, 800, 750, 250],  k: 1.26 },
+            treasury:      { baseCost: [1750, 1950, 1530, 520], k: 1.26 },
+            tradeOffice:   { baseCost: [1400, 1330, 1200, 400],k: 1.26 },
+            rallyPoint:    { baseCost: [110, 160, 90, 70],    k: 1.26 },
+        },
+
+
+        // El valor 'k' no se usará en esta versión simple, pero lo guardamos.
+        ROMANS: {
+            warehouse:      { baseCost: [130, 160, 90, 40],  k: 1.28 },
+            granary:        { baseCost: [120, 150, 90, 60],  k: 1.28 },
+            mainBuilding:   { baseCost: [70, 40, 60, 20],    k: 1.26 },
+            marketplace:    { baseCost: [100, 100, 70, 40],  k: 1.26 },
+            barracks:       { baseCost: [210, 140, 260, 120], k: 1.26 },
+            horseDrinkingTrough: { baseCost: [780, 420, 660, 540], k: 1.26 },
+
+        },
+        GAUL: {
+            warehouse:      { baseCost: [130, 160, 90, 40],  k: 1.28 },
+            granary:        { baseCost: [120, 150, 90, 60],  k: 1.28 },
+            mainBuilding:   { baseCost: [55, 70, 50, 30],    k: 1.26 },
+            marketplace:    { baseCost: [100, 100, 70, 40],  k: 1.26 },
+            barracks:       { baseCost: [200, 180, 250, 90],  k: 1.26 },
+            trapper: { baseCost: [80, 120, 60, 60], k: 1.26 },
+
+        },
+        TEUTONS: {
+            warehouse:      { baseCost: [130, 160, 90, 40],  k: 1.28 },
+            granary:        { baseCost: [120, 150, 90, 60],  k: 1.28 },
+            mainBuilding:   { baseCost: [55, 45, 65, 20],    k: 1.26 },
+            marketplace:    { baseCost: [100, 100, 70, 40],  k: 1.26 },
+            barracks:       { baseCost: [260, 140, 220, 100], k: 1.26 },
+            brewery: { baseCost: [1480, 870, 1160, 1290], k: 1.26 },
+
+        }
+    };
+
+    const BUILDING_LABELS = {
+        warehouse: "Almacén",
+        granary: "Granero",
+        mainBuilding: "Ed. Principal",
+        marketplace: "Mercado",
+        barracks: "Cuartel",
+        academy: "Academia",
+        smithy: "Herrería",
+        workshop: "Taller",
+        townHall: "Ayuntamiento",
+        residence: "Residencia",
+        palace: "Palacio",
+        treasury: "Tesoro",
+        tradeOffice: "Oficina de comercio",
+        rallyPoint: "Plaza de reuniones",
     };
 
     function getBalanceStrategy() {
@@ -402,7 +464,7 @@
             setBalanceStrategy(ui.strategy.value);
             setRotationState({}); // reset rotador
             await repaint();
-            await autoBalanceIfNeeded("strategy-change");
+            await autoBalanceIfNeeded("strategy-change",true);
         });
 
         applyMinimized(true, true); // minimizado al inicio
@@ -421,31 +483,34 @@
 
         const opts = [{ value: "normal", text: "Estrategia: Normal" }];
         const units = getUnitsForTribe(tribe) || [];
-        logI("[populateStrategyByTribe] Units found:", units.length, units);
-
         if (units.length) {
             units.forEach(u => opts.push({ value: u.key, text: u.label }));
         }
 
-        // Render opciones
-        ui.strategy.innerHTML = opts.map(o => `<option value="${o.value}">${o.text}</option>`).join("");
+        // --- NUEVO: Lógica para añadir Edificios ---
+        const tribeBuildings = BUILDING_DATA[tribe] || {};
+        if (Object.keys(tribeBuildings).length > 0) {
+            opts.push({ value: "disabled", text: "--- Edificios (Balance Proporcional) ---", disabled: true }); // Separador
+            for (const key in tribeBuildings) {
+                opts.push({ value: `BUILDING.${key}`, text: BUILDING_LABELS[key] || key });
+            }
+        }
+        // --- Fin de la sección nueva ---
+
+        ui.strategy.innerHTML = opts.map(o => 
+            `<option value="${o.value}" ${o.disabled ? 'disabled' : ''}>${o.text}</option>`
+        ).join("");
         logI("[populateStrategyByTribe] Options rendered:", opts.map(o => o.value));
 
-        // Validar estrategia guardada
         const cur = getBalanceStrategy();
         const exists = !!opts.find(o => o.value === cur);
-        logI("[populateStrategyByTribe] Current saved strategy:", cur, "existsInList?", exists);
 
         if (cur !== "normal" && !exists) {
             setBalanceStrategy("normal");
-            logI("[populateStrategyByTribe] Strategy reset to 'normal' (mismatch with tribe options).");
         }
 
-        const finalVal = getBalanceStrategy();
-        ui.strategy.value = finalVal;
-        logI("[populateStrategyByTribe] Final select value set to:", finalVal);
+        ui.strategy.value = getBalanceStrategy();
     }
-
 
     function applyMinimized(min, silent = false) { const st = loadState(); st.minimized = !!min; saveState(st); ui.container.classList.toggle("maximized", !st.minimized); if (!silent) logI(st.minimized ? "Minimizado" : "Expandido"); }
     function onToggleMinimized() { applyMinimized(!loadState().minimized); }
@@ -507,7 +572,7 @@
         logI("❌ Fallback final: usando stockBar"); return tscm.utils.parseStockBar();
     }
     // (autoBalanceIfNeeded) — con rotación por unidad + veto de cereal por piso (CROP_FLOOR)
-    async function autoBalanceIfNeeded(source = "unknown") {
+    async function autoBalanceIfNeeded(source = "unknown", force = false) { // AÑADIDO el parámetro "force"
         const st = loadState();
         if (!st.autoMode) return;
 
@@ -516,81 +581,95 @@
         if (!data) return;
 
         const stock = await readStockSmart(data);
-        const strategy = getBalanceStrategy(); // "normal" o "TRIBE.unitKey" (p.ej. "TEUTONS.clubswinger")
+        const strategy = getBalanceStrategy(); // "normal" o "TRIBE.unitKey"
 
         let target;
 
         if (strategy === "normal") {
-            // === Modo clásico ===
             target = decideTargetResource(stock);
         } else {
-            // === Modo plantilla por unidad (dinámico por tribu) ===
-            const [tribeKey, unitKey] = (strategy || "").split(".");
-            const costs = UNIT_COSTS_ALL?.[tribeKey]?.[unitKey];
+            // === Modo plantilla por Tropa O Edificio (Lógica Simplificada) ===
+            let costs = null; // Variable para guardar los costos del objetivo
 
+            if (strategy.startsWith("BUILDING.")) {
+                const buildingKey = strategy.split('.')[1];
+                const tribe = (tscm.utils.getCurrentTribe() || "GAUL").toUpperCase();
+                
+                // ANTES:
+                // const buildingInfo = BUILDING_DATA[tribe]?.[buildingKey];
+
+                // AHORA (con el bypass):
+                const buildingInfo = BUILDING_DATA[tribe]?.[buildingKey] || BUILDING_DATA.ALL_TRIBES_SHARED?.[buildingKey];
+
+                if (buildingInfo) {
+                    costs = buildingInfo.baseCost;
+                    logI(`Usando receta de Nivel 1 para ${buildingKey}:`, costs);
+                }
+
+            } else {
+                // --- Estrategia de Tropa (Lógica existente) ---
+                const [tribeKey, unitKey] = (strategy || "").split(".");
+                costs = UNIT_COSTS_ALL?.[tribeKey]?.[unitKey];
+            }
+            
+            // El resto de la lógica es la misma para ambos casos
             if (!costs) {
-            // fallback si no hay costos
-            target = decideTargetResource(stock);
+                target = decideTargetResource(stock);
             } else {
-            // A) Orden de limitación actual (menor stock/costo primero)
-            const order = computeLimitationOrder(stock, costs); // p.ej. [1,2,3,4]
+                const order = computeLimitationOrder(stock, costs);
+                let rot = getRotationState();
+                const nowMs = Date.now();
+                const rotationInterval = TROOP_INTERVAL_MS; // Usamos el intervalo rápido
 
-            // B) Cargar/normalizar rotación
-            let rot = getRotationState(); // {strategy, order:[..], idx, ts}
-            const nowMs = Date.now();
+                const sameStrategy = rot.strategy === strategy;
+                const sameOrder = sameStrategy && JSON.stringify(rot.order) === JSON.stringify(order);
 
-            const sameStrategy = rot.strategy === strategy;
-            const sameOrder = sameStrategy && JSON.stringify(rot.order) === JSON.stringify(order);
-
-            if (!sameOrder) {
-                // Reinicia rotación cuando cambia la estrategia o cambia el orden “duro”
-                rot = { strategy, order, idx: 0, ts: nowMs };
-            } else {
-                // Avanza solo si pasó tu ventana mínima (histeresis de 20 min)
-                const canAdvance = (nowMs - (rot.ts || 0)) >= AUTO_MIN_INTERVAL_MS;
-                if (canAdvance) {
-                rot.idx = ((rot.idx | 0) + 1) % order.length;
-                rot.ts = nowMs;
+                if (!sameOrder || !sameStrategy) {
+                    rot = { strategy, order, idx: 0, ts: nowMs };
+                } else {
+                    const canAdvance = (nowMs - (rot.ts || 0)) >= rotationInterval;
+                    if (canAdvance || force) {
+                        rot.idx = ((rot.idx | 0) + 1) % order.length;
+                        rot.ts = nowMs;
+                    }
                 }
-            }
-
-            target = order[rot.idx | 0];
-
-            // C) Sugerencia aplicada: Veto de cereal si ya está sobre el piso (CROP_FLOOR)
-            //    Si apunta a cereal (4) pero tenemos cereal cómodo, salta al siguiente no-cereal
-            if (target === 4 && (stock.crop | 0) >= CROP_FLOOR) {
-                const nonCrop = rot.order.filter(r => r !== 4);
-                if (nonCrop.length) {
-                // Reutiliza el mismo índice para mantener ritmo, pero sobre los no-cereal
-                target = nonCrop[rot.idx % nonCrop.length] || nonCrop[0];
+                target = order[rot.idx | 0];
+                if (target === 4 && (stock.crop | 0) >= CROP_FLOOR) {
+                    const nonCrop = rot.order.filter(r => r !== 4);
+                    if (nonCrop.length) {
+                        target = nonCrop[rot.idx % nonCrop.length] || nonCrop[0];
+                    }
                 }
-            }
-
-            setRotationState(rot);
+                setRotationState(rot);
             }
         }
 
-        // 2) Si ya estamos en ese recurso, nada que hacer
         const current = currentProductionType(data);
-        if (target === current) return;
+        if (target === current && !force) return; // MODIFICADO: No salir si se fuerza
 
-        // 3) Histeresis global (anti “flapping” fuera del modo plantilla)
+        // 3) Histeresis global (anti “flapping”)
         const lastChange = st.cooldowns?.lastAutoChange || 0;
         const elapsed = Date.now() - lastChange;
-        if (elapsed < AUTO_MIN_INTERVAL_MS) {
-            logI(`⏳ Histeresis global: ${Math.round(elapsed / 60000)} min (< ${Math.round(AUTO_MIN_INTERVAL_MS/60000)}).`);
+        
+        // MODIFICADO: Elegir el intervalo correcto para la histeresis
+        const requiredInterval = (strategy === "normal") ? NORMAL_INTERVAL_MS : TROOP_INTERVAL_MS;
+
+        if (!force && elapsed < requiredInterval) { // MODIFICADO: Permitir si se fuerza
+            logI(`⏳ Histeresis: ${Math.round(elapsed / 60000)} min (< ${Math.round(requiredInterval/60000)}).`);
             return;
         }
 
         // 4) Aplicar cambio
-        logI(`⚖️ Balanceando de r${current} a r${target} (src=${source}, strategy=${strategy})`);
-        const post = await postAttributesAlwaysBoth(target, currentAttackBehaviour(data));
-        if (post.ok) {
-            const s2 = loadState();
-            s2.cooldowns.lastAutoChange = Date.now();
-            saveState(s2);
-            await fetchHeroJson(true, "auto-post-confirm");
-            await repaint();
+        if (target !== current || force) { // MODIFICADO: Condición para aplicar
+            logI(`⚖️ Balanceando de r${current} a r${target} (src=${source}, strategy=${strategy}, force=${force})`);
+            const post = await postAttributesAlwaysBoth(target, currentAttackBehaviour(data));
+            if (post.ok) {
+                const s2 = loadState();
+                s2.cooldowns.lastAutoChange = Date.now();
+                saveState(s2);
+                await fetchHeroJson(true, "auto-post-confirm");
+                await repaint();
+            }
         }
     }
 
@@ -714,7 +793,7 @@
         setTimeout(autoAssignFreePointsIfAny, 1200);
         setTimeout(maybeClaimDailyAndReload, 1500);
         await autoBalanceIfNeeded("init");
-        setInterval(() => autoBalanceIfNeeded("timer"), AUTO_MIN_INTERVAL_MS + 5000);
+        setInterval(() => autoBalanceIfNeeded("timer"), NORMAL_INTERVAL_MS);
 
         setInterval(keepAlive, 12 * 60 * 1000); //SISTEMA ANTICAIDAS
         setupIdleAutoReload();

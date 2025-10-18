@@ -918,7 +918,7 @@
     // --- Config cache ---
     const OASIS_CACHE_PREFIX = "tscm_oasis_cache_v3";  // global por oasis
     const AREA_SCAN_PREFIX   = "tscm_area_scan_v1";    // por centro (aldea x|y)
-    const TTL_MS  = 6 * 60 * 60 * 1000; // 6 horas
+    const TTL_MS  = 3 * 60 * 60 * 1000; // 3 horas
     const MIN_WAVE = 10;
 
     const _ts = () => new Date().toISOString().replace('T',' ').replace('Z','');

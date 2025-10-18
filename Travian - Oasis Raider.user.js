@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.0.9
+// @version      2.1.1
 // @namespace    tscm
 // @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
 // @match        https://*.travian.com/*
@@ -83,6 +83,13 @@
   };
   const MIN_WAVE = 5;
 
+  // Escalado automático (solo si SWEEP disabled)
+  const AUTO = {
+    SCALE_STEP: 5,
+    SCALE_MAX_DIST: 40
+  };
+
+
   // Mapas auxiliares para parser de animales
 
 
@@ -141,6 +148,7 @@
   const getDryRun            = ()=> !!USER_CONFIG.dryRun;
   const getMaxAnimals      = ()=> Math.max(0, +(USER_CONFIG.maxAnimals ?? 0));
   const getSweepEnabled = () => (USER_CONFIG.sweepEnabled ?? CFG.SWEEP.ENABLED);
+  const worldRadius = () => (USER_CONFIG.worldRadius ?? 200);
 
   // Oasis vacíos config
   function getEmptyCfg(){
@@ -191,7 +199,20 @@
 
 
 
-  const distFields = (a,b)=> Math.hypot(a.x-b.x,a.y-b.y);
+  function distFields(a, b) {
+    // Radio de mundo: por defecto 200  => coordenadas -200..+200
+    // Si tu server usa otro (p.ej. 400), podés setear USER_CONFIG.worldRadius = 400
+    const R = +(USER_CONFIG.worldRadius ?? 200);
+    const W = (R * 2) + 1;                     // ancho total (ej: 401)
+
+    const dxRaw = Math.abs(a.x - b.x);
+    const dyRaw = Math.abs(a.y - b.y);
+
+    const dx = Math.min(dxRaw, W - dxRaw);     // wrap en X
+    const dy = Math.min(dyRaw, W - dyRaw);     // wrap en Y
+
+    return Math.hypot(dx, dy);
+  }
   function decodeHtmlEntities(raw){ if(!raw) return ""; const t=document.createElement("textarea"); t.innerHTML=String(raw); return t.value; }
 
   function tribeUA(tribe){
@@ -273,6 +294,18 @@
       warn("checkHeroStatus:", e);
       return { available:false, health:100, move:null };
     }
+  }
+
+  function queueRemaining(){
+    const qW = STATE.queueWith  || [];
+    const qE = STATE.queueEmpty || [];
+    let r = 0;
+    for (const o of qW) if (o && !o.attacked) r++;
+    for (const o of qE) if (o && !o.attacked) r++;
+    return r;
+  }
+  function logScale(from,to,found){
+    log(`[AUTO-SCALE] dist ${from}→${to} | withAnimals=${found}`);
   }
 
   /******************************************************************
@@ -1103,54 +1136,100 @@
   /******************************************************************
    * Build de colas
    ******************************************************************/
-  async function buildOasisQueue(force=false){
-    if(!force && ((STATE.queueWith?.length||0)+(STATE.queueEmpty?.length||0))>0 && STATE.stats.remaining>0) return;
+  async function buildOasisQueue(force=false, opts={}){
+    // Si ya hay cola y quedan objetivos, no reconstruyas (a menos que 'force')
+    if(!force && queueRemaining() > 0) return;
+
+    // Asegura aldea activa
     if(!STATE.currentVillage.id || force){
-      if(!await updateActiveVillage()){ error("buildOasisQueue: no aldea activa."); return; }
+      if(!await updateActiveVillage()){
+        error("buildOasisQueue: no aldea activa.");
+        return;
+      }
     }
-    const center=STATE.currentVillage, sortMethod=getSortMethod(), distLimit=getDistance();
-    const maxAnimals = getMaxAnimals(); // NUEVO
 
+    const center = STATE.currentVillage;
+    const sortMethod = getSortMethod();
+    const baseDist  = getDistance();
+    const maxAnimals = getMaxAnimals();
+    const allowScale = (opts.allowScale ?? (!getSweepEnabled())); // SOLO escala si SWEEP está OFF
+
+    // 1 sola llamada al mapa, luego filtramos por distancia en memoria
     const mp = await fetchMapTiles(center.x, center.y, 3);
-    const tiles = (mp.tiles||[]).map(t=>{
-      const obj = {
-        x: t.position.x, y: t.position.y,
-        did: t.did, title: t.title, text: t.text,
-        dist: distFields(t.position, center),
-      };
-      return obj;
-    });
+    const tiles = (mp.tiles||[]).map(t => ({
+      x: t.position.x, y: t.position.y,
+      did: t.did, title: t.title, text: t.text,
+      dist: distFields(t.position, center),
+    })).filter(isUnoccupiedOasisFromMap)
+      .map(t => ({
+        x:t.x, y:t.y, dist:t.dist, did:t.did,
+        animals: parseAnimalsFromMapText(t.text||""),
+        attacked:false
+      }));
 
-    const all = tiles.filter(isUnoccupiedOasisFromMap).map(t=>({
-      x:t.x, y:t.y, dist:t.dist, did:t.did,
-      animals: parseAnimalsFromMapText(t.text||""),
-      attacked:false
-    })).filter(o=>o.dist<=distLimit);
+    // Distancias a probar: baseDist, luego +5 hasta 40
+    const dists = [baseDist];
+    if (allowScale) {
+      const to = Math.max(baseDist, AUTO.SCALE_MAX_DIST);
+      for (let d = baseDist + AUTO.SCALE_STEP; d <= to; d += AUTO.SCALE_STEP) dists.push(d);
+    }
 
-    let  withAnimals = all.filter(o=>o.animals>0);
-    const empty       = all.filter(o=>o.animals<=0);
-      if (maxAnimals > 0) {
-          withAnimals = withAnimals.filter(o => o.animals <= maxAnimals);
-      }
+    let chosenWith = [], chosenEmpty = [], chosenDist = baseDist;
+
+    for (const d of dists){
+      let withAnimals = tiles.filter(o => o.dist <= d && o.animals > 0);
+      let empties     = tiles.filter(o => o.dist <= d && o.animals <= 0);
+
+      if (maxAnimals > 0) withAnimals = withAnimals.filter(o => o.animals <= maxAnimals);
+
+      // orden
       if (sortMethod === 'efficiency') {
-          withAnimals.sort((a,b)=> (b.animals/(b.dist||.1)) - (a.animals/(a.dist||.1)) || a.dist-b.dist);
-      } else if (sortMethod === 'animalsAsc') { // NUEVO: Menos animales
-          withAnimals.sort((a,b)=> (a.animals - b.animals) || (a.dist - b.dist));
-      } else { // 'animals' (por defecto: Más animales)
-          withAnimals.sort((a,b)=> (b.animals - a.animals) || (a.dist - b.dist));
+        withAnimals.sort((a,b)=> (b.animals/(b.dist||.1)) - (a.animals/(a.dist||.1)) || a.dist-b.dist);
+      } else if (sortMethod === 'animalsAsc') {
+        withAnimals.sort((a,b)=> (a.animals - b.animals) || (a.dist - b.dist));
+      } else {
+        withAnimals.sort((a,b)=> (b.animals - a.animals) || (a.dist - b.dist));
+      }
+      empties.sort((a,b)=> a.dist - b.dist);
+
+      // elegimos
+      const takeWith  = withAnimals.slice(0, CFG.QUEUE_SIZE);
+      const takeEmpty = empties.slice(0, CFG.QUEUE_SIZE);
+
+      logScale(baseDist, d, takeWith.length);
+
+      // Si encontramos con animales, nos quedamos aquí
+      if (takeWith.length > 0) {
+        chosenWith = takeWith;
+        chosenEmpty = takeEmpty;
+        chosenDist = d;
+        break;
       }
 
-    empty.sort((a,b)=> a.dist - b.dist);
+      // Si no hay con animales y NO estamos escalando (o ya llegamos al máx), al menos deja vacíos por UI
+      if (!allowScale || d === dists[dists.length - 1]) {
+        chosenWith = [];
+        chosenEmpty = takeEmpty;
+        chosenDist = d;
+      }
+    }
 
-    STATE.queueWith = withAnimals.slice(0, CFG.QUEUE_SIZE);
-    STATE.queueEmpty= empty.slice(0, CFG.QUEUE_SIZE);
-    STATE.idxWith = -1; STATE.idxEmpty = -1;
+    STATE.queueWith   = chosenWith;
+    STATE.queueEmpty  = chosenEmpty;
+    STATE.idxWith     = -1;
+    STATE.idxEmpty    = -1;
 
-    const total = STATE.queueWith.length + STATE.queueEmpty.length;
+    const total = (STATE.queueWith.length + STATE.queueEmpty.length)|0;
     STATE.stats = { withAnimals: STATE.queueWith.length, empty: STATE.queueEmpty.length, attacked:0, remaining:total };
-    STATE.currentIndex=-1; STATE.lastTarget=null;
+    STATE.lastTarget = null;
     saveState(STATE);
     uiRender();
+
+    if (STATE.queueWith.length === 0) {
+      warn(`[AUTO-SCALE] No hay oasis con animales hasta ${chosenDist}.`);
+    } else {
+      log(`[AUTO-SCALE] Usando distancia ${chosenDist} (encontrados ${STATE.queueWith.length} con animales).`);
+    }
   }
 
   /******************************************************************
@@ -1560,6 +1639,16 @@
 
   async function trySendTo(oasis){
     const { x,y } = oasis||{};
+    // Chequeo rápido: si el snapshot ya dice 0, salta sin abrir RP
+    if (oasis && (oasis.animals|0) === 0) {
+      warn(`[WITH] Snapshot 0 animales en (${x}|${y}) → skip rápido`);
+      oasis.attacked = true;
+      STATE.stats.remaining = Math.max(0, (STATE.stats.remaining||0) - 1);
+      saveState(STATE); uiRender();
+      scheduleNext(1000, "snapshot 0 animals");
+      return false;
+    }
+
     const heroStatus = await checkHeroStatus();
     const stopHp=getStopHp();
 
@@ -1956,10 +2045,20 @@
     if (!STATE.running || RUN_LOCK) return;
     RUN_LOCK = true;
     try {
-      // 1) Preparación de colas si están vacías
-      if (((STATE.queueWith?.length||0) + (STATE.queueEmpty?.length||0)) === 0 || STATE.stats.remaining === 0) {
-        await buildOasisQueue(true);
+
+      if (queueRemaining() === 0) {
+        await buildOasisQueue(true, { allowScale: !getSweepEnabled() });
+        if (queueRemaining() === 0) {
+          // no hay nada ni escalando → espera y reintenta
+          scheduleNext(getRetryMs(), "no candidates after rebuild");
+          return;
+        }
       }
+
+      // 1) Preparación de colas si están vacías
+    // if (((STATE.queueWith?.length||0) + (STATE.queueEmpty?.length||0)) === 0 || STATE.stats.remaining === 0) {
+    //   await buildOasisQueue(true);
+    // }
 
       // 2) Decisión de acción
       const heroStatus = await checkHeroStatus();
@@ -2003,6 +2102,11 @@
           if (i>=0 && i<qW.length) {
             STATE.idxWith = i; saveState(STATE); uiRender();
             await trySendTo(qW[i]);                   // <-- aquí haces el POST real
+            if (queueRemaining() === 0 && !getSweepEnabled()) {
+              await buildOasisQueue(true, { allowScale: true });
+              // no forces el schedule acá; main loop decide el próximo acto en el tick
+            }
+
             return scheduleNext(1000, "sent with");   // agenda próximo ciclo
           } else {
             return scheduleNext(1000, "no target with");
@@ -2015,6 +2119,10 @@
           if (i>=0 && i<qE.length) {
             STATE.idxEmpty = i; saveState(STATE); uiRender();
             await trySendEmpty(qE[i]);                // <-- POST real para vacíos
+            if (queueRemaining() === 0 && !getSweepEnabled()) {
+              await buildOasisQueue(true, { allowScale: true });
+              // no forces el schedule acá; main loop decide el próximo acto en el tick
+            }
             return scheduleNext(1000, "sent empty");
           } else {
             return scheduleNext(1000, "no target empty");
@@ -2139,7 +2247,7 @@
    * Init
    ******************************************************************/
   (async function init(){
-    log("INIT Oasis Raider v2.0.8");
+    log("INIT Oasis Raider v2.1.0");
     ensureSidebar();
     if(STATE.running){
       if(!STATE.currentVillage.id) await updateActiveVillage();
