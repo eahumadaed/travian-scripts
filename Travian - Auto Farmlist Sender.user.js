@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.23
+// @version       2.1.24
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -136,7 +136,10 @@
   const KEY_CFG_OVER_WINMIN     = KEY_ROOT + 'cfg_over_winmin';    // int min (default 10)
   const KEY_BUDGET_POOL_PREFIX = KEY_ROOT + 'budget_pool_v2_'; // por aldea: budget_pool_v2_<did>
   const BUDGET_POOL_TTL_MS = 90*1000;
-
+  const OASIS_WINDOW_MS = 3 * 60 * 60 * 1000; // 3h
+  const OASIS_MIN_CAV = 15;
+  const OASIS_MIN_INF = 20;
+  const OASIS_MAX_SENDS_PER_CYCLE = 100; // límite total de oasis por ciclo (MIN + PLAN)
 
   const NET_BUCKET = { cap: 6, // máx 6 op en 10s
                      winMs: 10000,
@@ -866,10 +869,7 @@ function scanAllVillagesFromSidebar(){
       return true;
     }
 
-    const OASIS_WINDOW_MS = 3 * 60 * 60 * 1000; // 3h
-    const OASIS_MIN_CAV = 10;
-    const OASIS_MIN_INF = 10;
-    const OASIS_MAX_SENDS_PER_CYCLE = 50; // límite total de oasis por ciclo (MIN + PLAN)
+
 
 
   async function planForList(flId, gqlData){
@@ -974,6 +974,7 @@ function scanAllVillagesFromSidebar(){
           sl.__dist = dist(vmLocal.x, vmLocal.y, sl?.target?.x|0, sl?.target?.y|0);
           sl.__neverAttacked = !everAttacked(sl, stLocal, history);
           sl.__isRunning = sl.isRunning;
+          sl.__curIcon = curIcon;
           candidates.push(sl);
           continue;
         }
@@ -1050,12 +1051,14 @@ function scanAllVillagesFromSidebar(){
         if (sl.__oasisMode === 'MIN'){
           // 5 cav si hay, si no 10 inf
           const cav = chooseCavUnit(poolUnits, wl);
-          let pack = null;
-          if (cav){ pack = { [cav]: OASIS_MIN_CAV }; }
-          else {
-            const inf = chooseInfUnit(poolUnits, wl);
-            if (inf) pack = { [inf]: OASIS_MIN_INF };
-          }
+          const inf = cav ? null : chooseInfUnit(poolUnits, wl);
+
+          const pack = cav ? { [cav]: (lastIcon === 1 ? 5 : OASIS_MIN_CAV) } : (inf ? { [inf]: (lastIcon === 1 ? 5 : OASIS_MIN_INF) } : null);
+
+          
+
+
+
 
           if (!pack || !hasBudgetFor(pack, poolUnits)){
             console.log(ts(), "[proc][oasis][MIN] insufficient troops → HALT cycle", { pack, poolUnits });

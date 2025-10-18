@@ -208,15 +208,35 @@
 
         const U3X_TO_BEAST = {
             31:"Rat",32:"Spider",33:"Snake",34:"Bat",35:"Wild Boar",36:"Wolf",
-            37:"Bear",38:"Crocodile",39:"Tiger",40:"Elephant",40:"Elephants"
+            37:"Bear",38:"Crocodile",39:"Tiger",40:"Elephant"
         };
+        
         const NAME_TO_BEAST = {
-            "rat":"Rat","spider":"Spider","snake":"Snake","bat":"Bat","wild boar":"Wild Boar","boar":"Wild Boar",
-            "wolf":"Wolf","bear":"Bear","crocodile":"Crocodile","croco":"Crocodile","tiger":"Tiger","elephant":"Elephant","elephants":"Elephants",
-            // español
-            "rata":"Rat","araña":"Spider","serpiente":"Snake","murciélago":"Bat","jabalí":"Wild Boar",
-            "lobo":"Wolf","oso":"Bear","cocodrilo":"Crocodile","tigre":"Tiger","elefante":"Elephant","elefantes":"Elephants",
+            // English (singular / plural / aliases)
+            "rat":"Rat","rats":"Rat",
+            "spider":"Spider","spiders":"Spider",
+            "snake":"Snake","snakes":"Snake",
+            "bat":"Bat","bats":"Bat",
+            "wild boar":"Wild Boar","wild boars":"Wild Boar","boar":"Wild Boar","boars":"Wild Boar",
+            "wolf":"Wolf","wolves":"Wolf",
+            "bear":"Bear","bears":"Bear",
+            "crocodile":"Crocodile","crocodiles":"Crocodile","croco":"Crocodile","crocos":"Crocodile",
+            "tiger":"Tiger","tigers":"Tiger",
+            "elephant":"Elephant","elephants":"Elephant",
+
+            // Español (singular / plural, con y sin acentos)
+            "rata":"Rat","ratas":"Rat",
+            "araña":"Spider","arañas":"Spider","arana":"Spider","aranas":"Spider",
+            "serpiente":"Snake","serpientes":"Snake",
+            "murciélago":"Bat","murciélagos":"Bat","murcielago":"Bat","murcielagos":"Bat",
+            "jabalí":"Wild Boar","jabalíes":"Wild Boar","jabali":"Wild Boar","jabalies":"Wild Boar",
+            "lobo":"Wolf","lobos":"Wolf",
+            "oso":"Bear","osos":"Bear",
+            "cocodrilo":"Crocodile","cocodrilos":"Crocodile",
+            "tigre":"Tiger","tigres":"Tiger",
+            "elefante":"Elephant","elefantes":"Elephant"
         };
+
 
         const ANIMAL_CODE_BY_NAME = {
             "rat":"u31","spider":"u32","snake":"u33","bat":"u34","wild boar":"u35","boar":"u35",
@@ -251,59 +271,78 @@
             ROMAN:  { cav: ["t6"],           inf: ["t3","t1"] },
         };
 
-    async function fetchOasisDetails(x,y){
+        // --- fetchOasisDetails (fix u31..u40 + fallback robusto por texto) ---
+        async function fetchOasisDetails(x, y) {
         const xv = guessXVersion();
+        const stamp = () => new Date().toISOString().replace('T', ' ').replace('Z', '');
+        const log = (...a) => console.log(`[${stamp()}] [OasisFetch]`, ...a);
 
-        try{
-        const res = await fetch("/api/v1/map/tile-details", {
-            method:"POST", credentials:"include",
-            headers:{
-            "accept":"application/json, text/javascript, */*; q=0.01",
-            "content-type":"application/json; charset=UTF-8",
-            "x-requested-with":"XMLHttpRequest",
-            "x-version":xv
+        try {
+            const res = await fetch("/api/v1/map/tile-details", {
+            method: "POST",
+            credentials: "include",
+            headers: {
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "content-type": "application/json; charset=UTF-8",
+                "x-requested-with": "XMLHttpRequest",
+                "x-version": xv
             },
-            body: JSON.stringify({x,y})
-        });
-        if(!res.ok){ return { counts:{} }; }
-        const data = await res.json();
-        const html = data?.html || "";
-        const doc  = new DOMParser().parseFromString(html,"text/html");
-        const troopsTable = doc.querySelector('#map_details table#troop_info:not(.rep)');
-        if(!troopsTable) return { counts:{} };
+            body: JSON.stringify({ x, y })
+            });
 
-        const rows = troopsTable.querySelectorAll("tbody > tr");
-        const counts = {};
-        rows.forEach(tr=>{
-            const img = tr.querySelector("td.ico img") || tr.querySelector("td.ico i");
+            if (!res.ok) {
+            log(`HTTP ${res.status} @tile-details (${x}|${y})`);
+            return { counts: {} };
+            }
+
+            const data = await res.json();
+            const html = data?.html || "";
+            const doc  = new DOMParser().parseFromString(html, "text/html");
+
+            const troopsTable = doc.querySelector('#map_details table#troop_info:not(.rep)');
+            if (!troopsTable) {
+            log("troop_info not found (oasis vacío o sin bloque de tropas).");
+            return { counts: {} };
+            }
+
+            const rows = troopsTable.querySelectorAll("tbody > tr");
+            const counts = {};
+
+            rows.forEach(tr => {
+            const img   = tr.querySelector("td.ico img") || tr.querySelector("td.ico i");
             const valTd = tr.querySelector("td.val");
-            if(!img||!valTd) return;
+            if (!img || !valTd) return;
 
-            let code=null;
-            if(img.classList){
-            const uClass = Array.from(img.classList).find(c=>/^u3\d+$/.test(c));
-            if(uClass) code=parseInt(uClass.replace("u3",""),10);
+            // 1) Intento por clase CSS: u31..u39 o u40
+            let key = null;
+            if (img.classList) {
+                const uClass = Array.from(img.classList).find(c => /^u(?:3\d|40)$/.test(c));
+                if (uClass) key = "u" + uClass.replace(/^u/, "");  // -> "u31".."u40"
             }
-            let beast = code!=null ? U3X_TO_BEAST[code] : undefined;
 
-            if(!beast){
-            const byText = (img.getAttribute?.("title")||img.getAttribute?.("alt")||"").trim().toLowerCase();
-            const descTd = tr.querySelector("td.desc");
-            const descTx = (descTd?.textContent||"").trim().toLowerCase();
-            const key = (byText||descTx).replace(/\s+/g," ");
-            if(key){
-                for(const k of Object.keys(NAME_TO_BEAST)){ if(key.includes(k)){ beast=NAME_TO_BEAST[k]; break; } }
+            // 2) Fallback por texto (EN/ES, singular/plural, con/sin acento)
+            if (!key) {
+                const byAttr  = (img.getAttribute?.("title") || img.getAttribute?.("alt") || "").trim().toLowerCase();
+                const descTd  = tr.querySelector("td.desc");
+                const byDesc  = (descTd?.textContent || "").trim().toLowerCase();
+                const probe   = byAttr || byDesc;
+                key = normAnimalKey(probe); // -> "u31".."u40" o null
             }
-            }
-            const num = parseInt((valTd.textContent||"").replace(/[^\d]/g,""),10)||0;
-            if(!beast||!num) return;
-            counts[beast]=(counts[beast]||0)+num;
-        });
-        return { counts };
-        }catch(e){
-        return { counts:{} };
+
+            const num = parseInt((valTd.textContent || "").replace(/[^\d]/g, ""), 10) || 0;
+            if (!key || !num) return;
+
+            counts[key] = (counts[key] || 0) + num; // siempre en códigos "u31".. "u40"
+            });
+
+            log("parsed counts:", counts);
+            return { counts };
+        } catch (e) {
+            console.warn(`[${stamp()}] [OasisFetch] error:`, e);
+            return { counts: {} };
         }
-    }
+        }
+
 
         // Animales
     function normAnimalKey(k){
@@ -976,10 +1015,10 @@
     }
     function _parseCountsFromTileText(text){
         const counts = {};
-        const re = /class="unit\s+u3(\d+)"[\s\S]*?<span class="value[^>]*>\s*(\d+)\s*<\/span>/gi;
-        let m; while((m=re.exec(text||""))!==null){
-        const code = "u3" + String(parseInt(m[1],10));
-        counts[code] = (counts[code]||0) + (parseInt(m[2],10)||0);
+        const re = /class="unit\s+u(3\d|40)"[\s\S]*?<span class="value[^>]*>\s*(\d+)\s*<\/span>/gi;
+        let m; while ((m = re.exec(text || "")) !== null) {
+            const code = "u" + m[1];                       // "u31"..."u40"
+            counts[code] = (counts[code] || 0) + (parseInt(m[2], 10) || 0);
         }
         return counts;
     }
