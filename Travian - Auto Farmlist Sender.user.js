@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.20
+// @version       2.1.22
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -125,7 +125,7 @@
 
   const DEFAULT_INTERVAL_MS = 60*60*1000; // 1h
   const BURST_DEFAULT = { dmin:60, dmax:120, n:3 };
-  const ICON2_DECAY_H = 48;
+  const ICON2_DECAY_H = 4;
    // Distancia para elegir INF/CAV
   const DIST_INF_MAX = 15;
   const KEY_CFG_OVERLOAD = KEY_ROOT + 'cfg_overload';
@@ -207,7 +207,7 @@
     const p = Math.max(0, Math.min(1, Number(LS.get(KEY_CFG_PRENAV_PROB, 0.75))));
     if (Math.random() > p) return;
     try{
-      const url = '/build.php?gid=16&tt=99' + (Math.random() < 0.25 ? ('&cb=' + Date.now()%100000) : '');
+      const url = '/build.php?gid=16&tt=99';
       LOG('log','PreNav GET '+url);
       const ctl = new AbortController();
       const t = setTimeout(()=>ctl.abort(), 5000); // 5s cap
@@ -911,9 +911,9 @@ function scanAllVillagesFromSidebar(){
       const ttype = sl?.target?.type|0; // 0=aldea,1=capital,2=oasis ocupado,3=oasis libre
       const curIcon = parseInt(lr?.icon ?? st.lastIcon ?? -1, 10);
 
-      if (curIcon === 2 && (lr?.reportId && lr?.authKey)){
-        console.log(ts(), "[cand] icon2 → report", sl.id, { reportId: lr.reportId, authKey: lr.authKey, time: lr.time });
-      }
+      // if (curIcon === 2 && (lr?.reportId && lr?.authKey)){
+      //   console.log(ts(), "[cand] icon2 → report", sl.id, { reportId: lr.reportId, authKey: lr.authKey, time: lr.time });
+      // }
 
       try{
         // Oasis ocupado → jamás desde farmlist
@@ -955,7 +955,7 @@ function scanAllVillagesFromSidebar(){
           sl.__lastAttackTs = lastAttackTs(sl, stLocal) || 0;
           sl.__dist = dist(vmLocal.x, vmLocal.y, sl?.target?.x|0, sl?.target?.y|0);
           sl.__neverAttacked = !everAttacked(sl, stLocal, history);
-
+          sl.__isRunning = sl.isRunning;
           candidates.push(sl);
           continue;
         }
@@ -1062,6 +1062,11 @@ function scanAllVillagesFromSidebar(){
 
 
         if (sl.__oasisMode === 'PLAN'){
+          if(sl.__isRunning){
+            console.log(ts(), "[proc][oasis][PLAN] skip running slot", slotId);
+            continue;
+          }
+
           if (oasisSendsUsed >= OASIS_MAX_SENDS_PER_CYCLE){
             console.log(ts(), "[proc][oasis][PLAN] reached max sends this cycle → skip", slotId, { max: OASIS_MAX_SENDS_PER_CYCLE });
             continue;
@@ -1369,7 +1374,6 @@ function scanAllVillagesFromSidebar(){
       return;
     }
 
-    await preNavigateMaybe();
 
 
     if (gql?.weekendWarrior?.isNightTruce){
@@ -1446,6 +1450,7 @@ function scanAllVillagesFromSidebar(){
       try{
         st.inflight=true;
         st.lastRunTs = now();
+        await preNavigateMaybe();
         await processList(flId);
       } finally {
         st.inflight=false;
@@ -1868,7 +1873,8 @@ function scanAllVillagesFromSidebar(){
       KEY_DRYRUN, KEY_CFG_WHITELIST, KEY_CFG_FALLBACK, KEY_CFG_CROSS,
       KEY_CFG_ICON2DECAYH, KEY_CFG_BURST_DMIN, KEY_CFG_BURST_DMAX, KEY_CFG_BURST_N,
       KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN, KEY_MASTER,
-      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD,KEY_STATS_SEEN_REPORTS
+      KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD,KEY_STATS_SEEN_REPORTS,
+      "tscm_oasis_cache_v3","tscm_area_scan_v1"
     ].forEach(k=>LS.del(k));
 
     // Apaga timers, bursts, y UI
