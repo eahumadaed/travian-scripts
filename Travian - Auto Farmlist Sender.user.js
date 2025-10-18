@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace    tscm
-// @version       2.1.22
+// @version       2.1.23
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -659,18 +659,36 @@ function scanAllVillagesFromSidebar(){
   function statsSummaryHTML(){
     const s = getStats();
     const wk = weekKeyNow();
-    const map = s[wk]||{};
+    const map = s[wk] || {};
     const rows = [];
-    let grand=0;
-    Object.keys(map).filter(k=>!k.startsWith('_')).forEach(flId=>{
-      const n = map[flId].name || flId;
-      const t = map[flId].total|0;
-      grand += t;
-      rows.push(`<div>• [${flId}] ${escapeHTML(n)}: <b>${fmtRes(t)}</b></div>`);
-    });
-    const listHTML = rows.length? rows.join('') : `<div>Sin datos esta semana</div>`;
-    return `<div style="margin-top:4px">${listHTML}<div style="margin-top:6px;border-top:1px dashed #bbb;padding-top:6px">Total semanal: <b>${fmtRes(grand)}</b></div></div>`;
+    let grand = 0;
+
+    Object.keys(map)
+      .filter(k => !k.startsWith('_'))
+      .forEach(flId => {
+        const n = map[flId].name || flId;
+        const t = map[flId].total | 0;
+        grand += t;
+        rows.push(
+          `<div class="stat-row">
+            <span class="name">• [${flId}] ${escapeHTML(n)}</span>
+            <span class="val">${fmtRes(t)}</span>
+          </div>`
+        );
+      });
+
+    const listHTML = rows.length ? rows.join('') : `<div>Sin datos esta semana</div>`;
+
+    return `
+      <div style="margin-top:4px">
+        ${listHTML}
+        <div class="stat-row stat-total">
+          <span class="name">Total semanal</span>
+          <span class="val">${fmtRes(grand)}</span>
+        </div>
+      </div>`;
   }
+
   function fmtRes(v){
     if (v>=1_000_000_000) return (v/1_000_000_000).toFixed(2)+'B';
     if (v>=1_000_000) return (v/1_000_000).toFixed(2)+'M';
@@ -1694,8 +1712,6 @@ function scanAllVillagesFromSidebar(){
         </select>
         <button id="io-refresh" title="Recargar FL">↻</button>
         <button id="io-toggle">🚀 Start</button>
-        <button id="io-reset" title="Reset total">♻️ Reset</button>
-
       </div>
 
       <div id="io-selwrap">
@@ -1714,6 +1730,7 @@ function scanAllVillagesFromSidebar(){
           <option value="20">20m</option>
           <option value="120">2h</option>
         </select>
+        <button id="io-reset" title="Reset total">♻️ Reset</button>
         <label style="margin-left:auto">DryRun</label>
         <input type="checkbox" id="io-dry">
       </div>
@@ -1813,6 +1830,27 @@ function scanAllVillagesFromSidebar(){
       gap: 4px;
     }
 
+    #icononly-ui #io-count .count-row{
+      display:flex; align-items:center; justify-content:space-between; gap:8px;
+    }
+    #icononly-ui #io-count .count-row .name{
+      flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    #icononly-ui #io-count .count-row .left{
+      min-width:72px; text-align:right; font-variant-numeric:tabular-nums;
+    }
+    #icononly-ui #io-stats .stat-row{
+      display:flex; align-items:center; justify-content:space-between; gap:8px;
+    }
+    #icononly-ui #io-stats .stat-row .name{
+      flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    #icononly-ui #io-stats .stat-row .val{
+      min-width:72px; text-align:right; font-variant-numeric:tabular-nums;
+    }
+    #icononly-ui #io-stats .stat-total{
+      border-top:1px dashed #bbb; margin-top:6px; padding-top:6px; font-weight:600;
+    }
   `);
 
   // Expand/Collapse
@@ -1960,8 +1998,10 @@ function scanAllVillagesFromSidebar(){
     const html = ids.map(id=>{
       const left = Math.max(0,(next?.[id]||0)-now());
       const m = Math.floor(left/60000), s=Math.floor((left%60000)/1000);
-      return `<div>• ${escapeHTML(names[id]||String(id))}: ${m}m ${s}s</div>`;
-    }).join('') || `<div>Sin countdown</div>`;
+      return `<div class="count-row">
+                <span class="name">• ${escapeHTML(names[id]||String(id))}</span>
+                <span class="left">${m}m ${String(s).padStart(2,'0')}s</span>
+              </div>`;    }).join('') || `<div>Sin countdown</div>`;
     elCount.innerHTML = html;
 
     // NUEVO: si alguno llegó a 0, dispara ciclo inmediato

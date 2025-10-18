@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper
-// @version      1.8.4
+// @version      1.8.5
 // @namespace    tscm
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim, auto-balanceo de recursos y auto-asignación de puntos libres.
 // @include      *://*.travian.*
@@ -734,39 +734,39 @@
      * Se debe llamar una vez en init().
      */
     function setupIdleAutoReload() {
-    let lastActivity = Date.now();
+        let lastActivity = Date.now();
 
-    const markActivity = () => {
-        lastActivity = Date.now();
-        // console.debug(`[IdleReload] ${_nowStr()} activity ✓`);
-    };
-
-    // Eventos típicos de interacción del usuario
-    const events = ["click", "keydown", "mousemove", "scroll", "touchstart", "wheel", "focus"];
-    events.forEach(ev =>
-        window.addEventListener(ev, markActivity, { passive: true, capture: false })
-    );
-
-    // Al volver a la pestaña (de background a foreground) cuenta como actividad
-    document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) markActivity();
-    });
-
-    // Chequeo periódico (cada 30s) del tiempo ocioso
-    setInterval(() => {
-        const idle = Date.now() - lastActivity;
-        if (idle >= IDLE_RELOAD_MS) {
-        const isDorf1 = location.pathname.includes("/dorf1.php");
-        if (!isDorf1) {
-            console.log(`[IdleReload] ${_nowStr()} idle=${Math.round(idle/1000)}s → redirect /dorf1.php?reload=auto`);
-            location.assign("/dorf1.php?reload=auto");
-        } else {
-            // Ya estamos en dorf1.php → no recargamos; reseteamos el contador
-            console.log(`[IdleReload] ${_nowStr()} idle=${Math.round(idle/1000)}s, en dorf1.php → skip`);
+        const markActivity = () => {
             lastActivity = Date.now();
-        }
-        }
-    }, 30 * 1000);
+            // console.debug(`[IdleReload] ${_nowStr()} activity ✓`);
+        };
+
+        // Eventos típicos de interacción del usuario
+        const events = ["click", "keydown", "mousemove", "scroll", "touchstart", "wheel", "focus"];
+        events.forEach(ev =>
+            window.addEventListener(ev, markActivity, { passive: true, capture: false })
+        );
+
+        // Al volver a la pestaña (de background a foreground) cuenta como actividad
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) markActivity();
+        });
+
+        // Chequeo periódico (cada 30s) del tiempo ocioso
+        setInterval(() => {
+            const idle = Date.now() - lastActivity;
+            if (idle >= IDLE_RELOAD_MS) {
+            const isDorf1 = location.pathname.includes("/dorf1.php");
+            if (!isDorf1) {
+                console.log(`[IdleReload] ${_nowStr()} idle=${Math.round(idle/1000)}s → redirect /dorf1.php?reload=auto`);
+                location.assign("/dorf1.php?reload=auto");
+            } else {
+                // Ya estamos en dorf1.php → no recargamos; reseteamos el contador
+                console.log(`[IdleReload] ${_nowStr()} idle=${Math.round(idle/1000)}s, en dorf1.php → skip`);
+                lastActivity = Date.now();
+            }
+            }
+        }, 30 * 1000);
     }
 
 
@@ -796,7 +796,7 @@
         setInterval(() => autoBalanceIfNeeded("timer"), NORMAL_INTERVAL_MS);
 
         setInterval(keepAlive, 12 * 60 * 1000); //SISTEMA ANTICAIDAS
-        setupIdleAutoReload();
+        //setupIdleAutoReload();
     }
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", init); } else { init(); }
 

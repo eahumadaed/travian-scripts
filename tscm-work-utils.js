@@ -208,14 +208,14 @@
 
         const U3X_TO_BEAST = {
             31:"Rat",32:"Spider",33:"Snake",34:"Bat",35:"Wild Boar",36:"Wolf",
-            37:"Bear",38:"Crocodile",39:"Tiger",40:"Elephant"
+            37:"Bear",38:"Crocodile",39:"Tiger",40:"Elephant",40:"Elephants"
         };
         const NAME_TO_BEAST = {
             "rat":"Rat","spider":"Spider","snake":"Snake","bat":"Bat","wild boar":"Wild Boar","boar":"Wild Boar",
-            "wolf":"Wolf","bear":"Bear","crocodile":"Crocodile","croco":"Crocodile","tiger":"Tiger","elephant":"Elephant",
+            "wolf":"Wolf","bear":"Bear","crocodile":"Crocodile","croco":"Crocodile","tiger":"Tiger","elephant":"Elephant","elephants":"Elephants",
             // español
             "rata":"Rat","araña":"Spider","serpiente":"Snake","murciélago":"Bat","jabalí":"Wild Boar",
-            "lobo":"Wolf","oso":"Bear","cocodrilo":"Crocodile","tigre":"Tiger","elefante":"Elephant",
+            "lobo":"Wolf","oso":"Bear","cocodrilo":"Crocodile","tigre":"Tiger","elefante":"Elephant","elefantes":"Elephants",
         };
 
         const ANIMAL_CODE_BY_NAME = {
