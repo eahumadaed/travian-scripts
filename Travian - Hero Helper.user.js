@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🛡️ Travian Hero Helper
-// @version      1.8.5
+// @version      1.8.6
 // @namespace    tscm
 // @description  Modo oscuro, siempre minimizado al inicio, contador de refresh funcional. UI de Sidebar, lógica de caché de stock, auto-claim, auto-balanceo de recursos y auto-asignación de puntos libres.
 // @include      *://*.travian.*

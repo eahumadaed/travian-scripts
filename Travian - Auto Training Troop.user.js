@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐎 Auto Training Troop (Toolbox UI) — Travian
-// @version      2.0.8
+// @version      2.0.9
 // @description  [FIXED] UI rediseñada como toolbox lateral. Muestra próxima tropa en modo colapsado, expandible. Evita duplicados en build.php. Incluye botón "Entrenar ahora" (sin resetear contador) y estadísticas de tropas entrenadas por tarea.
 // @match        https://*.travian.com/*
 // @run-at       document-end
@@ -28,8 +28,8 @@
   const TICK_MS = 1000;
   const LOCK_TTL_MS = 25_000;
   const UID = crypto.getRandomValues(new Uint32Array(1))[0].toString(16);
-  const ALLOWED_GIDS = new Set(["19", "20", "21", "29"]);
-  const INTERVAL_OPTIONS = [5, 10, 15, 20, 30, 60];
+  const ALLOWED_GIDS = new Set(["19", "20", "21", "29","46"]);
+  const INTERVAL_OPTIONS = [5, 10, 15, 20, 30, 60, 120];
   const DELAY_MIN_S = 10;
   const DELAY_MAX_S = 20;
   const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
@@ -394,7 +394,7 @@ function makeVerticallyDraggable(handle, root) {
       const dueIn = g.paused && g.pausedAt ? Math.max(0, t.nextRun - g.pausedAt) : Math.max(0, t.nextRun - now);
       const isTrainable = t.enabled && !g.paused;
 
-      const gidLabel = ({ "19":"Barracks", "29":"Great Barracks", "20":"Stable", "21":"Workshop" })[t.gid] || `gid ${t.gid}`;
+      const gidLabel = ({ "19":"Barracks", "29":"Great Barracks", "20":"Stable", "21":"Workshop" ,"46":"Hospital"})[t.gid] || `gid ${t.gid}`;
 
       row.innerHTML = `
         <div style="display:flex; justify-content:space-between; gap:6px; flex-wrap:wrap;">
@@ -524,87 +524,156 @@ function makeVerticallyDraggable(handle, root) {
     });
   }
 
+  function computeMaxTrain(details, targetInput, troopId) {
+    let maxTrain = 0;
+    const tryPush = (v) => {
+      const n = parseInt(v, 10);
+      if (Number.isFinite(n) && n > 0) maxTrain = Math.max(maxTrain, n);
+    };
+
+    // 1) Atributos del input (algunos skins rellenan max/data-max)
+    if (targetInput) {
+      tryPush(targetInput.getAttribute("max"));
+      tryPush(targetInput.getAttribute("data-max"));
+      // por si el input es type="number"
+      tryPush(targetInput.max);
+    }
+
+    // 2) Botones/enlaces cercanos: texto numérico y .val(N) en el onclick
+    const clickables = details.querySelectorAll("a,button");
+    clickables.forEach((el) => {
+      const txt = (el.textContent || "").trim();
+      tryPush(txt); // si el texto es "5", suma
+      const oc = el.getAttribute("onclick") || "";
+      const m = oc.match(/\.val\((\d+)\)/);
+      if (m) tryPush(m[1]); // .val(N)
+      // a veces aparece tX en el onclick; intenta capturar "...t7...123"
+      if (troopId) {
+        const m2 = oc.match(new RegExp(`${troopId}[^\\d]*(\\d+)`));
+        if (m2) tryPush(m2[1]);
+      }
+    });
+
+    // 3) Algunos temas guardan límites en data-*
+    details.querySelectorAll("[data-value],[data-val],[data-max]").forEach((el) => {
+      tryPush(el.getAttribute("data-value"));
+      tryPush(el.getAttribute("data-val"));
+      tryPush(el.getAttribute("data-max"));
+    });
+
+    return maxTrain | 0;
+  }
 
 
   async function executeTraining(task) {
     const url = `/build.php?gid=${task.gid}&newdid=${task.did}`;
+    const isHospital = String(task.gid) === "46";
     let html = "";
     try {
       const r = await fetch(url, { credentials: "include" });
       html = await r.text();
-    } catch (e) { warn("GET build falló para la tarea:", task.id, e); return { success: false }; }
+    } catch (e) {
+      warn("GET build falló para la tarea:", task.id, e);
+      return { success: false };
+    }
 
     const doc = new DOMParser().parseFromString(html, "text/html");
-    const checksum = doc.querySelector('form[name="snd"] input[name="checksum"]')?.value;
-    if (!checksum) { warn("No se encontró checksum para la tarea:", task.id); return { success: false }; }
+    const sndForm = doc.querySelector('form[name="snd"]');
 
-    const inputs = Array.from(doc.querySelectorAll('form[name="snd"] input.text[name^="t"]'));
-    const targetInput = inputs.find(i => i.name === task.troopId);
-    if (!targetInput) { warn("No se encontró input para la tropa:", task.troopId); return { success: false }; }
-
-    let maxTrain = 0;
-    const details = targetInput.closest(".details") || doc;
-    // NUEVO: buscar anchors numéricos confiables dentro del bloque
-    const numericAnchors = Array.from(details.querySelectorAll('a'))
-      .map(a => parseInt((a.textContent || '').trim(), 10))
-      .filter(n => Number.isFinite(n) && n > 0);
-    if (numericAnchors.length) {
-      maxTrain = numericAnchors[numericAnchors.length - 1]; // usa el último "/ N"
-    }
-
-    // Fallback legacy (por si en algún skin no hay anchors numéricos):
-    if (!maxTrain) {
-      const maxLinkLegacy =
-        details.querySelector('.cta a[onclick*="document.snd"]') ||
-        details.querySelector("a[href^='#'][onclick*='(this.value,']");
-      if (maxLinkLegacy) {
-        const n = parseInt(maxLinkLegacy.textContent, 10);
-        if (Number.isFinite(n) && n > 0) maxTrain = n;
+    // Hospital sin formulario/cuadro -> no hay heridos para recuperar (no lo tratamos como error)
+    if (!sndForm) {
+      if (isHospital) {
+        log("Hospital: no hay cuadro de recuperación (sin heridos).");
+        return { success: false, trained: 0, reason: "no-wounded" };
       }
+      warn("No se encontró form 'snd' para la tarea:", task.id);
+      return { success: false };
     }
 
-    // ... viene de más arriba ...
+    const checksum = sndForm.querySelector('input[name="checksum"]')?.value;
+    if (!checksum) {
+      if (isHospital) {
+        log("Hospital: sin 'checksum' (probablemente sin heridos).");
+        return { success: false, trained: 0, reason: "no-wounded" };
+      }
+      warn("No se encontró checksum para la tarea:", task.id);
+      return { success: false };
+    }
+
+    const inputs = Array.from(sndForm.querySelectorAll('input.text[name^="t"]'));
+    if (!inputs.length) {
+      if (isHospital) {
+        log("Hospital: no hay inputs de tropas (sin heridos para recuperar).");
+        return { success: false, trained: 0, reason: "no-wounded" };
+      }
+      warn("No se encontraron inputs de tropas para la tarea:", task.id);
+      return { success: false };
+    }
+
+    const targetInput = inputs.find(i => i.name === task.troopId);
+    if (!targetInput) {
+      if (isHospital) {
+        log(`Hospital: no hay input para ${task.troopId} (sin heridos).`);
+        return { success: false, trained: 0, reason: "no-wounded" };
+      }
+      warn("No se encontró input para la tropa:", task.troopId);
+      return { success: false };
+    }
+
+    // ====== Cálculo robusto del máximo entrenable ======
+    const details = targetInput.closest(".details") || doc;
+    let maxTrain = computeMaxTrain(details, targetInput, task.troopId);
+
+    // Fallback legacy (si no logramos nada)
+    if (!maxTrain) {
+      const legacy = details.querySelector('.cta a[onclick*="document.snd"]')
+                || details.querySelector("a[href^='#'][onclick*='(this.value,']");
+      const n = parseInt(legacy?.textContent || "", 10);
+      if (Number.isFinite(n) && n > 0) maxTrain = n;
+    }
+
     if (maxTrain <= 0) {
-      log(`Sin recursos/cola (o no se detectó el máximo) para ${task.troopId} en did=${task.did}.`);
+      log(`Sin recursos/cola (o no se detectó máximo) para ${task.troopId} en did=${task.did}.`);
       return { success: false, trained: 0 };
     }
-    const hardMax = getHardMax();
-    const cap = Math.min(maxTrain, hardMax);
-    if (cap < 1) {
-      log(`Cap inválido para ${task.troopId}: cap=${cap}, maxTrain=${maxTrain}, hardMax=${hardMax}`);
-      return { success: false, trained: 0 };
-    }
-    const toTrain = randInt(1, cap);
+      const hardMax = getHardMax();
+      const cap = Math.min(maxTrain, hardMax);
+      if (cap < 1) {
+        log(`Cap inválido para ${task.troopId}: cap=${cap}, maxTrain=${maxTrain}, hardMax=${hardMax}`);
+        return { success: false, trained: 0 };
+      }
+      const toTrain = randInt(1, cap);
 
-    const body = new URLSearchParams();
-    body.append("action", "trainTroops");
-    body.append("checksum", checksum);
-    body.append("s", doc.querySelector('form[name="snd"] input[name="s"]')?.value || "1");
-    body.append("did", task.did);
-    inputs.forEach(inp => body.append(inp.name, inp.name === task.troopId ? String(toTrain) : "0"));
-    body.append("s1", "ok");
+      const body = new URLSearchParams();
+      const action = sndForm.querySelector('input[name="action"]')?.value || "trainTroops";
+      body.append("action", action);
+      body.append("checksum", checksum);
+      body.append("s", sndForm.querySelector('input[name="s"]')?.value || "1");
+      body.append("did", task.did);
+      inputs.forEach(inp => body.append(inp.name, inp.name === task.troopId ? String(toTrain) : "0"));
+      body.append("s1", "ok");
 
-    // --- Delays humanos entre GET y POST ---
-    const readMs = randInt(HUMAN_READ_MIN_MS, HUMAN_READ_MAX_MS);
-    log(`Delay humano previo (reading UI): ~${(readMs/1000).toFixed(1)}s`);
-    await sleepWithLock(readMs);
+      // --- Delays humanos entre GET y POST ---
+      const readMs = randInt(HUMAN_READ_MIN_MS, HUMAN_READ_MAX_MS);
+      log(`Delay humano previo (reading UI): ~${(readMs/1000).toFixed(1)}s`);
+      await sleepWithLock(readMs);
 
-    const clickMs = randInt(HUMAN_CLICK_MIN_MS, HUMAN_CLICK_MAX_MS);
-    log(`Delay humano previo (click submit): ~${(clickMs/1000).toFixed(1)}s`);
-    await sleepWithLock(clickMs);
-    // --- fin delays humanos ---
+      const clickMs = randInt(HUMAN_CLICK_MIN_MS, HUMAN_CLICK_MAX_MS);
+      log(`Delay humano previo (click submit): ~${(clickMs/1000).toFixed(1)}s`);
+      await sleepWithLock(clickMs);
+      // --- fin delays humanos ---
 
-    let ok = false;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: body.toString(),
-      });
-      const txt = await res.text();
-      ok = res.ok && /startTraining|trainUnits|name="snd"/.test(txt);
-    } catch (e) { err("POST falló:", e); ok = false; }
+      let ok = false;
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: body.toString(),
+        });
+        const txt = await res.text();
+        ok = res.ok && /startTraining|trainUnits|name="snd"/.test(txt);
+      } catch (e) { err("POST falló:", e); ok = false; }
 
 
     if (ok) {
