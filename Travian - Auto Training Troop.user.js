@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐎 Auto Training Troop (Toolbox UI) — Travian
-// @version      2.0.9
+// @version      2.1.0
 // @description  [FIXED] UI rediseñada como toolbox lateral. Muestra próxima tropa en modo colapsado, expandible. Evita duplicados en build.php. Incluye botón "Entrenar ahora" (sin resetear contador) y estadísticas de tropas entrenadas por tarea.
 // @match        https://*.travian.com/*
 // @run-at       document-end
@@ -692,10 +692,14 @@ function makeVerticallyDraggable(handle, root) {
 
   }
 
-  function reprogram(task) {
+function reprogram(task) {
     const tasks = readTasks(); const idx = tasks.findIndex(x => x.id === task.id);
     if (idx < 0) return;
-    tasks[idx].nextRun = nowEpoch() + tasks[idx].intervalMin * 60;
+    
+    // ✅ CAMBIO: Usamos randInt para que la próxima ejecución sea aleatoria
+    // dentro del rango de [1 segundo, intervalo_en_segundos]
+    tasks[idx].nextRun = nowEpoch() + randInt(1, tasks[idx].intervalMin * 60);
+    
     writeTasks(tasks);
     refreshCountdowns();
   }

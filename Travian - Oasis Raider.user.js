@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.1.1
+// @version      2.1.4
 // @namespace    tscm
-// @description  Raids inteligentes a oasis: colas duales (con animales/vacíos), scheduler con HUD del héroe, auto-equip configurable, UI completa y DRY-RUN.
+// @description   Raideo automático y optimizado de oasis libres. Oleadas inteligentes con héroe (vs animales) y limpieza eficiente de vacíos (colas separadas). Configurable, con gestión del héroe (auto-equip), modo Barrido, UI y Dry-Run.
+
 // @match        https://*.travian.com/*
 // @exclude      *://*.travian.*/karte.php*
 // @run-at       document-idle
@@ -31,20 +32,6 @@
     RETRY_MS: 20 * 60 * 1000,        // 20 min
     HERO_ATTACK_FALLBACK: 500,
 
-    // Unidades útiles de raideo por tribu (sin scouts/def)
-    UNITS_ATTACK: {
-      GAUL:   { t1: 15, t2: 60, t4: 90,  t5: 45,  t6: 130 },   // Falange, Espada, TT, Druida, Haeduan
-      TEUTON: { t1: 40, t2: 70, t3: 90, t6: 130 },// Porra, Lanza, Hacha, Cab. Teutón
-      ROMAN:  { t1: 20, t3: 80, t6: 140 },// Legionario, Imperano, Caesaris
-    },
-
-    // Prioridad por tribu (rápidas→lentas)
-    TRIBE_UNIT_GROUPS: {
-      GAUL:   { cav: ["t4","t6","t5"], inf: ["t2","t1"] },
-      TEUTON: { cav: ["t6"],           inf: ["t3","t1","t2"] },
-      ROMAN:  { cav: ["t6"],           inf: ["t3","t1"] },
-    },
-
     // Config de oasis vacíos
     EMPTY: {
       ENABLED: false,
@@ -60,28 +47,20 @@
       ENABLED: true,                 // puedes activarlo/desactivarlo si quieres
       DELAY_MIN_MS: 1000,            // pausa humana entre barridos
       DELAY_MAX_MS: 5000,
-      REPLENISH_THRESHOLD: 50,       // si el pool baja de esto, se repone al snapshot inicial
-      LOSS_WEIGHTS: { t1:1, t2:3, t4:8, t5:9, t6:14 } // “dolor” relativo por pérdidas (ajusta a gusto)
+      REPLENISH_THRESHOLD: 50       // si el pool baja de esto, se repone al snapshot inicial
     },
 
     // Prioridad: con héroe primero o vacíos primero
     PRIORITY_DEFAULT: "WITH_HERO",     // "WITH_HERO" | "EMPTY_FIRST"
   };
-
-  // Defensa Naturaleza (coherente y única tabla)
-  const NATURE_DEF = {
-    u31:{inf:25,  cav:20},   // Rat
-    u32:{inf:35,  cav:40},   // Spider
-    u33:{inf:40,  cav:60},   // Snake
-    u34:{inf:66,  cav:50},   // Bat
-    u35:{inf:70,  cav:33},   // Wild Boar
-    u36:{inf:80,  cav:70},   // Wolf
-    u37:{inf:140, cav:200},  // Bear
-    u38:{inf:380, cav:240},  // Crocodile
-    u39:{inf:440, cav:520},  // Tiger
-    u40:{inf:600, cav:440},  // Elephant
-  };
   const MIN_WAVE = 5;
+
+  const DEFAULT_LOSS_WEIGHTS = {
+            GAUL:   { t1:1, t2:3, t3:4, t4:7, t5:8, t6:12 },
+            TEUTON: { t1:2, t2:2, t3:4, t4:6, t5:7, t6:10 },
+            ROMAN:  { t1:2, t2:3, t3:5, t4:6, t5:7, t6:11 },
+        };
+
 
   // Escalado automático (solo si SWEEP disabled)
   const AUTO = {
@@ -132,6 +111,10 @@
     };
   }
   let STATE = Object.assign(defaultState(), loadState());
+  // --- NUEVAS LÍNEAS PARA CACHE HUD ---
+  let heroHudCache = { ts: 0, data: null };
+  const HUD_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos
+  // --- FIN NUEVAS LÍNEAS ---
 
   function loadUserConfig(){
     try{ const raw=localStorage.getItem(LS.USER_CFG); return raw?JSON.parse(raw):{}; }catch(e){ return {}; }
@@ -216,12 +199,12 @@
   function decodeHtmlEntities(raw){ if(!raw) return ""; const t=document.createElement("textarea"); t.innerHTML=String(raw); return t.value; }
 
   function tribeUA(tribe){
-    const BASE = CFG.UNITS_ATTACK || {};
+    const BASE = tscm.utils.UNITS_ATTACK || {};
     return (BASE[tribe] || BASE.GAUL || {});
   }
 
   function tribeOrder(tribe){
-    const G = CFG.TRIBE_UNIT_GROUPS || {};
+    const G = tscm.utils.TRIBE_UNIT_GROUPS || {};
     return (G[tribe] || G.GAUL || { cav:["t4","t6","t5"], inf:["t2","t1"] });
   }
 
@@ -231,7 +214,7 @@
     for(const [k,cntRaw] of Object.entries(oasisCounts||{})){
       const cnt=+cntRaw||0;
       const code=tscm.utils.normAnimalKey(k);
-      const row=code?NATURE_DEF[code]:null;
+      const row=code?tscm.utils.NATURE_DEF[code]:null;
       if(!row) continue;
       Dinf += (row.inf + PAD) * cnt;
       Dcav += (row.cav + PAD) * cnt;
@@ -279,22 +262,39 @@
   }
 
   async function checkHeroStatus(){
-    try{
-      const res = await fetch("/api/v1/hero/dataForHUD", { method:"GET", credentials:"include",
-        headers:{ "accept":"application/json", "x-requested-with":"XMLHttpRequest" }});
-      if(!res.ok) throw new Error(`HUD HTTP ${res.status}`);
-      const data = await res.json();
-      const running = !!(data.statusInlineIcon && data.statusInlineIcon.includes("heroRunning"));
-      const available = !running;
-      const health = parseInt(data.health,10);
-      const rawHUD = data.heroButtonTitle || data.heroStatusTitle || "";
-      const move = extractHeroMoveInfoFromHUD(rawHUD); // {dir,secs} o null
-      return { available, health, move };
-    }catch(e){
-      warn("checkHeroStatus:", e);
-      return { available:false, health:100, move:null };
+      // --- INICIO: LÓGICA DE CACHE ---
+      const now = Date.now();
+      if (now - heroHudCache.ts < HUD_CACHE_TTL_MS && heroHudCache.data) {
+          // log("[HUD Cache] Using cached data."); // Descomenta para debug
+          return heroHudCache.data;
+      }
+      // --- FIN: LÓGICA DE CACHE ---
+
+      try{
+        log("[HUD Cache] Fetching fresh HUD data..."); // Log para saber cuándo pide datos nuevos
+        const res = await fetch("/api/v1/hero/dataForHUD", { method:"GET", credentials:"include",
+          headers:{ "accept":"application/json", "x-requested-with":"XMLHttpRequest" }});
+        if(!res.ok) throw new Error(`HUD HTTP ${res.status}`);
+        const data = await res.json();
+        const running = !!(data.statusInlineIcon && data.statusInlineIcon.includes("heroRunning"));
+        const available = !running;
+        const health = parseInt(data.health,10);
+        const rawHUD = data.heroButtonTitle || data.heroStatusTitle || "";
+        const move = extractHeroMoveInfoFromHUD(rawHUD); // {dir,secs} o null
+
+        const result = { available, health, move }; // <-- Guarda el resultado a retornar
+
+        // --- INICIO: ACTUALIZAR CACHE ---
+        heroHudCache = { ts: now, data: result };
+        // --- FIN: ACTUALIZAR CACHE ---
+
+        return result; // <-- Retorna el resultado guardado
+      }catch(e){
+        warn("checkHeroStatus:", e);
+        // En caso de error, NO actualizamos caché, retornamos default
+        return { available:false, health:100, move:null };
+      }
     }
-  }
 
   function queueRemaining(){
     const qW = STATE.queueWith  || [];
@@ -1203,7 +1203,7 @@
         chosenWith = takeWith;
         chosenEmpty = takeEmpty;
         chosenDist = d;
-        break;
+        //break;
       }
 
       // Si no hay con animales y NO estamos escalando (o ya llegamos al máx), al menos deja vacíos por UI
@@ -1349,17 +1349,57 @@
 
       const equippedId = eqRight.length ? eqRight[0].id : null;
 
-      STATE.heroInv = { fetchedAt: Date.now(), rightHand, equippedId };
+      // --- MODIFICACIÓN AQUÍ ---
+      // Guardamos la lista COMPLETA de equipados y las armas de mano derecha
+      STATE.heroInv = {
+          fetchedAt: Date.now(),
+          rightHand: rightHand,      // Solo armas mano derecha (para selectores)
+          equippedId: equippedId,    // ID del arma equipada en mano derecha
+          itemsEquipped: itemsEquipped // <-- AÑADIMOS la lista completa de equipados
+      };
+      // --- FIN MODIFICACIÓN ---
+
       saveState(STATE);
       renderWeaponSelectors(); // refresca UI
       return STATE.heroInv;
     }catch(e){
       console.warn("fetchHeroInventory:", e);
-      STATE.heroInv = { fetchedAt:Date.now(), rightHand:[], equippedId:null };
+      // --- MODIFICACIÓN AQUÍ (para consistencia) ---
+      STATE.heroInv = { fetchedAt:Date.now(), rightHand:[], equippedId:null, itemsEquipped:[] }; // <-- Añadido itemsEquipped vacío
+      // --- FIN MODIFICACIÓN ---
       saveState(STATE);
       renderWeaponSelectors();
       return STATE.heroInv;
     }
+  }
+
+  // NUEVA FUNCIÓN para leer el bonus del mapa equipado
+  async function getHeroSpeedBonus() {
+    // Asegura que el inventario esté cargado (o lo carga si no lo está)
+    // Damos un TTL corto aquí también, por si acaso (ej. 5 min)
+    if (!STATE.heroInv?.fetchedAt || (Date.now() - STATE.heroInv.fetchedAt > 5 * 60 * 1000)) {
+        log("[Bonus] Inventory stale, fetching...");
+        await fetchHeroInventory(); // Asume que fetchHeroInventory está disponible globalmente vía utils
+    }
+
+    const itemsEquipped = STATE.heroInv?.itemsEquipped || [];
+    // Busca el ítem equipado en la mano izquierda (slot del mapa)
+    const mapItem = itemsEquipped.find(it => it.slot === "leftHand");
+
+    if (mapItem && mapItem.attributes && mapItem.attributes.length > 0) {
+        const effectDesc = mapItem.attributes[0].effectDescription || "";
+        // Extrae el número del string: "&#x202d;&plus;&#x202d;30&#x202c;&#37;&#x202c; return speed" -> 30
+        const bonusMatch = effectDesc.match(/(\d+)%/);
+        if (bonusMatch && bonusMatch[1]) {
+            const percentage = parseInt(bonusMatch[1], 10);
+            if (Number.isFinite(percentage)) {
+                log(`[Bonus] Found map: ${mapItem.name}, Bonus: ${percentage}%`);
+                return percentage / 100.0; // Devuelve como decimal (ej. 0.30)
+            }
+        }
+    }
+    log("[Bonus] No map bonus found or map not equipped.");
+    return 0; // Default: 0% bonus si no se encuentra mapa
   }
 
   function renderWeaponSelectors(){
@@ -1614,10 +1654,6 @@
   /******************************************************************
    * Con héroe: envío
    ******************************************************************/
-  function setNextByRoundTrip(goSec){
-    const rtMs=(goSec * (2 - CFG.HERO_RETURN_SPEED_BONUS) + CFG.EXTRA_BUFFER_SEC) * 1000;
-    scheduleNext(rtMs, `roundTrip ${goSec}s`);
-  }
   function scheduleNext(ms, reason=""){
     STATE.nextAttemptEpoch = Date.now() + ms;
     saveState(STATE); uiTick();
@@ -1757,7 +1793,21 @@
       const goSec = parseTravelSecondsFromPreview(preview);
       oasis.attacked=true;
       STATE.lastTarget={x,y};
-      if(goSec){ setNextByRoundTrip(goSec); STATE.heroReturnEpoch = Date.now() + (goSec*(2-CFG.HERO_RETURN_SPEED_BONUS)+CFG.EXTRA_BUFFER_SEC)*1000; saveState(STATE); }
+      if(goSec){
+        // --- INICIO: CÁLCULO CON BONO REAL ---
+        const currentHeroBonus = await getHeroSpeedBonus(); // Obtiene el bono actual (ej. 0.30)
+        // Calcula tiempo de ida y vuelta + buffer, usando el bono real
+        const rtMs = (goSec * (2 - currentHeroBonus) + CFG.EXTRA_BUFFER_SEC) * 1000;
+
+        // Programa el próximo intento usando el tiempo calculado
+        scheduleNext(rtMs, `roundTrip ${goSec}s with ${Math.round(currentHeroBonus*100)}% bonus`);
+
+        // Actualiza el 'heroReturnEpoch' con el tiempo calculado correcto
+        STATE.heroReturnEpoch = Date.now() + rtMs;
+        saveState(STATE);
+        log(`[Bonus] Calculated return time: ${Math.round(rtMs/1000)}s using ${Math.round(currentHeroBonus*100)}% bonus.`);
+        // --- FIN: CÁLCULO CON BONO REAL ---
+      }
       // Si prioridad WITH_HERO y vacíos enabled → tick temprano para empezar vacíos
       const ec=getEmptyCfg();
       if(getPriorityMode()==="WITH_HERO" && ec.enabled){
@@ -1778,11 +1828,11 @@
     saveState(STATE);
     uiRender();
 
-    if(goSec){
-      setNextByRoundTrip(goSec);
-      STATE.heroReturnEpoch = Date.now() + (goSec*(2-CFG.HERO_RETURN_SPEED_BONUS)+CFG.EXTRA_BUFFER_SEC)*1000;
-      saveState(STATE);
-    }
+    // if(goSec){
+    //   //setNextByRoundTrip(goSec);
+    //   STATE.heroReturnEpoch = Date.now() + (goSec*(2-CFG.HERO_RETURN_SPEED_BONUS)+CFG.EXTRA_BUFFER_SEC)*1000;
+    //   saveState(STATE);
+    // }
 
     // Tras mandar héroe, habilita arranque de vacíos en prioridad WITH_HERO
     const ec=getEmptyCfg();
@@ -1806,9 +1856,10 @@
       let availableInitial = await getAvailableTroopsSnapshotFor(snapForRP.x, snapForRP.y);
       let availablePool    = { ...availableInitial };
 
-      const allowedUnits = getSelectedUnits((tscm.utils.getCurrentTribe()||"GAUL").toUpperCase());
+      const t=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
+      const allowedUnits = getSelectedUnits(t);
       const lossTarget   = getLossTarget();
-      const lossWeights  = CFG.SWEEP.LOSS_WEIGHTS || { t1:1, t2:3, t4:8, t5:9, t6:14 };
+      const lossWeights  = Object.assign({}, DEFAULT_LOSS_WEIGHTS[t] || {});
 
       for (const o of candidates){
         if (!getSweepEnabled()) break;
@@ -2247,7 +2298,6 @@
    * Init
    ******************************************************************/
   (async function init(){
-    log("INIT Oasis Raider v2.1.0");
     ensureSidebar();
     if(STATE.running){
       if(!STATE.currentVillage.id) await updateActiveVillage();

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
-// @namespace    tscm
-// @version       2.1.24
-// @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h.
+// @namespace     tscm
+// @version       2.1.26  // <--- Incrementé la versión
+// @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h. Estrategia de prioridad configurable. Configuración de Oasis.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
 // @exclude       *://support.travian.*
@@ -10,11 +10,10 @@
 // @exclude       *://*.travian.*/report*
 // @exclude       *://*.travian.*/karte.php*
 // @grant         GM_addStyle
-// @grant        unsafeWindow
-// @updateURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
-// @downloadURL https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
-// @require      https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
-
+// @grant         unsafeWindow
+// @updateURL     https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
+// @downloadURL   https://github.com/eahumadaed/travian-scripts/raw/refs/heads/main/Travian%20-%20Auto%20Farmlist%20Sender.user.js
+// @require       https://raw.githubusercontent.com/eahumadaed/travian-scripts/refs/heads/main/tscm-work-utils.js
 // ==/UserScript==
 
 
@@ -99,24 +98,24 @@
   const KEY_ROOT            = 'tscm_iconbot_';
   const KEY_CFG_WORLDSIZE   = KEY_ROOT + 'cfg_world_size'; // total de casillas en un eje: 401 o 801
   const KEY_FL_RAW          = KEY_ROOT + 'farmlist_raw';
-  const KEY_HISTORY         = KEY_ROOT + 'send_history';      // {slotId: lastSentEpoch}
+  const KEY_HISTORY         = KEY_ROOT + 'send_history';     // {slotId: lastSentEpoch}
   const KEY_AUTOSEND        = KEY_ROOT + 'autosend';
-  const KEY_NEXTSEND        = KEY_ROOT + 'nextsend';          // { flId: ts }
-  const KEY_INTERVALS       = KEY_ROOT + 'intervals';         // { flId: ms }
-  const KEY_SLOT_STATE      = KEY_ROOT + 'slot_state';        // { slotId: {...} }
-  const KEY_STATS           = KEY_ROOT + 'stats';             // { weekKey: { flId: { name, total, perSlotTs:{slotId: lastTs} } } }
+  const KEY_NEXTSEND        = KEY_ROOT + 'nextsend';         // { flId: ts }
+  const KEY_INTERVALS       = KEY_ROOT + 'intervals';        // { flId: ms }
+  const KEY_SLOT_STATE      = KEY_ROOT + 'slot_state';       // { slotId: {...} }
+  const KEY_STATS           = KEY_ROOT + 'stats';            // { weekKey: { flId: { name, total, perSlotTs:{slotId: lastTs} } } }
   const KEY_UI_POSY         = KEY_ROOT + 'ui_pos_y';
-  const KEY_SELECTED_MODE   = KEY_ROOT + 'sel_mode';          // "ALL" | "CUSTOM"
-  const KEY_SELECTED_IDS    = KEY_ROOT + 'sel_ids';           // [ids]
+  const KEY_SELECTED_MODE   = KEY_ROOT + 'sel_mode';         // "ALL" | "CUSTOM"
+  const KEY_SELECTED_IDS    = KEY_ROOT + 'sel_ids';          // [ids]
   const KEY_DRYRUN          = KEY_ROOT + 'dryrun';
-  const KEY_CFG_WHITELIST   = KEY_ROOT + 'cfg_whitelist';     // { t1:true, ..., t10:true }
+  const KEY_CFG_WHITELIST   = KEY_ROOT + 'cfg_whitelist';    // { t1:true, ..., t10:true }
   const KEY_CFG_FALLBACK    = KEY_ROOT + 'cfg_allowFallback'; // bool (same-group)
   const KEY_CFG_CROSS       = KEY_ROOT + 'cfg_allowCrossGroupFallback'; // bool
   const KEY_CFG_ICON2DECAYH = KEY_ROOT + 'cfg_icon2DecayH';   // int hours
   const KEY_CFG_BURST_DMIN  = KEY_ROOT + 'cfg_burst_delay_min'; // seconds
   const KEY_CFG_BURST_DMAX  = KEY_ROOT + 'cfg_burst_delay_max'; // seconds
-  const KEY_CFG_BURST_N     = KEY_ROOT + 'cfg_burst_n';         // int
-  const KEY_MASTER          = KEY_ROOT + 'master';             // { id, ts }
+  const KEY_CFG_BURST_N     = KEY_ROOT + 'cfg_burst_n';       // int
+  const KEY_MASTER          = KEY_ROOT + 'master';           // { id, ts }
   const KEY_KICK_GUARD = KEY_ROOT + 'kick_guard'; // { flId: tsUntil }
   const KEY_STATS_SEEN_REPORTS = KEY_ROOT + 'stats_seen_reports'; // Set-like: { "45210267": true, ... }
   const KEY_CFG_PRENAV_PROB = KEY_ROOT + 'cfg_prenav_prob'; // 0..1
@@ -134,16 +133,20 @@
   const KEY_VILLAGES = KEY_ROOT + 'villages_xy'; // { did: {x,y}, ... }
   const KEY_CFG_OVER_MAX        = KEY_ROOT + 'cfg_over_max';       // int (default 2)
   const KEY_CFG_OVER_WINMIN     = KEY_ROOT + 'cfg_over_winmin';    // int min (default 10)
+  const KEY_CFG_PRIO_MODE       = KEY_ROOT + 'cfg_prio_mode';
+  // --- INICIO: NUEVAS CLAVES PARA OASIS ---
+  const KEY_CFG_OASIS_WIN_H     = KEY_ROOT + 'cfg_oasis_win_h';     // int horas (para 'MIN' mode)
+  const KEY_CFG_OASIS_MIN_CAV   = KEY_ROOT + 'cfg_oasis_min_cav';   // int
+  const KEY_CFG_OASIS_MIN_INF   = KEY_ROOT + 'cfg_oasis_min_inf';   // int
+  const KEY_CFG_OASIS_MAX_CYCLE = KEY_ROOT + 'cfg_oasis_max_cycle'; // int
+  // --- FIN: NUEVAS CLAVES PARA OASIS ---
   const KEY_BUDGET_POOL_PREFIX = KEY_ROOT + 'budget_pool_v2_'; // por aldea: budget_pool_v2_<did>
   const BUDGET_POOL_TTL_MS = 90*1000;
-  const OASIS_WINDOW_MS = 3 * 60 * 60 * 1000; // 3h
-  const OASIS_MIN_CAV = 15;
-  const OASIS_MIN_INF = 20;
-  const OASIS_MAX_SENDS_PER_CYCLE = 100; // límite total de oasis por ciclo (MIN + PLAN)
+
 
   const NET_BUCKET = { cap: 6, // máx 6 op en 10s
-                     winMs: 10000,
-                     ts: [] };
+                       winMs: 10000,
+                       ts: [] };
 
   async function netGuard(){
     const nowTs = Date.now();
@@ -163,7 +166,13 @@
   if (LS.get(KEY_CFG_PRENAV_PROB) == null) LS.set(KEY_CFG_PRENAV_PROB, 0.75); // 75% de los ciclos
   if (LS.get(KEY_CFG_DELAY_MIN)   == null) LS.set(KEY_CFG_DELAY_MIN,  450);   // 0.45s
   if (LS.get(KEY_CFG_DELAY_MAX)   == null) LS.set(KEY_CFG_DELAY_MAX,  1500);  // 1.5s
-
+  if (LS.get(KEY_CFG_PRIO_MODE)   == null) LS.set(KEY_CFG_PRIO_MODE, 'EXPLOIT');
+  // --- INICIO: DEFAULTS PARA OASIS ---
+  if (LS.get(KEY_CFG_OASIS_WIN_H)   == null) LS.set(KEY_CFG_OASIS_WIN_H, 1);    // 1 hora
+  if (LS.get(KEY_CFG_OASIS_MIN_CAV) == null) LS.set(KEY_CFG_OASIS_MIN_CAV, 15);
+  if (LS.get(KEY_CFG_OASIS_MIN_INF) == null) LS.set(KEY_CFG_OASIS_MIN_INF, 20);
+  if (LS.get(KEY_CFG_OASIS_MAX_CYCLE) == null) LS.set(KEY_CFG_OASIS_MAX_CYCLE, 100);
+  // --- FIN: DEFAULTS PARA OASIS ---
 
   function getKickGuard(){ return LS.get(KEY_KICK_GUARD, {}) || {}; }
   function setKickGuard(m){ LS.set(KEY_KICK_GUARD, m); }
@@ -249,10 +258,10 @@
 function stripBidiAndJunk(txt){
   // Reemplaza el minus unicode y elimina marcadores bidi + paréntesis/pipes/espacios raros
   return txt
-    .replace(/\u2212/g, "-")                                 // "−" → "-"
+    .replace(/\u2212/g, "-")                          // "−" → "-"
     .replace(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g, "") // quita bidi marks
-    .replace(/[()|]/g, "")                                    // quita paréntesis y pipe
-    .replace(/\s+/g, "")                                      // quita espacios/nbsp
+    .replace(/[()|]/g, "")                             // quita paréntesis y pipe
+    .replace(/\s+/g, "")                              // quita espacios/nbsp
 }
 
 function scanAllVillagesFromSidebar(){
@@ -306,8 +315,8 @@ function scanAllVillagesFromSidebar(){
   // ───────────────────────────────────────────────────────────────────
    const TRIBE_UNIT_GROUPS = {
     GAUL:   { cav: ["t4","t6","t5"], inf: ["t2","t1"] },
-    TEUTON: { cav: ["t6"],           inf: ["t3","t1","t2"] },
-    ROMAN:  { cav: ["t6"],           inf: ["t3","t1"] },
+    TEUTON: { cav: ["t6"],          inf: ["t3","t1","t2"] },
+    ROMAN:  { cav: ["t6"],          inf: ["t3","t1"] },
   };
 
   function sumUnits(u){ return ['t1','t2','t3','t4','t5','t6','t7','t8','t9','t10'].reduce((a,k)=>a+(u?.[k]|0),0); }
@@ -349,7 +358,7 @@ function scanAllVillagesFromSidebar(){
   function getWorldSize(){
     let ws = parseInt(LS.get(KEY_CFG_WORLDSIZE, 0), 10);
     if (!Number.isFinite(ws) || ws < 3){
-      ws = guessWorldSize();            // default 401 si no hay pistas
+      ws = guessWorldSize();          // default 401 si no hay pistas
       LS.set(KEY_CFG_WORLDSIZE, ws);
     }
     return ws;
@@ -363,7 +372,7 @@ function scanAllVillagesFromSidebar(){
   }
 
   function dist(ax, ay, bx, by){
-    const size = getWorldSize();       // 401 o 801
+    const size = getWorldSize();      // 401 o 801
     const dx = wrapDelta(ax, bx, size);
     const dy = wrapDelta(ay, by, size);
     return Math.hypot(dx, dy);
@@ -418,7 +427,7 @@ function scanAllVillagesFromSidebar(){
         const can = Math.min(remaining, budget[k]|0);
         if (can > 0){
           pack[k] = (pack[k]|0) + can;
-          budget[k] -= can;          // mutamos presupuesto compartido del plan
+          budget[k] -= can;         // mutamos presupuesto compartido del plan
           remaining -= can;
         }
       }
@@ -659,38 +668,47 @@ function scanAllVillagesFromSidebar(){
   }
 
 
-  function statsSummaryHTML(){
-    const s = getStats();
-    const wk = weekKeyNow();
-    const map = s[wk] || {};
-    const rows = [];
-    let grand = 0;
+function statsSummaryHTML(){
+  const s = getStats();
+  const wk = weekKeyNow();
+  const map = s[wk] || {};
+  const rows = [];
+  let grand = 0;
 
-    Object.keys(map)
-      .filter(k => !k.startsWith('_'))
-      .forEach(flId => {
-        const n = map[flId].name || flId;
-        const t = map[flId].total | 0;
-        grand += t;
-        rows.push(
-          `<div class="stat-row">
-            <span class="name">• [${flId}] ${escapeHTML(n)}</span>
-            <span class="val">${fmtRes(t)}</span>
-          </div>`
-        );
-      });
-
-    const listHTML = rows.length ? rows.join('') : `<div>Sin datos esta semana</div>`;
-
-    return `
-      <div style="margin-top:4px">
-        ${listHTML}
-        <div class="stat-row stat-total">
-          <span class="name">Total semanal</span>
-          <span class="val">${fmtRes(grand)}</span>
-        </div>
-      </div>`;
-  }
+    // 1. Extraer entradas y convertirlas a un array
+  const entries = Object.keys(map)
+  .filter(k => !k.startsWith('_'))
+  .map(flId => {
+    const data = map[flId];
+    return {
+    flId: flId,
+    name: data.name || flId,
+    total: data.total | 0
+    };
+  });
+  // 2. Ordenar el array de mayor a menor
+  entries.sort((a, b) => b.total - a.total);
+  // 3. Construir las filas HTML y sumar el gran total
+  entries.forEach(entry => {
+    const { flId, name, total } = entry;
+    grand += total;
+    rows.push(
+    `<div class="stat-row">
+    <span class="name">• [${flId}] ${escapeHTML(name)}</span>
+    <span class="val">${fmtRes(total)}</span>
+    </div>`
+    );
+  });
+  const listHTML = rows.length ? rows.join('') : `<div>Sin datos esta semana</div>`;
+  return `
+    <div style="margin-top:4px">
+    ${listHTML}
+    <div class="stat-row stat-total">
+    <span class="name">Total semanal</span>
+    <span class="val">${fmtRes(grand)}</span>
+    </div>
+  </div>`;
+}
 
   function fmtRes(v){
     if (v>=1_000_000_000) return (v/1_000_000_000).toFixed(2)+'B';
@@ -793,20 +811,66 @@ function scanAllVillagesFromSidebar(){
   function cfgGetBool(key, def){ const v=LS.get(key, def); return !!v; }
   function cfgGetInt(key, def){ const v=LS.get(key, def); const n = parseInt(v,10); return Number.isFinite(n)?n:def; }
 
-
   function priOrder(sl, history){
-    const st=readSlotState(sl.id);
-    const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
-    const mySent = history[sl.id]||0;
-    const lo = lootOutcome(sl.lastRaid, mySent);
-    const sinceLast = now() - (st.lastSentTs||0);
-    const sinceGood = now() - (st.lastGoodTs||0);
-    const bm = sl?.lastRaid?.bootyMax|0;
+      // --- 1. Obtener todas las métricas base ---
+      const st = readSlotState(sl.id);
+      const icon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
+      const mySent = history[sl.id] || 0;
+      
+      // Resultado del botín
+      const lo = lootOutcome(sl.lastRaid, mySent);
+      const outcomeScore = (lo.outcome==='GOOD')?0 : (lo.outcome==='MID')?1 : (lo.outcome==='LOW')?2 : (lo.outcome==='ZERO')?3 : 4;
+    
+      // Historial de ataques y timestamps
+      const sent = history?.[sl?.id] || 0;
+      const lastRaidTsEpochS = Number(sl?.lastRaid?.time) || 0;
+      const hasBeenAttacked = (sent > 0) || (lastRaidTsEpochS > 0);
+      const neverAttackedScore = hasBeenAttacked ? 1 : 0; // 0 = Prioridad (nunca atacado)
+    
+      const lastRaidMs = toMsEpoch(sl?.lastRaid?.time);
+      const lastAttackTimestamp = lastRaidMs || (st?.lastSentTs | 0); // 0 si nunca
+      const invertedTimestamp = -lastAttackTimestamp; // 0 si nunca (prioriza más nuevos)
+    
+      // Puntuación de Icono (para lógicas de explotación)
+      // 0 = Icono 1 (Verde)
+      // 1 = Icono 2 (Amarillo)
+      // 2 = Sin Icono (?)
+      // 3 = Icono 3 (Rojo)
+      const iconScore_exploit = (icon===1)?0 : (icon===2)?1 : (icon<0)?2 : 3;
+    
+      // Desempate final
+      const bootyMax = -(sl?.lastRaid?.bootyMax | 0); // Mayor capacidad primero
 
-    const iconScore = (icon===1)?0 : (icon===2)?1 : (icon<0)?2 : 3;
-    const outScore  = (lo.outcome==='GOOD')?0 : (lo.outcome==='MID')?1 : (lo.outcome==='LOW')?2 : (lo.outcome==='ZERO')?3 : 4;
-    return [iconScore, outScore, -bm, -sinceGood, -sinceLast];
-  }
+      // --- 2. Obtener estrategia seleccionada ---
+      const mode = LS.get(KEY_CFG_PRIO_MODE, 'EXPLOIT');
+
+      // --- 3. Devolver las llaves de ordenamiento según la estrategia ---
+      switch(mode) {
+          case 'EXPLORE':
+              // 1. Nunca atacados, 2. Más viejos, 3. Mejor resultado, 4. Capacidad
+              return [neverAttackedScore, lastAttackTimestamp, outcomeScore, bootyMax];
+          
+          case 'BALANCED':
+              // 1. Icono (1>2>?), 2. Más viejo, 3. Mejor resultado
+              // (Ataca a los buenos, pero rota empezando por el más antiguo de ellos)
+              return [iconScore_exploit, lastAttackTimestamp, outcomeScore, bootyMax];
+
+          case 'HYBRID':
+              // 1. Nunca atacado, 2. Icono (1>2>?), 3. Más nuevo
+              // (Prueba lo nuevo, y si no hay, explota lo mejor y más reciente)
+              return [neverAttackedScore, iconScore_exploit, invertedTimestamp, bootyMax];
+
+          case 'ROTATION':
+              // 1. Más viejo (los "nunca atacados" tienen ts=0, van primero)
+              // 2. Mejor resultado
+              return [lastAttackTimestamp, outcomeScore, bootyMax];
+
+          case 'EXPLOIT': // Lógica original del script
+          default:
+              // 1. Icono (1>2>?), 2. Mejor resultado, 3. Más nuevo
+              return [iconScore_exploit, outcomeScore, invertedTimestamp, bootyMax];
+      }
+    }
 
   function blockForHours(h){
       const until = now() + (h|0)*3600*1000;
@@ -958,15 +1022,19 @@ function scanAllVillagesFromSidebar(){
 
           const stLocal  = readSlotState(sl.id);
           const ageMs    = lastAttackAgeMs(sl, stLocal);
-          const within6h = ageMs <= OASIS_WINDOW_MS;
+          // --- INICIO: REEMPLAZO OASIS_WINDOW_MS ---
+          const oasisWinH = cfgGetInt(KEY_CFG_OASIS_WIN_H, 1);
+          const oasisWindowMs = oasisWinH * 3600 * 1000;
+          const withinWindow = ageMs <= oasisWindowMs;
+          // --- FIN: REEMPLAZO ---
           const wasRed   = iconIsRed(sl, stLocal);
 
-          if (within6h && wasRed){
-            console.log(ts(), "[cand][oasis] within 3h & last red → skip", sl.id, { ageMs });
+          if (withinWindow && wasRed){
+            console.log(ts(), `[cand][oasis] within ${oasisWinH}h & last red → skip`, sl.id, { ageMs });
             continue;
           }
 
-          sl.__oasisMode = (within6h && !wasRed) ? 'MIN' : 'PLAN';
+          sl.__oasisMode = (withinWindow && !wasRed) ? 'MIN' : 'PLAN'; // <-- Corregido aquí, usa withinWindow
           sl.__vmDid = vmLocal.did;
           sl.__vmX   = vmLocal.x;
           sl.__vmY   = vmLocal.y;
@@ -1017,7 +1085,7 @@ function scanAllVillagesFromSidebar(){
         return tb - ta; // más reciente primero
       });
     } else {
-      // orden clásico para aldeas
+      // orden configurable para aldeas
       candidates.sort((a,b)=>{
         const A=priOrder(a,history), B=priOrder(b,history);
         for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
@@ -1053,11 +1121,12 @@ function scanAllVillagesFromSidebar(){
           const cav = chooseCavUnit(poolUnits, wl);
           const inf = cav ? null : chooseInfUnit(poolUnits, wl);
 
-          const pack = cav ? { [cav]: (lastIcon === 1 ? 5 : OASIS_MIN_CAV) } : (inf ? { [inf]: (lastIcon === 1 ? 5 : OASIS_MIN_INF) } : null);
-
+          // --- INICIO: REEMPLAZO MIN_CAV/INF ---
+          const minCav = cfgGetInt(KEY_CFG_OASIS_MIN_CAV, 15);
+          const minInf = cfgGetInt(KEY_CFG_OASIS_MIN_INF, 20);
+          const pack = cav ? { [cav]: (lastIcon === 1 ? 5 : minCav) } : (inf ? { [inf]: (lastIcon === 1 ? 5 : minInf) } : null);
+          // --- FIN: REEMPLAZO ---
           
-
-
 
 
           if (!pack || !hasBudgetFor(pack, poolUnits)){
@@ -1088,10 +1157,13 @@ function scanAllVillagesFromSidebar(){
             continue;
           }
 
-          if (oasisSendsUsed >= OASIS_MAX_SENDS_PER_CYCLE){
-            console.log(ts(), "[proc][oasis][PLAN] reached max sends this cycle → skip", slotId, { max: OASIS_MAX_SENDS_PER_CYCLE });
+          // --- INICIO: REEMPLAZO MAX_CYCLE ---
+          const maxCycleSends = cfgGetInt(KEY_CFG_OASIS_MAX_CYCLE, 100);
+          if (oasisSendsUsed >= maxCycleSends){
+            console.log(ts(), "[proc][oasis][PLAN] reached max sends this cycle → skip", slotId, { max: maxCycleSends });
             continue;
           }
+          // --- FIN: REEMPLAZO ---
 
           let plan = null;
           try{
@@ -1306,7 +1378,7 @@ function scanAllVillagesFromSidebar(){
             if (!canOverloadSlot(sl)) return;
           }
 
-          const st      = readSlotState(slotId);
+          const st     = readSlotState(slotId);
           const curIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1, 10);
 
           // Válvula de bloqueo normal para aldeas
@@ -1420,7 +1492,7 @@ function scanAllVillagesFromSidebar(){
     let plan;
     try{
       plan = await planForList(flId, gql);
-      console.log("planForList",flId, gql);
+      //console.log("planForList",flId, gql); // <-- Descomentar si necesitas debug detallado
     }catch(e){
       LOG('error','Plan exception',e);
       return;
@@ -1567,7 +1639,7 @@ function scanAllVillagesFromSidebar(){
             if (st.t) continue; // ya programado
             const saved = nm?.[flId] || 0;
             const next = (saved === 0) ? (nowTs + 50)
-                      : (saved > nowTs ? saved : (nowTs + randDelayWithin(flId)));            schedule(flId, next);
+                         : (saved > nowTs ? saved : (nowTs + randDelayWithin(flId)));         schedule(flId, next);
         }
         startUiTick();
         // UI refresco (si no existe)
@@ -1773,6 +1845,26 @@ function scanAllVillagesFromSidebar(){
             <div>Overload: max running <input type="number" id="io-over-max" min="1" style="width:60px"> (default 2)</div>
             <div>Overload: window min <input type="number" id="io-over-win" min="1" style="width:60px"> (default 10)</div>
             <div>Reserve troops at home (%): <input type="number" id="io-cfg-reserve" min="0" max="100" style="width:60px"></div>
+            
+            <div style="display:flex; flex-direction:column; gap:4px; margin-top:6px; border-top:1px dashed #ccc; padding-top:6px;">
+              <label style="font-weight:bold">Configuración de Oasis:</label>
+              <div class="cfg-oasis-row"><span>Limpieza 'MIN' (Horas):</span> <input type="number" id="io-cfg-oasis-win" min="0" style="width:60px"></div>
+              <div class="cfg-oasis-row"><span>Min. Caballería (Oasis):</span> <input type="number" id="io-cfg-oasis-cav" min="1" style="width:60px"></div>
+              <div class="cfg-oasis-row"><span>Min. Infantería (Oasis):</span> <input type="number" id="io-cfg-oasis-inf" min="1" style="width:60px"></div>
+              <div class="cfg-oasis-row"><span>Máx. envíos/ciclo:</span> <input type="number" id="io-cfg-oasis-max" min="1" style="width:60px"></div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:4px; margin-top:6px; border-top:1px dashed #ccc; padding-top:6px;">
+              <label style="font-weight:bold">Estrategia de Prioridad:</label>
+              <select id="io-cfg-prio">
+                <option value="EXPLOIT">Explotación (Icono 1 > 2 > ?)</option>
+                <option value="EXPLORE">Exploración (Nuevo > Viejo > Icono)</option>
+                <option value="BALANCED">Balanceado (Icono 1 > 2 > ?, rotando)</option>
+                <option value="HYBRID">Híbrido (Nuevo > Icono 1 > 2)</option>
+                <option value="ROTATION">Rotación Pura (Solo antigüedad)</option>
+              </select>
+            </div>
+
+
           </div>
 
           <div class="section">
@@ -1831,6 +1923,12 @@ function scanAllVillagesFromSidebar(){
       display: flex;
       flex-direction: column;
       gap: 4px;
+    }
+    /* --- AÑADIR ESTA REGLA --- */
+    #icononly-ui .cfg-oasis-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
 
     #icononly-ui #io-count .count-row{
@@ -1898,6 +1996,13 @@ function scanAllVillagesFromSidebar(){
   const elCfgRand = document.getElementById('io-cfg-rand');
   const elOverMax = document.getElementById('io-over-max');
   const elOverWin = document.getElementById('io-over-win');
+  const elCfgPrio = document.getElementById('io-cfg-prio');
+  // --- INICIO: NUEVAS REFERENCIAS OASIS ---
+  const elCfgOasisWin = document.getElementById('io-cfg-oasis-win');
+  const elCfgOasisCav = document.getElementById('io-cfg-oasis-cav');
+  const elCfgOasisInf = document.getElementById('io-cfg-oasis-inf');
+  const elCfgOasisMax = document.getElementById('io-cfg-oasis-max');
+  // --- FIN: NUEVAS REFERENCIAS OASIS ---
   elReset.onclick = ()=> hardReset();
 
 
@@ -1915,6 +2020,8 @@ function scanAllVillagesFromSidebar(){
       KEY_CFG_ICON2DECAYH, KEY_CFG_BURST_DMIN, KEY_CFG_BURST_DMAX, KEY_CFG_BURST_N,
       KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN, KEY_MASTER,
       KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD,KEY_STATS_SEEN_REPORTS,
+      KEY_CFG_PRIO_MODE, // Limpiar nuevas claves
+      KEY_CFG_OASIS_WIN_H, KEY_CFG_OASIS_MIN_CAV, KEY_CFG_OASIS_MIN_INF, KEY_CFG_OASIS_MAX_CYCLE,
       "tscm_oasis_cache_v3","tscm_area_scan_v1"
     ].forEach(k=>LS.del(k));
 
@@ -1934,6 +2041,8 @@ function scanAllVillagesFromSidebar(){
     setRunning(false);
     renderCountdowns();
     renderStats();
+    // Recarga UI a valores por defecto
+    cfgLoadUI();
     LOG('log','Hard reset done');
   }
 
@@ -1963,7 +2072,7 @@ function scanAllVillagesFromSidebar(){
     const row=document.createElement('div');
     row.className='row';
     row.innerHTML=`<select class="io-extra"><option value="">Seleccionar Farmlist</option></select>
-                   <button class="rm">—</button>`;
+                  <button class="rm">—</button>`;
     const s=row.querySelector('select');
     getAllFarmlists().forEach(f=>{
       const o=document.createElement('option');
@@ -1994,34 +2103,44 @@ function scanAllVillagesFromSidebar(){
       LS.set(KEY_SELECTED_IDS, selectedIds());
     }
   }
+
   function renderCountdowns(){
     const ids = running ? runningIds.slice() : selectedIds();
     const names = Object.fromEntries(getAllFarmlists().map(f=>[f.id,f.name]));
     const next = getNextMap();
-    const html = ids.map(id=>{
-      const left = Math.max(0,(next?.[id]||0)-now());
-      const m = Math.floor(left/60000), s=Math.floor((left%60000)/1000);
+
+    // 1. Mapear a objetos para poder ordenar
+    const data = ids.map(id => {
+      const left = Math.max(0, (next?.[id] || 0) - now());
+      return {
+        id: id,
+        name: names[id] || String(id),
+        left: left
+      };
+    });
+
+    // 2. Ordenar por 'left' (tiempo restante) ascendente
+    data.sort((a, b) => a.left - b.left);
+
+    // 3. Generar HTML a partir de los datos ordenados
+    const html = data.map(item => {
+      const m = Math.floor(item.left / 60000);
+      const s = Math.floor((item.left % 60000) / 1000);
       return `<div class="count-row">
-                <span class="name">• ${escapeHTML(names[id]||String(id))}</span>
-                <span class="left">${m}m ${String(s).padStart(2,'0')}s</span>
-              </div>`;    }).join('') || `<div>Sin countdown</div>`;
+                <span class="name">• ${escapeHTML(item.name)}</span>
+                <span class="left">${m}m ${String(s).padStart(2, '0')}s</span>
+              </div>`;
+    }).join('') || `<div>Sin countdown</div>`;
+
     elCount.innerHTML = html;
 
-    // NUEVO: si alguno llegó a 0, dispara ciclo inmediato
+    // --- El resto de la función (lógica de kick) permanece igual ---
     const anyZero = ids.some(id => {
       const st = ensure(id);
       const left = (next?.[id]||0) - now();
-
-      // ❌ Ignora si inflight
       if (st.inflight) return false;
-
-      // ❌ Ignora si aún en cooldown post-run
       if (now() < (st.cooldownUntil||0)) return false;
-
-      // ❌ Ignora si guard activo (acaba de ser pateado)
       if (isKickGuardActive(id)) return false;
-
-      // ✅ Solo dispara si efectivamente ya venció
       return left <= 0;
     });
 
@@ -2029,6 +2148,7 @@ function scanAllVillagesFromSidebar(){
       kickPendingCycle();
     }
   }
+
   function renderStats(){
     elStats.innerHTML = statsSummaryHTML();
   }
@@ -2045,10 +2165,18 @@ function scanAllVillagesFromSidebar(){
     elCfgOver.checked = cfgGetBool(KEY_CFG_OVERLOAD, false);
     elOverMax.value = cfgGetInt(KEY_CFG_OVER_MAX, 2);
     elOverWin.value = cfgGetInt(KEY_CFG_OVER_WINMIN, 10);
-
+    elCfgPrio.value = LS.get(KEY_CFG_PRIO_MODE, 'EXPLOIT');
+    // --- INICIO: CARGAR VALORES OASIS ---
+    elCfgOasisWin.value = cfgGetInt(KEY_CFG_OASIS_WIN_H, 1);
+    elCfgOasisCav.value = cfgGetInt(KEY_CFG_OASIS_MIN_CAV, 15);
+    elCfgOasisInf.value = cfgGetInt(KEY_CFG_OASIS_MIN_INF, 20);
+    elCfgOasisMax.value = cfgGetInt(KEY_CFG_OASIS_MAX_CYCLE, 100);
+    // --- FIN: CARGAR VALORES OASIS ---
 
     const wl = getWhitelist();
-    wlInputs.forEach(i=>{
+    // Re-seleccionamos wlInputs aquí porque cfgLoadUI podría ser llamado después de hardReset
+    const currentWlInputs = Array.from(document.querySelectorAll('#io-wl input[type="checkbox"]'));
+    currentWlInputs.forEach(i=>{
       const k = i.dataset.unit;
       i.checked = !!wl[k];
       i.onchange = ()=>{
@@ -2069,6 +2197,13 @@ function scanAllVillagesFromSidebar(){
     elCfgRand.onchange = ()=> LS.set(KEY_CFG_RANDOMIZE, !!elCfgRand.checked);
     elOverMax.onchange = ()=> LS.set(KEY_CFG_OVER_MAX, Math.max(1, parseInt(elOverMax.value||'2',10)));
     elOverWin.onchange = ()=> LS.set(KEY_CFG_OVER_WINMIN, Math.max(1, parseInt(elOverWin.value||'10',10)));
+    elCfgPrio.onchange = ()=> LS.set(KEY_CFG_PRIO_MODE, elCfgPrio.value);
+    // --- INICIO: GUARDAR VALORES OASIS ---
+    elCfgOasisWin.onchange = ()=> LS.set(KEY_CFG_OASIS_WIN_H, Math.max(0, parseInt(elCfgOasisWin.value||'1',10)));
+    elCfgOasisCav.onchange = ()=> LS.set(KEY_CFG_OASIS_MIN_CAV, Math.max(1, parseInt(elCfgOasisCav.value||'15',10)));
+    elCfgOasisInf.onchange = ()=> LS.set(KEY_CFG_OASIS_MIN_INF, Math.max(1, parseInt(elCfgOasisInf.value||'20',10)));
+    elCfgOasisMax.onchange = ()=> LS.set(KEY_CFG_OASIS_MAX_CYCLE, Math.max(1, parseInt(elCfgOasisMax.value||'100',10)));
+    // --- FIN: GUARDAR VALORES OASIS ---
   }
 
   // Buttons
@@ -2169,17 +2304,16 @@ function scanAllVillagesFromSidebar(){
         startUiTick()
 
         if (amIMaster()){
-          const allMs = getIntervalMs(ids[0]); // ya seteaste el mismo intervalo a todas
-
+          // Ya no necesitamos 'allMs' aquí
           for (const flId of ids){
             try { 
-              await processList(flId);               // todas corren de inmediato
+              await processList(flId);          // todas corren de inmediato
             } catch (e) { 
               LOG('error','first pass error', e); 
             }
             const next = now() + randDelayWithin(flId);
             schedule(flId, next);
-            await humanDelayOnce();                  // pequeño respiro para no saturar
+            await humanDelayOnce();             // pequeño respiro para no saturar
           }
           hasBootstrapped = true;
 
@@ -2203,8 +2337,7 @@ function scanAllVillagesFromSidebar(){
 
   function initUI(){
     cfgLoadUI();
-    renderWhitelistForTribe();
-    const wlInputs = Array.from(document.querySelectorAll('#io-wl input[type="checkbox"]'));
+    renderWhitelistForTribe(); // <-- Renderiza la whitelist DESPUÉS de cargar la config
 
     cfgWire();
     if (!getAllFarmlists().length) { /* lazy load below */ }
