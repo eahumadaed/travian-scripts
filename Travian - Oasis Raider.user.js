@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         🐺 Oasis Raider
-// @version      2.1.4
+// @version      2.1.6
 // @namespace    tscm
 // @description   Raideo automático y optimizado de oasis libres. Oleadas inteligentes con héroe (vs animales) y limpieza eficiente de vacíos (colas separadas). Configurable, con gestión del héroe (auto-equip), modo Barrido, UI y Dry-Run.
 
@@ -264,11 +264,11 @@
   async function checkHeroStatus(){
       // --- INICIO: LÓGICA DE CACHE ---
       const now = Date.now();
-      if (now - heroHudCache.ts < HUD_CACHE_TTL_MS && heroHudCache.data) {
-          // log("[HUD Cache] Using cached data."); // Descomenta para debug
-          return heroHudCache.data;
-      }
-      // --- FIN: LÓGICA DE CACHE ---
+      // if (now - heroHudCache.ts < HUD_CACHE_TTL_MS && heroHudCache.data) {
+      //     // log("[HUD Cache] Using cached data."); // Descomenta para debug
+      //     return heroHudCache.data;
+      // }
+      // // --- FIN: LÓGICA DE CACHE ---
 
       try{
         log("[HUD Cache] Fetching fresh HUD data..."); // Log para saber cuándo pide datos nuevos
@@ -1136,101 +1136,152 @@
   /******************************************************************
    * Build de colas
    ******************************************************************/
-  async function buildOasisQueue(force=false, opts={}){
+async function buildOasisQueue(force = false, opts = {}) {
     // Si ya hay cola y quedan objetivos, no reconstruyas (a menos que 'force')
-    if(!force && queueRemaining() > 0) return;
+    if (!force && queueRemaining() > 0) return;
 
     // Asegura aldea activa
-    if(!STATE.currentVillage.id || force){
-      if(!await updateActiveVillage()){
-        error("buildOasisQueue: no aldea activa.");
-        return;
-      }
+    if (!STATE.currentVillage.id || force) {
+        if (!await updateActiveVillage()) {
+            error("buildOasisQueue: no aldea activa.");
+            return;
+        }
     }
 
     const center = STATE.currentVillage;
     const sortMethod = getSortMethod();
-    const baseDist  = getDistance();
+    const baseDist = getDistance();
     const maxAnimals = getMaxAnimals();
     const allowScale = (opts.allowScale ?? (!getSweepEnabled())); // SOLO escala si SWEEP está OFF
 
+    log(`[Queue] Building queue: center=(${center.x}|${center.y}), baseDist=${baseDist}, allowScale=${allowScale}, maxAnimals=${maxAnimals || '∞'}`);
+
     // 1 sola llamada al mapa, luego filtramos por distancia en memoria
-    const mp = await fetchMapTiles(center.x, center.y, 3);
-    const tiles = (mp.tiles||[]).map(t => ({
-      x: t.position.x, y: t.position.y,
-      did: t.did, title: t.title, text: t.text,
-      dist: distFields(t.position, center),
+    let mp;
+    try {
+        mp = await fetchMapTiles(center.x, center.y, 3);
+    } catch (e) {
+        error("buildOasisQueue: fetchMapTiles failed.", e);
+        scheduleNext(getRetryMs(), "map fetch error"); // Reagendar si falla el mapa
+        return;
+    }
+
+    const allTilesInRange = (mp.tiles || []).map(t => ({ // Renombrado para claridad
+        x: t.position.x, y: t.position.y,
+        did: t.did, title: t.title, text: t.text,
+        dist: distFields(t.position, center),
     })).filter(isUnoccupiedOasisFromMap)
       .map(t => ({
-        x:t.x, y:t.y, dist:t.dist, did:t.did,
-        animals: parseAnimalsFromMapText(t.text||""),
-        attacked:false
+          x: t.x, y: t.y, dist: t.dist, did: t.did,
+          animals: parseAnimalsFromMapText(t.text || ""),
+          attacked: false
       }));
 
-    // Distancias a probar: baseDist, luego +5 hasta 40
+    log(`[Queue] Found ${allTilesInRange.length} unoccupied oases in map data.`);
+
+    // Distancias a probar: baseDist, luego +STEP hasta MAX_DIST
     const dists = [baseDist];
     if (allowScale) {
-      const to = Math.max(baseDist, AUTO.SCALE_MAX_DIST);
-      for (let d = baseDist + AUTO.SCALE_STEP; d <= to; d += AUTO.SCALE_STEP) dists.push(d);
+        const step = AUTO.SCALE_STEP || 5;
+        const maxDist = AUTO.SCALE_MAX_DIST || 40;
+        const to = Math.max(baseDist, maxDist);
+        for (let d = baseDist + step; d <= to; d += step) dists.push(d);
     }
 
-    let chosenWith = [], chosenEmpty = [], chosenDist = baseDist;
+    // --- LÓGICA DE ESCALADO CORREGIDA ---
+    let bestResult = { with: [], empty: [], dist: baseDist, foundAny: false }; // Guarda el mejor resultado
 
-    for (const d of dists){
-      let withAnimals = tiles.filter(o => o.dist <= d && o.animals > 0);
-      let empties     = tiles.filter(o => o.dist <= d && o.animals <= 0);
+    for (const d of dists) {
+        // Filtra TODOS los tiles encontrados por la distancia actual 'd'
+        let currentWith = allTilesInRange.filter(o => o.dist <= d && o.animals > 0);
+        let currentEmpty = allTilesInRange.filter(o => o.dist <= d && o.animals <= 0);
 
-      if (maxAnimals > 0) withAnimals = withAnimals.filter(o => o.animals <= maxAnimals);
+        // Aplica filtro maxAnimals si está activo
+        if (maxAnimals > 0) {
+            currentWith = currentWith.filter(o => o.animals <= maxAnimals);
+        }
 
-      // orden
-      if (sortMethod === 'efficiency') {
-        withAnimals.sort((a,b)=> (b.animals/(b.dist||.1)) - (a.animals/(a.dist||.1)) || a.dist-b.dist);
-      } else if (sortMethod === 'animalsAsc') {
-        withAnimals.sort((a,b)=> (a.animals - b.animals) || (a.dist - b.dist));
-      } else {
-        withAnimals.sort((a,b)=> (b.animals - a.animals) || (a.dist - b.dist));
-      }
-      empties.sort((a,b)=> a.dist - b.dist);
+        // Si no hay NADA en esta distancia, pasa a la siguiente (si aplica)
+        if (currentWith.length === 0 && currentEmpty.length === 0) {
+            if (allowScale) continue; // Si estamos escalando y no hay nada, sigue
+            else break; // Si no escalamos y no hay nada en baseDist, paramos
+        }
 
-      // elegimos
-      const takeWith  = withAnimals.slice(0, CFG.QUEUE_SIZE);
-      const takeEmpty = empties.slice(0, CFG.QUEUE_SIZE);
+        // --- Sort candidates for this distance 'd' ---
+        if (sortMethod === 'efficiency') {
+           currentWith.sort((a,b)=> (b.animals/(b.dist||.1)) - (a.animals/(a.dist||.1)) || a.dist-b.dist);
+        } else if (sortMethod === 'animalsAsc') {
+           currentWith.sort((a,b)=> (a.animals - b.animals) || (a.dist - b.dist));
+        } else { // default 'animals' (desc)
+           currentWith.sort((a,b)=> (b.animals - a.animals) || (a.dist - b.dist));
+        }
+        currentEmpty.sort((a, b) => a.dist - b.dist);
 
-      logScale(baseDist, d, takeWith.length);
+        // Toma hasta QUEUE_SIZE
+        const takeWith = currentWith.slice(0, CFG.QUEUE_SIZE);
+        const takeEmpty = currentEmpty.slice(0, CFG.QUEUE_SIZE);
 
-      // Si encontramos con animales, nos quedamos aquí
-      if (takeWith.length > 0) {
-        chosenWith = takeWith;
-        chosenEmpty = takeEmpty;
-        chosenDist = d;
-        //break;
-      }
+        logScale(baseDist, d, takeWith.length);
 
-      // Si no hay con animales y NO estamos escalando (o ya llegamos al máx), al menos deja vacíos por UI
-      if (!allowScale || d === dists[dists.length - 1]) {
-        chosenWith = [];
-        chosenEmpty = takeEmpty;
-        chosenDist = d;
-      }
-    }
+        // --- Decide si este resultado (a distancia 'd') es mejor que el guardado ---
+        let currentIsBetter = false;
+        // Prioridad 1: Encontrar oasis CON animales si antes no teníamos
+        if (takeWith.length > 0 && bestResult.with.length === 0) {
+            currentIsBetter = true;
+        }
+        // Prioridad 2: Si ambos tienen animales, preferir la distancia MENOR
+        else if (takeWith.length > 0 && bestResult.with.length > 0) {
+             if (d < bestResult.dist) { // Encontrado a menor distancia
+                 currentIsBetter = true;
+             }
+             // Si es la misma distancia, no sobrescribimos (mantiene el primer hallazgo a esa distancia)
+        }
+        // Prioridad 3: Si NINGUNO tiene animales, preferir la distancia MENOR (que tenga al menos vacíos)
+        else if (takeWith.length === 0 && bestResult.with.length === 0) {
+             if (takeEmpty.length > 0 && (!bestResult.foundAny || d < bestResult.dist)) {
+                 currentIsBetter = true;
+             }
+        }
 
-    STATE.queueWith   = chosenWith;
-    STATE.queueEmpty  = chosenEmpty;
-    STATE.idxWith     = -1;
-    STATE.idxEmpty    = -1;
+        if (currentIsBetter) {
+            bestResult = { with: takeWith, empty: takeEmpty, dist: d, foundAny: true };
+            log(`[Queue] New best result at dist ${d}: ${takeWith.length} with / ${takeEmpty.length} empty`);
+        }
 
-    const total = (STATE.queueWith.length + STATE.queueEmpty.length)|0;
-    STATE.stats = { withAnimals: STATE.queueWith.length, empty: STATE.queueEmpty.length, attacked:0, remaining:total };
+        // Optimización: Si la cola CON animales ya está llena Y estamos escalando, podemos parar antes.
+        if (bestResult.with.length >= CFG.QUEUE_SIZE && allowScale) {
+            log(`[Queue] Queue 'With Animals' full at distance ${d}. Stopping scale early.`);
+            break;
+        }
+    } // --- Fin del bucle for (const d of dists) ---
+
+    // Asigna el MEJOR resultado encontrado al estado
+    STATE.queueWith = bestResult.with;
+    STATE.queueEmpty = bestResult.empty;
+    STATE.idxWith = -1;
+    STATE.idxEmpty = -1;
+
+    const totalInQueues = STATE.queueWith.length + STATE.queueEmpty.length;
+    STATE.stats = {
+        withAnimals: STATE.queueWith.length,
+        empty: STATE.queueEmpty.length,
+        attacked: 0,
+        remaining: totalInQueues
+    };
     STATE.lastTarget = null;
     saveState(STATE);
     uiRender();
 
-    if (STATE.queueWith.length === 0) {
-      warn(`[AUTO-SCALE] No hay oasis con animales hasta ${chosenDist}.`);
+    if (totalInQueues === 0) {
+        warn(`[Queue] No suitable oases found up to distance ${bestResult.dist}. Check filters/distance.`);
+        // Reagendamos para reintentar más tarde si no se encontró nada
+        scheduleNext(getRetryMs(), "no candidates found");
+    } else if (STATE.queueWith.length === 0) {
+        warn(`[Queue] No oases WITH animals found up to distance ${bestResult.dist}. Queue has ${STATE.queueEmpty.length} empty oases.`);
     } else {
-      log(`[AUTO-SCALE] Usando distancia ${chosenDist} (encontrados ${STATE.queueWith.length} con animales).`);
+        log(`[Queue] Built queues using distance ${bestResult.dist}: ${STATE.queueWith.length} with / ${STATE.queueEmpty.length} empty.`);
     }
-  }
+}
 
   /******************************************************************
    * Smart wave (con héroe)
@@ -1238,6 +1289,7 @@
   function calcLossFromRatio(R){ return Math.pow(R,1.5)/(1+Math.pow(R,1.5)); }
 
   function smartBuildWave(oasisCounts, available, opts){
+    console.log("smartBuildWave", oasisCounts, available, opts);
     const tribe=(tscm.utils.getCurrentTribe()||"GAUL").toUpperCase();
     const p = Math.min(Math.max(opts.lossTarget,0.01),0.35);
     const heroAtk = (opts.heroAttack|0);
@@ -1820,27 +1872,44 @@
     const preview = await postPreview(x,y,send);
     const goSec = parseTravelSecondsFromPreview(preview);
     await postConfirm(preview);
+    log(`[WITH] Sent OK to (${x}|${y})`); // Añadido log de éxito
 
     runSweepsAfterHero({ x, y }).catch(err => warn("[SWEEP] async error:", err));
 
-    oasis.attacked=true;
-    STATE.lastTarget={x,y};
-    saveState(STATE);
-    uiRender();
+    oasis.attacked = true;
+    STATE.lastTarget = { x, y };
+    // No guardamos STATE aquí todavía, lo hacemos después de calcular el retorno
 
-    // if(goSec){
-    //   //setNextByRoundTrip(goSec);
-    //   STATE.heroReturnEpoch = Date.now() + (goSec*(2-CFG.HERO_RETURN_SPEED_BONUS)+CFG.EXTRA_BUFFER_SEC)*1000;
-    //   saveState(STATE);
-    // }
+    // --- INICIO: CALCULAR Y PROGRAMAR RETORNO (NO DRY-RUN) ---
+    if (goSec) {
+        const currentHeroBonus = await getHeroSpeedBonus();
+        const rtMs = (goSec * (2 - currentHeroBonus) + CFG.EXTRA_BUFFER_SEC) * 1000;
+
+        // ESTA línea es la clave: Programa el próximo intento DESPUÉS del retorno
+        scheduleNext(rtMs, `roundTrip ${goSec}s with ${Math.round(currentHeroBonus*100)}% bonus`);
+
+        STATE.heroReturnEpoch = Date.now() + rtMs; // Actualiza el tiempo de retorno real
+        log(`[Bonus] Calculated return time: ${Math.round(rtMs/1000)}s using ${Math.round(currentHeroBonus*100)}% bonus. Next check scheduled.`);
+    } else {
+        // Si no pudimos parsear goSec (raro), usamos el reintento estándar
+        warn("[WITH] Could not parse travel time from preview. Using default retry.");
+        scheduleNext(getRetryMs(), "send with hero, unknown travel time");
+        STATE.heroReturnEpoch = 0; // No sabemos cuándo vuelve
+    }
+    // Guardamos el estado AHORA, con el heroReturnEpoch actualizado
+    saveState(STATE);
+    uiRender(); // Actualiza la UI después de guardar el estado
+    // --- FIN: CALCULAR Y PROGRAMAR RETORNO ---
 
     // Tras mandar héroe, habilita arranque de vacíos en prioridad WITH_HERO
-    const ec=getEmptyCfg();
-    if(getPriorityMode()==="WITH_HERO" && ec.enabled){
-      scheduleSooner(ec.postOutboundDelaySec*1000, "start empty after hero outbound");
+    // (scheduleSooner no sobrescribirá el scheduleNext largo si ya está programado para más tarde)
+    const ec = getEmptyCfg();
+    if (getPriorityMode() === "WITH_HERO" && ec.enabled) {
+        scheduleSooner(ec.postOutboundDelaySec * 1000, "start empty after hero outbound");
     }
-    return true;
-  }
+
+    return true; // <-- El return va al final
+}
 
   async function runSweepsAfterHero(sentXY){
     try{
@@ -2152,14 +2221,27 @@
           const i  = act.idx;
           if (i>=0 && i<qW.length) {
             STATE.idxWith = i; saveState(STATE); uiRender();
-            await trySendTo(qW[i]);                   // <-- aquí haces el POST real
-            if (queueRemaining() === 0 && !getSweepEnabled()) {
+            const success = await trySendTo(qW[i]); // <-- Guardamos si trySendTo tuvo éxito
+
+            // Si la cola se vació DESPUÉS del envío Y no hay barrido, recarga
+            if (success && queueRemaining() === 0 && !getSweepEnabled()) {
               await buildOasisQueue(true, { allowScale: true });
-              // no forces el schedule acá; main loop decide el próximo acto en el tick
             }
 
-            return scheduleNext(1000, "sent with");   // agenda próximo ciclo
+            // --- INICIO CORRECCIÓN SCHEDULING ---
+            // Solo agenda 1 segundo después si SWEEP está activo (para el próximo barrido)
+            // Si SWEEP está inactivo, trySendTo YA programó la espera hasta el retorno del héroe.
+            if (getSweepEnabled()) {
+                scheduleNext(1000, "sent with, sweep enabled");
+            } else {
+                log("[Loop] Sent with hero, SWEEP OFF. Waiting for hero return schedule set by trySendTo.");
+                // No hacemos nada aquí, scheduleNext ya fue llamado dentro de trySendTo con rtMs
+            }
+            return; // Salimos de mainLoopOnce
+            // --- FIN CORRECCIÓN SCHEDULING ---
+
           } else {
+            // No se encontró target válido en el índice (raro)
             return scheduleNext(1000, "no target with");
           }
         }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name          🏹 Travian - Farmlist Sender
 // @namespace     tscm
-// @version       2.1.26  // <--- Incrementé la versión
+// @version       2.1.28
 // @description   Envío de Farmlist basado SOLO en iconos (1/2/3), multi-tribu, whitelist de tropas, quick-burst para icon1 (GOOD), perma-decay 48h en icon2 flojos,estadísticas semanales por farmlist y total, UI persistente y single-tab lock. Sin cooldown global de 5h. Estrategia de prioridad configurable. Configuración de Oasis.
 // @include       *://*.travian.*
 // @include       *://*/*.travian.*
@@ -125,7 +125,6 @@
   const DEFAULT_INTERVAL_MS = 60*60*1000; // 1h
   const BURST_DEFAULT = { dmin:60, dmax:120, n:3 };
   const ICON2_DECAY_H = 4;
-   // Distancia para elegir INF/CAV
   const DIST_INF_MAX = 15;
   const KEY_CFG_OVERLOAD = KEY_ROOT + 'cfg_overload';
   const KEY_CFG_RANDOMIZE = KEY_ROOT + 'cfg_randomize';
@@ -134,19 +133,19 @@
   const KEY_CFG_OVER_MAX        = KEY_ROOT + 'cfg_over_max';       // int (default 2)
   const KEY_CFG_OVER_WINMIN     = KEY_ROOT + 'cfg_over_winmin';    // int min (default 10)
   const KEY_CFG_PRIO_MODE       = KEY_ROOT + 'cfg_prio_mode';
-  // --- INICIO: NUEVAS CLAVES PARA OASIS ---
   const KEY_CFG_OASIS_WIN_H     = KEY_ROOT + 'cfg_oasis_win_h';     // int horas (para 'MIN' mode)
   const KEY_CFG_OASIS_MIN_CAV   = KEY_ROOT + 'cfg_oasis_min_cav';   // int
   const KEY_CFG_OASIS_MIN_INF   = KEY_ROOT + 'cfg_oasis_min_inf';   // int
   const KEY_CFG_OASIS_MAX_CYCLE = KEY_ROOT + 'cfg_oasis_max_cycle'; // int
-  // --- FIN: NUEVAS CLAVES PARA OASIS ---
   const KEY_BUDGET_POOL_PREFIX = KEY_ROOT + 'budget_pool_v2_'; // por aldea: budget_pool_v2_<did>
+  const KEY_STATS_TARGET = KEY_ROOT + 'stats_target_v1'; // Persistente
+  const KEY_STATS_TARGET_SEEN = KEY_ROOT + 'stats_target_seen_v1'; // { reportId: true }
+
+
   const BUDGET_POOL_TTL_MS = 90*1000;
 
 
-  const NET_BUCKET = { cap: 6, // máx 6 op en 10s
-                       winMs: 10000,
-                       ts: [] };
+  const NET_BUCKET = { cap: 6,winMs: 10000,ts: [] };
 
   async function netGuard(){
     const nowTs = Date.now();
@@ -167,12 +166,10 @@
   if (LS.get(KEY_CFG_DELAY_MIN)   == null) LS.set(KEY_CFG_DELAY_MIN,  450);   // 0.45s
   if (LS.get(KEY_CFG_DELAY_MAX)   == null) LS.set(KEY_CFG_DELAY_MAX,  1500);  // 1.5s
   if (LS.get(KEY_CFG_PRIO_MODE)   == null) LS.set(KEY_CFG_PRIO_MODE, 'EXPLOIT');
-  // --- INICIO: DEFAULTS PARA OASIS ---
   if (LS.get(KEY_CFG_OASIS_WIN_H)   == null) LS.set(KEY_CFG_OASIS_WIN_H, 1);    // 1 hora
   if (LS.get(KEY_CFG_OASIS_MIN_CAV) == null) LS.set(KEY_CFG_OASIS_MIN_CAV, 15);
   if (LS.get(KEY_CFG_OASIS_MIN_INF) == null) LS.set(KEY_CFG_OASIS_MIN_INF, 20);
   if (LS.get(KEY_CFG_OASIS_MAX_CYCLE) == null) LS.set(KEY_CFG_OASIS_MAX_CYCLE, 100);
-  // --- FIN: DEFAULTS PARA OASIS ---
 
   function getKickGuard(){ return LS.get(KEY_KICK_GUARD, {}) || {}; }
   function setKickGuard(m){ LS.set(KEY_KICK_GUARD, m); }
@@ -571,37 +568,36 @@ function scanAllVillagesFromSidebar(){
   // Semana local: inicia lunes 00:01 (America/Santiago: la Date del browser ya es local)
   // weekKey = string con el "inicio" (YYYY-MM-DD_00:01)
   function weekKeyNow(){
-    const now = new Date();
+      const now = new Date();
 
-    // Normaliza a local "hoy" 00:01
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 1, 0, 0);
-    // 0=Dom,1=Lun,...6=Sab → queremos el lunes de ESTA semana
-    // Si hoy es lunes y hora >= 00:01 => esta misma; si antes de 00:01, usamos el lunes anterior
-    const day = todayStart.getDay();
-    // Distancia en días desde hoy al lunes más reciente (incluye hoy si es lunes)
-    const diffToMonday = (day === 0) ? 6 : (day - 1); // Dom->6, Lun->0, Mar->1, etc.
-    const mondayStart = new Date(
-      todayStart.getFullYear(),
-      todayStart.getMonth(),
-      todayStart.getDate() - diffToMonday, // retrocede hasta lunes
-      0, 1, 0, 0
-    );
+      // Normaliza a local "hoy" 00:00
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0); // <-- 00:00:00
+      
+      const day = todayStart.getDay();
+      // Distancia en días desde hoy al lunes más reciente (incluye hoy si es lunes)
+      const diffToMonday = (day === 0) ? 6 : (day - 1); // Dom->6, Lun->0, Mar->1, etc.
+      const mondayStart = new Date(
+          todayStart.getFullYear(),
+          todayStart.getMonth(),
+          todayStart.getDate() - diffToMonday, // retrocede hasta lunes
+          0, 0, 0, 0 // <-- 00:00:00
+      );
 
-    const y = mondayStart.getFullYear();
-    const m = String(mondayStart.getMonth() + 1).padStart(2, '0');
-    const d = String(mondayStart.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}_MON0001`;
+      const y = mondayStart.getFullYear();
+      const m = String(mondayStart.getMonth() + 1).padStart(2, '0');
+      const d = String(mondayStart.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}_MON0000`; // <-- Cambiado
   }
 
-  // Dado un weekKey (inicio), ventana = [lunes 00:01, próximo lunes 00:01)
   function weekWindowByKey(wkKey){
-    // wkKey: "YYYY-MM-DD_MON0001"
-    const [ymd] = wkKey.split('_');
-    const [y, m, d] = ymd.split('-').map(n => parseInt(n, 10));
-    const start = new Date(y, (m - 1), d, 0, 1, 0, 0).getTime();
-    // próximo lunes 00:01
-    const end = start + 7 * 24 * 3600 * 1000; // exclusivo
-    return { start, end }; // [start, end)
+      // wkKey: "YYYY-MM-DD_MON0000"
+      const [ymd] = wkKey.split('_');
+      const [y, m, d] = ymd.split('-').map(n => parseInt(n, 10));
+      const start = new Date(y, (m - 1), d, 0, 0, 0, 0).getTime(); // <-- Lunes 00:00:00
+      
+      // próximo lunes 00:00 (exclusivo)
+      const end = start + 7 * 24 * 3600 * 1000; 
+      return { start, end }; // [start, end)
   }
 
 
@@ -618,54 +614,173 @@ function scanAllVillagesFromSidebar(){
   function setStats(s){ LS.set(KEY_STATS,s); }
   function toMsEpoch(t){ const n = Number(t)||0; if (n<=0) return 0; return n < 1e12 ? n*1000 : n; }
 
+  function getTargetStatsDB(){
+      return LS.get(KEY_STATS_TARGET, {}) || {};
+  }
+  function setTargetStatsDB(db){
+      LS.set(KEY_STATS_TARGET, db);
+  }
+  function getTargetSeenReports(){
+      return LS.get(KEY_STATS_TARGET_SEEN, {}) || {};
+  }
+  function setTargetSeenReports(m){
+      LS.set(KEY_STATS_TARGET_SEEN, m);
+  }
+  function hasSeenTargetReport(reportId){
+      if (!Number.isFinite(reportId)) return false;
+      return !!(getTargetSeenReports()[reportId]);
+  }
+  function addSeenTargetReport(reportId){
+      if (!Number.isFinite(reportId)) return;
+      const m = getTargetSeenReports();
+      m[reportId] = true;
+      setTargetSeenReports(m);
+  }
 
-  function addStats(flId, flName, slotId, raid){
-    if (!raid) return;
+  // Esta función se llamará DESDE addStats
+  function addTargetStats(slot, raid, wkKey, window) {
+      const mapId = slot?.target?.mapId;
+      if (!mapId) return; // Clave necesaria
 
+      const reportId = raid?.reportId | 0;
+      if (!reportId || hasSeenTargetReport(reportId)) {
+          return; // Sin reporte o ya contado
+      }
+
+      const raidTs = (Number(raid.time) || 0) * 1000;
+      if (raidTs <= 0) return;
+
+      const rr = raid.raidedResources || {};
+      const got = (rr.lumber|0) + (rr.clay|0) + (rr.iron|0) + (rr.crop|0);
+      if (got <= 0) {
+          addSeenTargetReport(reportId); // Marcar como visto aunque esté vacío
+          return;
+      }
+
+      const db = getTargetStatsDB();
+      if (!db[mapId]) {
+          // Inicializar entrada
+          db[mapId] = {
+              name: slot.target.name,
+              x: slot.target.x,
+              y: slot.target.y,
+              type: slot.target.type,
+              weeks: {}, // { "wkKey1": total, "wkKey2": total, ... }
+              globalTotal: 0,
+              lastReportId: 0,
+              lastTs: 0,
+          };
+      }
+      const entry = db[mapId];
+
+      // Actualizar metadata (por si cambia el nombre de la aldea)
+      entry.name = slot.target.name;
+
+      // --- Lógica de 4 semanas ---
+      // 1. ¿Es una semana nueva?
+      if (!entry.weeks[wkKey]) {
+          const weekKeys = Object.keys(entry.weeks);
+          // 2. Si es nueva Y ya tenemos 4 o más, borramos las viejas
+          if (weekKeys.length >= 4) {
+              // Ordenamos por fecha (el string YYYY-MM-DD funciona)
+              weekKeys.sort();
+              // Borramos todas menos las 3 más recientes (para dejar espacio a la nueva)
+              const keysToNuke = weekKeys.slice(0, weekKeys.length - 3);
+              for (const k of keysToNuke) {
+                  delete entry.weeks[k];
+              }
+          }
+          // Inicializamos la semana nueva
+          entry.weeks[wkKey] = 0;
+      }
+
+      // --- Contabilizar solo si el reporte es de esta semana ---
+      if (raidTs >= window.start && raidTs < window.end) {
+          entry.weeks[wkKey] = (entry.weeks[wkKey] || 0) + got;
+      }
+
+      // --- Total Global (SIEMPRE se suma, sin importar la semana, mientras no se haya visto el report) ---
+      entry.globalTotal += got;
+      entry.lastReportId = reportId;
+      entry.lastTs = raidTs;
+
+      setTargetStatsDB(db);
+      addSeenTargetReport(reportId);
+      
+      // LOG('log', 'TargetStats add', { mapId, got, wkKey, reportId });
+  }
+
+function addStats(flId, flName, slot, raid) {
+    // --- Chequeos iniciales ---
+    if (!raid || !slot) return; // Debe tener objeto raid y slot
+    
+    const slotId = slot.id; // ID del slot para la lógica semanal
     const reportId = raid.reportId | 0;
-    if (!reportId) return;
+    if (!reportId) return; // Debe tener un ID de reporte
 
-    // ❌ Si ya lo contamos antes (aunque venga desde otra farmlist), no sumamos de nuevo
-    if (hasSeenReport(reportId)) return;
-
-    // raid.time viene en epoch (segundos). Pasamos a ms:
     const raidTs = (Number(raid.time) || 0) * 1000;
-    if (raidTs <= 0) return;
-
-    // Ventana semanal local (lunes 00:01 → próximo lunes 00:01)
-    const wk = weekKeyNow();
-    const { start, end } = weekWindowByKey(wk);
-    if (raidTs < start || raidTs >= end) {
-      // Fuera de esta semana: no lo contamos en el bucket actual,
-      // pero podemos marcarlo como visto igual para que no duplique si aparece en otra FL
-      addSeenReport(reportId);
-      return;
-    }
+    if (raidTs <= 0) return; // Debe tener un timestamp válido
 
     const rr = raid.raidedResources || {};
     const got = (rr.lumber|0) + (rr.clay|0) + (rr.iron|0) + (rr.crop|0);
-    if (got <= 0) {
-      // Aun así, marcamos como visto para no recontar si reaparece
-      addSeenReport(reportId);
-      return;
-    }
-    const s = getStats();
-    if (!s[wk]) s[wk] = { _window: { start, end } };
-    if (!s[wk][flId]) s[wk][flId] = { name: flName || String(flId), total: 0, perSlotTs: {} };
 
-    const lastAcc = s[wk][flId].perSlotTs[slotId] | 0;
-    if (raidTs > lastAcc) {
-      s[wk][flId].total += got;
-      s[wk][flId].perSlotTs[slotId] = raidTs;
-      setStats(s);
-      // ✅ Marcamos el reporte como “ya contado” globalmente
-      addSeenReport(reportId);
-      LOG('log','Stats add',{flId, slotId, got, week:wk, reportId});
-    } else {
-      // Igual marcamos como visto para evitar duplicado entre listas
-      addSeenReport(reportId);
+    // Definimos la ventana semanal UNA SOLA VEZ
+    // (Usando la versión actualizada de weekKeyNow que empieza en MON 00:00)
+    const wkKey = weekKeyNow();
+    const { start, end } = weekWindowByKey(wkKey);
+    const isCurrentWeek = (raidTs >= start && raidTs < end);
+
+    // --- 1. Lógica Original (Stats Semanales por Lista -> KEY_STATS) ---
+    
+    // Usamos el 'seen' de las stats semanales (el original -> KEY_STATS_SEEN_REPORTS)
+    if (!hasSeenReport(reportId)) {
+        
+        if (!isCurrentWeek) {
+            // Fuera de esta semana: no contamos, pero marcamos como visto para no duplicar
+            addSeenReport(reportId);
+        } else if (got <= 0) {
+            // Dentro de la semana pero vacío: no contamos, pero marcamos como visto
+            addSeenReport(reportId);
+        } else {
+            // Dentro de la semana y con botín: Lógica de suma
+            const s = getStats();
+            if (!s[wkKey]) s[wkKey] = { _window: { start, end } };
+            if (!s[wkKey][flId]) s[wkKey][flId] = { name: flName || String(flId), total: 0, perSlotTs: {} };
+
+            const lastAcc = s[wkKey][flId].perSlotTs[slotId] | 0;
+            
+            if (raidTs > lastAcc) {
+                // Reporte nuevo para este slot, lo sumamos
+                s[wkKey][flId].total += got;
+                s[wkKey][flId].perSlotTs[slotId] = raidTs;
+                setStats(s);
+                // ✅ Marcamos el reporte como “ya contado” globalmente (para stats semanales)
+                addSeenReport(reportId);
+                LOG('log','Stats add (Weekly)',{flId, slotId, got, week:wkKey, reportId});
+            } else {
+                // Reporte más viejo que el último contado (p.ej. de otra FL), solo marcar
+                addSeenReport(reportId);
+            }
+        }
     }
-  }
+    // --- FIN Lógica Original ---
+
+
+    // --- 2. Lógica Nueva (Stats Globales por Objetivo -> KEY_STATS_TARGET) ---
+    
+    // ❗ Usamos el 'seen' NUEVO (-> KEY_STATS_TARGET_SEEN)
+    // Esta lógica corre independientemente de la anterior
+    if (!hasSeenTargetReport(reportId)) {
+        try {
+            // addTargetStats se encarga de sus propios chequeos (got > 0)
+            // y de manejar la lógica de 4 semanas vs global.
+            addTargetStats(slot, raid, wkKey, { start, end });
+        } catch (e) {
+            LOG('warn', 'addTargetStats exception', e);
+        }
+    }
+    // --- FIN Lógica Nueva ---
+}
 
 
 function statsSummaryHTML(){
@@ -934,410 +1049,419 @@ function statsSummaryHTML(){
     }
 
 
+async function planForList(flId, gqlData){
+    console.log( "[planForList] START flId=", flId);
 
+    // --- base data ---
+    const farmList = gqlData?.farmList;
+    const slots = farmList?.slots || [];
+    const history = getHistory();
+    const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
+    const did = farmList?.ownerVillage?.id|0;
+    const vm  = findVillageByDid(did);
 
-  async function planForList(flId, gqlData){
-    const ts = () => new Date().toISOString();
-    console.log(ts(), "[planForList] START flId=", flId);
+    // --- Village Units & Budget Calculation ---
+    const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
+    const resPct = Math.max(0, Math.min(100, parseInt(LS.get(KEY_CFG_RESERVE_PCT, 0),10)||0));
+    const factor = (100 - resPct) / 100;
+    const budget = {}; // This is the REAL budget for this run
+    for (const k of UNIT_KEYS){ // UNIT_KEYS = ['t1', ..., 't10']
+        const v = villageUnits?.[k]|0;
+        budget[k] = Math.floor(v * factor);
+    }
 
-    // --- base data ---
-    const farmList = gqlData?.farmList;
-    const slots = farmList?.slots || [];
-    const history = getHistory();
-    const tribe = tscm.utils.getCurrentTribe() || 'GAUL';
-    const did = farmList?.ownerVillage?.id|0;
-    const vm  = findVillageByDid(did);
+    // --- Config & Whitelist ---
+    const wl = getWhitelist();
+    const cfg = {
+      whitelist: wl,
+      allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),
+      allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),
+      icon2DecayH: cfgGetInt(KEY_CFG_ICON2DECAYH, ICON2_DECAY_H),
+      burstN: cfgGetInt(KEY_CFG_BURST_N, BURST_DEFAULT.n),
+      burstDMin: cfgGetInt(KEY_CFG_BURST_DMIN, BURST_DEFAULT.dmin),
+      burstDMax: cfgGetInt(KEY_CFG_BURST_DMAX, BURST_DEFAULT.dmax),
+    };
 
-    const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-    const pool = getBudgetPool(did, villageUnits);
-    const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units||{}) };
+    // --- Initial Logging ---
+    const initialBudgetStr = Object.entries(budget).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+    console.log( `[planForList][${flId}] Initial Budget (${100-resPct}%): ${initialBudgetStr || '(Empty)'}`);
+    // console.log( "[planForList] cfg:", JSON.stringify(cfg)); // Optional: Log config if needed
+    console.log( `[planForList][${flId}] Slots in list: ${slots.length}`);
 
-    const wl = getWhitelist();
-    const cfg = {
-      whitelist: wl,
-      allowFallback: cfgGetBool(KEY_CFG_FALLBACK, true),
-      allowCrossGroupFallback: cfgGetBool(KEY_CFG_CROSS, false),
-      icon2DecayH: cfgGetInt(KEY_CFG_ICON2DECAYH, ICON2_DECAY_H),
-      burstN: cfgGetInt(KEY_CFG_BURST_N, BURST_DEFAULT.n),
-      burstDMin: cfgGetInt(KEY_CFG_BURST_DMIN, BURST_DEFAULT.dmin),
-      burstDMax: cfgGetInt(KEY_CFG_BURST_DMAX, BURST_DEFAULT.dmax),
-    };
+    // --- Plan Variables ---
+    const updates = [];
+    const candidates = [];
 
-    console.log(ts(), "[planForList] budget:", budget);
-    console.log(ts(), "[planForList] cfg:", cfg);
-    console.log(ts(), "[planForList] slots count:", slots.length);
+    // =========================
+    // STAGE 1: Build Candidates & Assign Group Score
+    // =========================
+    for (const sl of slots){
+      if (!sl?.id || !sl.isActive || sl.isSpying) continue;
 
-    const updates = [];
-    const candidates = [];
+      // Overload window check
+      if (sl.isRunning){
+        const over = cfgGetBool(KEY_CFG_OVERLOAD, false);
+        if (!over || !canOverloadSlot(sl)) {
+          // console.log( `[cand][${sl.id}] Overload filtered out`); // Optional log
+          continue;
+        }
+      }
 
-    // -------------------------
-    // STAGE 1: build candidates
-    // -------------------------
-    for (const sl of slots){
-      if (!sl?.id) continue;
-      if (!sl.isActive) continue;
+      const st = readSlotState(sl.id);
+      const lr = sl?.lastRaid || {};
+      const ttype = sl?.target?.type|0; // 0=aldea,1=capital,2=oasis ocupado,3=oasis libre
+      const curIcon = parseInt(lr?.icon ?? st.lastIcon ?? -1, 10);
 
-      // overload window
-      if (sl.isRunning){
-        const over = cfgGetBool(KEY_CFG_OVERLOAD, false);
-        if (!over) continue;
-        if (!canOverloadSlot(sl)) {
-          console.log(ts(), "[cand] overload filtered out", sl.id, { running: sl.runningAttacks, nextAttackAt: sl.nextAttackAt });
-          continue;
-        }
-      }
-      if (sl.isSpying) continue;
+      // Assign initial properties and group score
+      sl.__estimatedTroops = 0; // Default for non-PLAN or failed pre-calc
+      sl.__dist = 0;
+      sl.__lastAttackTs = 0;
 
-      const st = readSlotState(sl.id);
-      const lr = sl?.lastRaid || {};
-      const ttype = sl?.target?.type|0; // 0=aldea,1=capital,2=oasis ocupado,3=oasis libre
-      const curIcon = parseInt(lr?.icon ?? st.lastIcon ?? -1, 10);
+      try {
+        if (ttype === 2){ // Oasis Ocupado
+          continue; // Skip entirely
+        } else if (ttype === 3) { // Oasis Libre
+          const didOwner = farmList?.ownerVillage?.id|0;
+          let vmLocal = findVillageByDid(didOwner);
+          if (!vmLocal) { // Try rescan if needed
+            try{ const r = scanAllVillagesFromSidebar(); if (Object.keys(r).length) setVillagesMap(r); } catch{}
+            vmLocal = findVillageByDid(didOwner);
+          }
+          if (!vmLocal) {
+            console.log( `[cand][${sl.id}] Oasis - Cannot find owner village coords (did: ${didOwner})`);
+            continue; // Skip if still no coords
+          }
 
-      // if (curIcon === 2 && (lr?.reportId && lr?.authKey)){
-      //   console.log(ts(), "[cand] icon2 → report", sl.id, { reportId: lr.reportId, authKey: lr.authKey, time: lr.time });
-      // }
+          const stLocal = readSlotState(sl.id);
+          const ageMs = lastAttackAgeMs(sl, stLocal);
+          const oasisWinH = cfgGetInt(KEY_CFG_OASIS_WIN_H, 1);
+          const withinWindow = ageMs <= (oasisWinH * 3600 * 1000);
+          const wasRed = iconIsRed(sl, stLocal);
 
-      try{
-        // Oasis ocupado → jamás desde farmlist
-        if (ttype === 2){
-          console.log(ts(), "[cand] occupied oasis → skip", sl.id, { x: sl?.target?.x|0, y: sl?.target?.y|0 });
-          continue;
-        }
+          if (withinWindow && wasRed) {
+            // console.log( `[cand][${sl.id}] Oasis - Skip recent red`); // Optional log
+            continue;
+          }
 
-        // Oasis libre → lógica de ventana + límite total de envíos por ciclo
-        if (ttype === 3){
-          const didOwner = farmList?.ownerVillage?.id|0;
-          let vmLocal = findVillageByDid(didOwner);
-          if (!vmLocal){
-            try{
-              const rescanned = scanAllVillagesFromSidebar();
-              if (Object.keys(rescanned).length) setVillagesMap(rescanned);
-            }catch{}
-            vmLocal = findVillageByDid(didOwner);
-          }
-          if (!vmLocal){
-            console.log(ts(), "[cand] free oasis: cannot resolve coords from did", { did: didOwner, slotId: sl.id });
-            continue;
-          }
+          // Assign oasis specific properties
+          sl.__oasisMode = (withinWindow && !wasRed) ? 'MIN' : 'PLAN';
+          sl.__vmDid = vmLocal.did;
+          sl.__vmX = vmLocal.x;
+          sl.__vmY = vmLocal.y;
+          sl.__lastAttackTs = lastAttackTs(sl, stLocal) || 0;
+          sl.__dist = dist(vmLocal.x, vmLocal.y, sl?.target?.x|0, sl?.target?.y|0);
+          sl.__groupScore = (sl.__oasisMode === 'PLAN') ? 0 : 1; // PLAN=0, MIN=1
+          candidates.push(sl);
 
-          const stLocal  = readSlotState(sl.id);
-          const ageMs    = lastAttackAgeMs(sl, stLocal);
-          // --- INICIO: REEMPLAZO OASIS_WINDOW_MS ---
-          const oasisWinH = cfgGetInt(KEY_CFG_OASIS_WIN_H, 1);
-          const oasisWindowMs = oasisWinH * 3600 * 1000;
-          const withinWindow = ageMs <= oasisWindowMs;
-          // --- FIN: REEMPLAZO ---
-          const wasRed   = iconIsRed(sl, stLocal);
+        } else { // Aldeas (0 o 1)
+          if (curIcon === 3 || isBlocked(st)) {
+            if (curIcon === 3) writeSlotState(sl.id, { lastIcon: 3 });
+            // console.log( `[cand][${sl.id}] Village - Skip icon 3 or blocked`); // Optional log
+            continue; // Skip red or blocked
+          }
+          // Clean blocks on icon1
+          if (curIcon === 1 && (st.blockedUntil > now() || st.permaUntil > now())){
+            // console.log( `[cand][${sl.id}] Village - Cleaned block on icon 1`); // Optional log
+            writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
+          }
+          sl.__groupScore = 2; // REST=2
+          candidates.push(sl);
+        }
+      } catch(e) {
+        console.log( `[cand][${sl.id}] Error processing slot:`, e);
+      }
+    }
+    console.log( `[planForList][${flId}] Stage 1 Candidates Count: ${candidates.length}`);
+    // console.log( "[planForList] Stage 1 Candidates:", candidates.map(c=>({id: c.id, group: c.__groupScore, mode: c.__oasisMode})) ); // More detailed log if needed
 
-          if (withinWindow && wasRed){
-            console.log(ts(), `[cand][oasis] within ${oasisWinH}h & last red → skip`, sl.id, { ageMs });
-            continue;
-          }
+    // =========================
+    // STAGE 1.5: Pre-calculate troop estimate for PLAN oases
+    // =========================
+    const FAKE_TROOPS = { t1: 10000, t2: 10000, t3: 10000, t4: 0, t5: 0, t6: 0 };
+    console.log( `[planForList][${flId}] Stage 1.5 Pre-calculating PLAN oasis estimates...`);
+    let preCalcCount = 0;
+    for (const sl of candidates) {
+      if (sl.__groupScore === 0) { // Only for PLAN oases
+        preCalcCount++;
+        try {
+          // Use await here to ensure sequential processing if needed, though planner cache should handle it
+          const planEstimate = await tscm.utils.planOasisRaidNoHero(
+            sl.__vmDid, sl.__vmX, sl.__vmY,
+            sl?.target?.x|0, sl?.target?.y|0,
+            { ...FAKE_TROOPS }, wl, 0.01
+          );
+          if (planEstimate?.ok) {
+            sl.__estimatedTroops = safeSumUnits(planEstimate.send);
+            console.log( `[planForList][PreCalc][${sl.id}] Estimated Troops: ${sl.__estimatedTroops}`);
+          } else {
+            sl.__estimatedTroops = 0; // Low priority if planner fails
+            console.log( `[planForList][PreCalc][${sl.id}] Planner failed: ${planEstimate?.reason || 'Unknown'}`);
+          }
+        } catch (e) {
+          console.log( `[planForList][PreCalc][${sl.id}] Error estimating troops:`, e);
+          sl.__estimatedTroops = 0; // Low priority on error
+        }
+      }
+    }
+    console.log( `[planForList][${flId}] Stage 1.5 Pre-calculation finished for ${preCalcCount} PLAN oases.`);
 
-          sl.__oasisMode = (withinWindow && !wasRed) ? 'MIN' : 'PLAN'; // <-- Corregido aquí, usa withinWindow
-          sl.__vmDid = vmLocal.did;
-          sl.__vmX   = vmLocal.x;
-          sl.__vmY   = vmLocal.y;
-          sl.__lastAttackTs = lastAttackTs(sl, stLocal) || 0;
-          sl.__dist = dist(vmLocal.x, vmLocal.y, sl?.target?.x|0, sl?.target?.y|0);
-          sl.__neverAttacked = !everAttacked(sl, stLocal, history);
-          sl.__isRunning = sl.isRunning;
-          sl.__curIcon = curIcon;
-          candidates.push(sl);
-          continue;
-        }
+    // =========================
+    // STAGE 2: New Ordering Logic
+    // =========================
+    candidates.sort((a, b) => {
+      // 1. Sort by Group Score (PLAN=0, MIN=1, REST=2) - Ascending
+      if (a.__groupScore !== b.__groupScore) {
+        return a.__groupScore - b.__groupScore;
+      }
 
-        // A partir de acá: aldeas (0/1)
-        if (curIcon === 3){
-          console.log(ts(), "[cand] skip icon3 (non-oasis)", sl.id);
-          writeSlotState(sl.id, { lastIcon: 3 });
-          continue;
-        }
-        if (curIcon === 1 && (st.blockedUntil > now() || st.permaUntil > now())){
-          console.log(ts(), "[cand] clean blocks on icon1", sl.id);
-          writeSlotState(sl.id, { blockedUntil: 0, permaUntil: 0, probation: false, lastIcon: 1 });
-        }
-        if (isBlocked(readSlotState(sl.id))){
-          console.log(ts(), "[cand] blocked", sl.id);
-          continue;
-        }
-        if (Number.isNaN(curIcon) || curIcon < 0){
-          console.log(ts(), "[cand] no icon → auto-candidate", sl.id);
-        }
-        candidates.push(sl);
+      // 2. Sort within groups
+      switch (a.__groupScore) {
+        case 0: // PLAN Oases
+          // Sort by Estimated Troops (Descending), then Distance (Ascending)
+          if (b.__estimatedTroops !== a.__estimatedTroops) {
+            return b.__estimatedTroops - a.__estimatedTroops; // Higher estimated troops first
+          }
+          return (a.__dist || 0) - (b.__dist || 0); // Closer distance first as tie-breaker
 
-      }catch(e){
-        console.log(ts(), "[cand] error", sl?.id, e);
-      }
-    }
+        case 1: // MIN Oases
+          // Sort by Distance (Ascending), then Last Attack Time (Descending - newer first)
+          if ((a.__dist || 0) !== (b.__dist || 0)) {
+            return (a.__dist || 0) - (b.__dist || 0); // Closer first
+          }
+          return (b.__lastAttackTs || 0) - (a.__lastAttackTs || 0); // Newer attack first
 
-    console.log(ts(), "[planForList] candidates:", candidates.map(c=>c.id));
+        case 2: // REST (Aldeas)
+          // Use the original priOrder function
+          const priA = priOrder(a, history);
+          const priB = priOrder(b, history);
+          for (let i = 0; i < priA.length; i++) {
+            if (priA[i] !== priB[i]) return priA[i] - priB[i];
+          }
+          return 0;
 
-    // -------------------------
-    // STAGE 2: ordering
-    // -------------------------
-    if (isOasisOnlyList(farmList)) {
-      // Distancia ASC, último ataque DESC
-      candidates.sort((a,b)=>{
-        const da = a.__dist ?? 0, db = b.__dist ?? 0;
-        if (da !== db) return da - db;
-        const ta = a.__lastAttackTs ?? 0, tb = b.__lastAttackTs ?? 0;
-        return tb - ta; // más reciente primero
-      });
-    } else {
-      // orden configurable para aldeas
-      candidates.sort((a,b)=>{
-        const A=priOrder(a,history), B=priOrder(b,history);
-        for (let i=0;i<A.length;i++){ if (A[i]!==B[i]) return A[i]-B[i]; }
-        return 0;
-      });
-    }
+        default:
+          return 0;
+      }
+    });
 
-    console.log(ts(), "[planForList] ordered candidates:", candidates.map(c=>c.id));
+    console.log( `[planForList][${flId}] Stage 2 Ordered Candidates (Top 5):`, candidates.slice(0, 5).map(c => ({id: c.id, group: c.__groupScore, estTrp: c.__estimatedTroops, dist: c.__dist.toFixed(1)})) );
 
-    // -------------------------
-    // STAGE 3: processing plan
-    // -------------------------
-    const chosenTargets = [];
-    const burstsToSchedule = [];
+    // =========================
+    // STAGE 3: Processing Plan (using REAL budget)
+    // =========================
+    const chosenTargets = [];
+    const burstsToSchedule = [];
+    let oasisSendsUsed = 0; // Counter for maxCycleSends
 
-    let haltDueToLowTroops = false;
-    let oasisSendsUsed = 0; // MIN + PLAN
+    for (const sl of candidates){
+      const slotId = sl.id;
+      const st = readSlotState(slotId); // Read state again for latest info if needed
+      const lastIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
+      const ttype = sl?.target?.type|0;
 
-    for (const sl of candidates){
-      const slotId = sl.id;
-      const st = readSlotState(slotId);
-      const lastIcon = parseInt(sl?.lastRaid?.icon ?? st.lastIcon ?? -1,10);
-      const ttype = sl?.target?.type|0;
+      // --- Oasis Processing ---
+      if (ttype === 3){ // Check based on original type
+        const didOwner = sl.__vmDid; // Use stored value from Stage 1
+        const vmX = sl.__vmX;
+        const vmY = sl.__vmY;
+        const poolUnits = budget; // Use the REAL, mutable budget
 
-      // --- Oasis libres con nueva lógica ---
-      if (ttype === 3){
-        const didOwner = farmList?.ownerVillage?.id|0;
-        const vmX = sl.__vmX ?? vm?.x, vmY = sl.__vmY ?? vm?.y;
-        const poolUnits = budget;
+        if (sl.__oasisMode === 'MIN'){
+          // --- MIN Mode Logic ---
+          const cav = chooseCavUnit(poolUnits, wl);
+          const inf = cav ? null : chooseInfUnit(poolUnits, wl);
+          const minCav = cfgGetInt(KEY_CFG_OASIS_MIN_CAV, 15);
+          const minInf = cfgGetInt(KEY_CFG_OASIS_MIN_INF, 20);
+          const pack = cav ? { [cav]: (lastIcon === 1 ? 5 : minCav) } : (inf ? { [inf]: (lastIcon === 1 ? 5 : minInf) } : null);
 
-        if (sl.__oasisMode === 'MIN'){
-          // 5 cav si hay, si no 10 inf
-          const cav = chooseCavUnit(poolUnits, wl);
-          const inf = cav ? null : chooseInfUnit(poolUnits, wl);
+          if (!pack || !hasBudgetFor(pack, poolUnits)){
+            const packStr = pack ? Object.entries(pack).map(([k,v])=>`${k}:${v}`).join(',') : 'None';
+            console.log( `[proc][oasis][MIN][${slotId}] Insufficient troops! Wants: ${packStr} -> Break`);
+            break; // Stop processing this list
+          }
 
-          // --- INICIO: REEMPLAZO MIN_CAV/INF ---
-          const minCav = cfgGetInt(KEY_CFG_OASIS_MIN_CAV, 15);
-          const minInf = cfgGetInt(KEY_CFG_OASIS_MIN_INF, 20);
-          const pack = cav ? { [cav]: (lastIcon === 1 ? 5 : minCav) } : (inf ? { [inf]: (lastIcon === 1 ? 5 : minInf) } : null);
-          // --- FIN: REEMPLAZO ---
-          
+          // Update if needed
+          if (unitDiffers(sl?.troop||{}, pack)){
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+          }
+          // Debitar REAL budget
+          for (const [k, v] of Object.entries(pack)) { if (v > 0) budget[k] = (budget[k] || 0) - v; }
+          const budgetAfterMinStr = Object.entries(budget).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+          console.log( `[proc][oasis][MIN][${slotId}] Budget After: ${budgetAfterMinStr || '(Empty)'}`);
 
+          writeSlotState(slotId, { lastOutcome: 'GOOD', desiredCount: sumUnits(pack), lastSentTs: now(), lastGoodTs: now() });
+          chosenTargets.push(slotId);
+          continue; // Next candidate
+        }
 
-          if (!pack || !hasBudgetFor(pack, poolUnits)){
-            console.log(ts(), "[proc][oasis][MIN] insufficient troops → HALT cycle", { pack, poolUnits });
-            haltDueToLowTroops = true;
-            break;
-          }
+        if (sl.__oasisMode === 'PLAN') {
+          // --- PLAN Mode Logic ---
+          if (sl.__isRunning) { console.log( `[proc][oasis][PLAN][${slotId}] Skip running`); continue; }
+          const maxCycleSends = cfgGetInt(KEY_CFG_OASIS_MAX_CYCLE, 100);
+          if (oasisSendsUsed >= maxCycleSends) { console.log( `[proc][oasis][PLAN][${slotId}] Max cycle sends reached (${maxCycleSends}) -> Skip`); continue; }
 
-          if (unitDiffers(sl?.troop||{}, pack)){
-            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-          }
-          debitBudgetPool(did, pack);
+          let plan = null;
+          try {
+            const budgetBeforeStr = Object.entries(poolUnits).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+            console.log( `[proc][oasis][PLAN][${slotId}] Budget BEFORE planner: ${budgetBeforeStr || '(Empty)'}`);
+            // Pass a COPY of the REAL budget
+            plan = await tscm.utils.planOasisRaidNoHero(didOwner, vmX, vmY, sl?.target?.x|0, sl?.target?.y|0, { ...poolUnits }, wl, 0.01);
+          } catch (e) { console.log( `[proc][oasis][PLAN][${slotId}] Planner error:`, e); continue; }
 
-          writeSlotState(slotId, {
-            lastOutcome: 'GOOD',
-            desiredCount: sumUnits(pack),
-            lastSentTs: now(),
-            lastGoodTs: now()
-          });
-          chosenTargets.push(slotId);
-          continue;
-        }
+          if (!plan?.ok) {
+            console.log( `[proc][oasis][PLAN][${slotId}] Plan not ok -> Skip (Reason: ${plan?.reason || 'Unknown'})`);
+            if(plan?.reason === 'no_unit_meets_min'){
+              console.log( `[proc][oasis][PLAN][${slotId}] Reason: ${plan?.reason} -> Break`);
+              break; // Stop processing this list
+            }
+            continue;
+          }
 
+          const pack = normalizeUnits(plan.send) || {};
+          const planned = safeSumUnits(pack);
+          const packStr = Object.entries(pack).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+          console.log( `[proc][oasis][PLAN][${slotId}] Planner wants: ${packStr || '(None)'}`);
 
-        if (sl.__oasisMode === 'PLAN'){
-          if(sl.__isRunning){
-            console.log(ts(), "[proc][oasis][PLAN] skip running slot", slotId);
-            continue;
-          }
+          if (planned <= 0 || !hasBudgetFor(pack, poolUnits)) {
+            const budgetCurrentStr = Object.entries(poolUnits).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+            console.log( `[proc][oasis][PLAN][${slotId}] Insufficient troops! Wants: ${packStr || '(None)'}, Has: ${budgetCurrentStr || '(Empty)'} -> Break`);
+            break; // Stop processing this list
+          }
 
-          // --- INICIO: REEMPLAZO MAX_CYCLE ---
-          const maxCycleSends = cfgGetInt(KEY_CFG_OASIS_MAX_CYCLE, 100);
-          if (oasisSendsUsed >= maxCycleSends){
-            console.log(ts(), "[proc][oasis][PLAN] reached max sends this cycle → skip", slotId, { max: maxCycleSends });
-            continue;
-          }
-          // --- FIN: REEMPLAZO ---
+          // Update if needed
+          if (unitDiffers(sl?.troop || {}, pack)) {
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active: true, abandoned: false, units: toFullUnitPack(pack) });
+          }
 
-          let plan = null;
-          try{
-            plan = await tscm.utils.planOasisRaidNoHero(didOwner, vmX, vmY, sl?.target?.x|0, sl?.target?.y|0, poolUnits, wl, 0.01);
-          }catch(e){
-            console.log(ts(), "[proc][oasis][PLAN] planner error", slotId, e);
-            continue;
-          }
-          if (!plan?.ok){
-            console.log(ts(), "[proc][oasis][PLAN] plan not ok → skip", slotId, plan?.reason);
-            continue;
-          }
+          // Debitar REAL budget
+          for (const [k, v] of Object.entries(pack)) { if (v > 0) budget[k] = (budget[k] || 0) - v; }
+          const budgetAfterStr = Object.entries(budget).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+          console.log( `[proc][oasis][PLAN][${slotId}] Budget AFTER debit: ${budgetAfterStr || '(Empty)'}`);
 
-          const pack = normalizeUnits(plan.send) || {};
-          const planned = safeSumUnits(pack);
-          if (planned <= 0 || !hasBudgetFor(pack, poolUnits)){
-            console.log(ts(), "[proc][oasis][PLAN] insufficient troops for plan → HALT cycle", { planned, pack, poolUnits });
-            haltDueToLowTroops = true;
-            break;
-          }
+          writeSlotState(slotId, { lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
+          chosenTargets.push(slotId);
+          oasisSendsUsed += 1;
+          continue; // Next candidate
+        }
+      } else { // --- Aldea Processing (Group 2) ---
+        // --- ICON 3 check ---
+        if (lastIcon===3){
+          // console.log( `[proc][village][${slotId}] Skip icon 3`); // Optional log
+          writeSlotState(slotId, { lastIcon:3 });
+          continue;
+        }
 
-          if (unitDiffers(sl?.troop||{}, pack)){
-            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-          }
-          debitBudgetPool(did, pack);
+        const mySent = history[slotId]||0;
+        const lo = lootOutcome(sl.lastRaid, mySent);
+        const dx = dist(vm.x, vm.y, sl?.target?.x|0, sl?.target?.y|0);
 
-          writeSlotState(slotId, {
-            lastOutcome: 'GOOD',
-            desiredCount: planned,
-            lastSentTs: now(),
-            lastGoodTs: now()
-          });
-          chosenTargets.push(slotId);
-          oasisSendsUsed += 1;
-          continue;
-        }
+        // --- Icon 2 Logic ---
+        if (lastIcon===2){
+          const decision = await getReportDecision(sl);
+          if (decision){
+            if (!decision.reAttack){
+              // console.log( `[proc][village][${slotId}] Icon 2 decision: NO re-attack`); // Optional log
+              writeSlotState(slotId, { lastIcon:2, lastOutcome: decision.rating, ...blockForHours(cfg.icon2DecayH|0) });
+              continue;
+            }
+            const baseGrow = decision.barrida ? Math.max(st.desiredCount||6, 10) : Math.max(st.desiredCount||5, 6);
+            let desired = Math.ceil(baseGrow * (decision.multiplier || 1));
+            desired = Math.max(4, Math.min(desired, 60));
+            const pack = buildPack(desired, dx, tribe, budget, cfg); // budget is mutated here
+            const planned = sumUnits(pack);
+            if (planned<=0){ console.log( `[proc][village][${slotId}] Icon 2 decision: No troops left`); continue; }
 
-        console.log(ts(), "[proc][oasis] unknown mode → skip", slotId, sl.__oasisMode);
-        continue;
-      }
+            if (unitDiffers(sl?.troop||{}, pack)){
+              updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+            }
+            chosenTargets.push(slotId);
+            // No explicit debit here, buildPack did it
 
-      // --- ICON 3: redundancia ---
-      if (lastIcon===3){
-        console.log(ts(), "[proc] skip icon3", slotId);
-        writeSlotState(slotId, { lastIcon:3 });
-        continue;
-      }
+            const goodish = /muy bueno|bueno/i.test(decision.rating) || decision.barrida === true;
+            writeSlotState(slotId, { lastIcon: 2, lastOutcome: decision.rating, desiredCount: planned, lastSentTs: now(), ...(goodish ? { lastGoodTs: now() } : {}) });
+            if (cfg.burstN>0 && decision.multiplier >= 1){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
+            continue;
+          } else { // Fallback if no decision
+            // console.log( `[proc][village][${slotId}] Icon 2: No report decision, using outcome: ${lo.outcome}`); // Optional log
+            if (lo.outcome==='GOOD'){
+              const desired = Math.max(st.desiredCount||5, 10);
+              const pack = buildPack(desired, dx, tribe, budget, cfg); // budget mutated
+              const planned = sumUnits(pack);
+              if (planned<=0){ console.log( `[proc][village][${slotId}] Icon 2 fallback: No troops`); continue; }
+              if (unitDiffers(sl?.troop||{}, pack)){
+                updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+              }
+              chosenTargets.push(slotId);
+              writeSlotState(slotId, { lastIcon: 2, lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
+            } else {
+              writeSlotState(slotId, { lastIcon:2, lastOutcome: lo.outcome, badStreak:(st.badStreak|0)+1, ...blockForHours(cfg.icon2DecayH|0) });
+            }
+            continue;
+          }
+        }
 
-      // --- Aldeas: pipeline original ---
-      const mySent = history[slotId]||0;
-      const lo = lootOutcome(sl.lastRaid, mySent);
-      const dx = dist(vm.x, vm.y, sl?.target?.x|0, sl?.target?.y|0);
+        // --- Icon 1 / No Icon Logic ---
+        if (lo.outcome==='GOOD'){
+          // console.log( `[proc][village][${slotId}] Icon 1/None: GOOD`); // Optional log
+          const desired = Math.max( (st.desiredCount|0)+2, 5 );
+          const pack = buildPack(desired, dx, tribe, budget, cfg); // budget mutated
+          const planned = sumUnits(pack);
+          if (planned<=0){ console.log( `[proc][village][${slotId}] GOOD: No troops`); continue; }
+          if (unitDiffers(sl?.troop||{}, pack)){
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+          }
+          chosenTargets.push(slotId);
+          if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
+          writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
+          continue;
+        } else if (lo.outcome==='MID'){
+          // console.log( `[proc][village][${slotId}] Icon 1/None: MID`); // Optional log
+          const desired = Math.max(st.desiredCount||5, 6);
+          const pack = buildPack(desired, dx, tribe, budget, cfg); // budget mutated
+          const planned = sumUnits(pack);
+          if (planned<=0){ console.log( `[proc][village][${slotId}] MID: No troops`); continue; }
+          if (unitDiffers(sl?.troop||{}, pack)){
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+          }
+          chosenTargets.push(slotId);
+          writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'MID', desiredCount: planned, lastSentTs: now() });
+          continue;
+        } else if (lo.outcome==='LOW' || lo.outcome==='ZERO'){
+          // console.log( `[proc][village][${slotId}] Icon 1/None: LOW/ZERO`); // Optional log
+          const desired = Math.max(5, Math.floor((st.desiredCount||5)));
+          const pack = buildPack(desired, dx, tribe, budget, cfg); // budget mutated
+          const planned = sumUnits(pack);
+          if (planned<=0){ console.log( `[proc][village][${slotId}] LOW/ZERO: No troops`); continue; }
+          if (unitDiffers(sl?.troop||{}, pack)){
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+          }
+          chosenTargets.push(slotId);
+          writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: lo.outcome, desiredCount: planned, lastSentTs: now() });
+          continue;
+        } else { // UNKNOWN Outcome
+          // console.log( `[proc][village][${slotId}] Icon 1/None: UNKNOWN`); // Optional log
+          const desired = 5;
+          const pack = buildPack(desired, dx, tribe, budget, cfg); // budget mutated
+          const planned = sumUnits(pack);
+          if (planned<=0){ console.log( `[proc][village][${slotId}] UNKNOWN: No troops`); continue; }
+          if (unitDiffers(sl?.troop||{}, pack)){
+            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
+          }
+          chosenTargets.push(slotId);
+          writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'UNKNOWN', desiredCount: planned, lastSentTs: now() });
+          continue;
+        }
+      } // Fin del else para Aldeas
+    } // Fin del for (const sl of candidates)
 
-      if (lastIcon===2){
-        const decision = await getReportDecision(sl);
-        if (decision){
-          if (!decision.reAttack){
-            console.log(ts(), "[proc] icon2 decision: DO NOT re-attack", slotId, decision);
-            writeSlotState(slotId, { lastIcon:2, lastOutcome: decision.rating, ...blockForHours(cfg.icon2DecayH|0) });
-            continue;
-          }
-          const baseGrow = decision.barrida ? Math.max(st.desiredCount||6, 10) : Math.max(st.desiredCount||5, 6);
-          let desired = Math.ceil(baseGrow * (decision.multiplier || 1));
-          desired = Math.max(4, Math.min(desired, 60));
-          const pack = buildPack(desired, dx, tribe, budget, cfg);
-          const planned = sumUnits(pack);
-          if (planned<=0){ console.log(ts(), "[proc] icon2 decision no troops", slotId); continue; }
+    // No more haltDueToLowTroops check
 
-          if (unitDiffers(sl?.troop||{}, pack)){
-            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-          }
-          chosenTargets.push(slotId);
-          debitBudgetPool(did, pack);
+    // Final Log
+    const finalBudgetStr = Object.entries(budget).filter(([k,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(', ');
+    console.log( `[planForList][${flId}] END | Updates: ${updates.length}, Chosen Targets: ${chosenTargets.length}, Bursts: ${burstsToSchedule.length}, Oasis Sent: ${oasisSendsUsed}, Final Budget: ${finalBudgetStr || '(Empty)'}`);
 
-          const goodish = /muy bueno|bueno/i.test(decision.rating) || decision.barrida === true;
-          writeSlotState(slotId, {
-            lastIcon: 2,
-            lastOutcome: decision.rating,
-            desiredCount: planned,
-            lastSentTs: now(),
-            ...(goodish ? { lastGoodTs: now() } : {})
-          });
-
-          if (cfg.burstN>0 && decision.multiplier >= 1){
-            burstsToSchedule.push({slotId, bursts: cfg.burstN});
-          }
-          continue;
-        }
-
-        // Fallback sin decisión
-        console.log(ts(), "[proc] icon2 no decision → fallback lootOutcome", slotId, lo);
-        if (lo.outcome==='GOOD'){
-          const desired = Math.max(st.desiredCount||5, 10);
-          const pack = buildPack(desired, dx, tribe, budget, cfg);
-          const planned = sumUnits(pack);
-          if (planned<=0){ console.log(ts(), "[proc] icon2 fallback no troops", slotId); continue; }
-          if (unitDiffers(sl?.troop||{}, pack)){
-            updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-          }
-          chosenTargets.push(slotId);
-          debitBudgetPool(did, pack);
-          writeSlotState(slotId, { lastIcon: 2, lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
-        } else {
-          writeSlotState(slotId, { lastIcon:2, lastOutcome: lo.outcome, badStreak:(st.badStreak|0)+1, ...blockForHours(cfg.icon2DecayH|0) });
-        }
-        continue;
-      }
-
-      if (lo.outcome==='GOOD'){
-        console.log(ts(), "[proc] icon1/none GOOD", slotId);
-        const desired = Math.max( (st.desiredCount|0)+2, 5 );
-        const pack = buildPack(desired, dx, tribe, budget, cfg);
-        const planned = sumUnits(pack);
-        if (planned<=0){ console.log(ts(), "[proc] no troops", slotId); continue; }
-        if (unitDiffers(sl?.troop||{}, pack)){
-          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-        }
-        chosenTargets.push(slotId);
-        debitBudgetPool(did,pack);
-
-        if (cfg.burstN>0){ burstsToSchedule.push({slotId, bursts: cfg.burstN}); }
-        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'GOOD', desiredCount: planned, lastSentTs: now(), lastGoodTs: now() });
-
-      } else if (lo.outcome==='MID'){
-        console.log(ts(), "[proc] icon1/none MID", slotId);
-        const desired = Math.max(st.desiredCount||5, 6);
-        const pack = buildPack(desired, dx, tribe, budget, cfg);
-        const planned = sumUnits(pack);
-        if (planned<=0){ console.log(ts(), "[proc] no troops", slotId); continue; }
-        if (unitDiffers(sl?.troop||{}, pack)){
-          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-        }
-        chosenTargets.push(slotId);
-        debitBudgetPool(did,pack);
-        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'MID', desiredCount: planned, lastSentTs: now() });
-
-      } else if (lo.outcome==='LOW' || lo.outcome==='ZERO'){
-        console.log(ts(), "[proc] icon1/none LOW/ZERO", slotId);
-        const desired = Math.max(5, Math.floor((st.desiredCount||5)));
-        const pack = buildPack(desired, dx, tribe, budget, cfg);
-        const planned = sumUnits(pack);
-        if (planned<=0){ console.log(ts(), "[proc] no troops", slotId); continue; }
-        if (unitDiffers(sl?.troop||{}, pack)){
-          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-        }
-        chosenTargets.push(slotId);
-        debitBudgetPool(did,pack);
-        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: lo.outcome, desiredCount: planned, lastSentTs: now() });
-
-      } else {
-        console.log(ts(), "[proc] icon1/none UNKNOWN", slotId);
-        const desired = 5;
-        const pack = buildPack(desired, dx, tribe, budget, cfg);
-        const planned = sumUnits(pack);
-        if (planned<=0){ console.log(ts(), "[proc] no troops", slotId); continue; }
-        if (unitDiffers(sl?.troop||{}, pack)){
-          updates.push({ listId: flId, id: slotId, x: sl?.target?.x, y: sl?.target?.y, active:true, abandoned:false, units: toFullUnitPack(pack) });
-        }
-        chosenTargets.push(slotId);
-        debitBudgetPool(did,pack);
-        writeSlotState(slotId, { lastIcon: (lastIcon<0?1:lastIcon), lastOutcome: 'UNKNOWN', desiredCount: planned, lastSentTs: now() });
-      }
-    }
-
-    if (haltDueToLowTroops){
-      console.log(ts(), "[planForList] HALT due to low troops — defer to next cycle");
-      return { updates, chosenTargets, burstsToSchedule: [] };
-    }
-
-    console.log(ts(), "[planForList] END updates:", updates, "chosenTargets:", chosenTargets, "burstsToSchedule:", burstsToSchedule, "oasisSendsUsed:", oasisSendsUsed);
-    return { updates, chosenTargets, burstsToSchedule };
-  }
-
-
+    return { updates, chosenTargets, burstsToSchedule };
+  } // <<< FIN DE planForList >>>
   // ───────────────────────────────────────────────────────────────────
   // QUICK BURST (icon1 GOOD) - per slot
   // ───────────────────────────────────────────────────────────────────
@@ -1406,8 +1530,17 @@ function statsSummaryHTML(){
           const desired = Math.max((st.desiredCount || 5) + 1, 6);
 
           const villageUnits = farmList?.ownerVillage?.troops?.ownTroopsAtTown?.units || {};
-          const pool   = getBudgetPool(did, villageUnits);
-          const budget = { t1:0,t2:0,t3:0,t4:0,t5:0,t6:0,t7:0,t8:0,t9:0,t10:0, ...(pool?.units || {}) };
+          // --- INICIO: CAMBIO RESERVA POR LISTA (BURST) ---
+          const resPct = Math.max(0, Math.min(100, parseInt(LS.get(KEY_CFG_RESERVE_PCT, 0),10)||0));
+          const factor = (100 - resPct) / 100;
+          const budget = {};
+          for (const k of ['t1','t2','t3','t4','t5','t6','t7','t8','t9','t10']){
+              const v = villageUnits?.[k]|0;
+              budget[k] = Math.floor(v * factor);
+          }
+          // const pool = getBudgetPool(did, villageUnits); // <--- LÍNEA ELIMINADA
+          // const budget = { ... , ...(pool?.units || {}) }; // <--- LÍNEA MODIFICADA ARRIBA
+          // --- FIN: CAMBIO RESERVA POR LISTA (BURST) ---
 
           const pack    = buildPack(desired, dx, tribe, budget, cfg);
           const planned = sumUnits(pack);
@@ -1426,7 +1559,7 @@ function statsSummaryHTML(){
             }]);
           }
 
-          debitBudgetPool(did, pack);
+          //debitBudgetPool(did, pack);
           await sendTargets(flId, [slotId]);
 
           writeSlotState(slotId, { lastSentTs: now(), desiredCount: planned });
@@ -1480,7 +1613,7 @@ function statsSummaryHTML(){
     try{
       for (const sl of (farmList.slots||[])){
         if (!sl?.id) continue;
-        addStats(flId, farmList.name, sl.id, sl.lastRaid);
+        addStats(flId, farmList.name, sl, sl.lastRaid);
       }
     }catch(e){ LOG('warn','Stats scan error',e); }
 
@@ -1806,7 +1939,7 @@ function statsSummaryHTML(){
           <option value="120">2h</option>
         </select>
         <button id="io-reset" title="Reset total">♻️ Reset</button>
-        <label style="margin-left:auto">DryRun</label>
+        <button id="io-target-stats" title="Estadísticas por Objetivo" style="padding: 2px 6px;">🎯</button> <label style="margin-left:auto">DryRun</label>
         <input type="checkbox" id="io-dry">
       </div>
 
@@ -1877,6 +2010,38 @@ function statsSummaryHTML(){
     </div>
   `;
   document.body.appendChild(ui);
+
+  const modalHTML = `
+    <div id="icononly-modal-bg" class="io-modal-hidden">
+        <div id="icononly-modal-content">
+            <div id="icononly-modal-hdr">
+                <span>Estadísticas por Objetivo</span>
+                <button id="icononly-modal-close" title="Cerrar">×</button>
+            </div>
+            <div id="icononly-modal-body">
+                <div class="io-modal-tbl-wrap">
+                    <table id="io-modal-tbl">
+                        <thead>
+                            <tr>
+                                <th>Nombre</th>
+                                <th>Tipo</th>
+                                <th>Coords</th>
+                                <th>Sem 1</th>
+                                <th>Sem 2</th>
+                                <th>Sem 3</th>
+                                <th>Sem 4</th>
+                                <th>Total Global</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHTML);
 
   GM_addStyle(`
     #icononly-ui{
@@ -1952,6 +2117,44 @@ function statsSummaryHTML(){
     #icononly-ui #io-stats .stat-total{
       border-top:1px dashed #bbb; margin-top:6px; padding-top:6px; font-weight:600;
     }
+    /* ... (al final del GM_addStyle) ... */
+    #icononly-modal-bg {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.6); z-index: 10000;
+        display: flex; align-items: center; justify-content: center;
+    }
+    #icononly-modal-bg.io-modal-hidden { display: none; }
+    #icononly-modal-content {
+        background: #fffefc; border: 2px solid #333; border-radius: 10px;
+        width: 90%; max-width: 900px;
+        max-height: 80vh; display: flex; flex-direction: column;
+        box-shadow: 4px 4px 20px rgba(0,0,0,0.4);
+    }
+    #icononly-modal-hdr {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 8px 12px; border-bottom: 2px solid #ccc; font-weight: 700; font-size: 14px;
+    }
+    #icononly-modal-hdr button { font-size: 20px; background: none; border: none; cursor: pointer; }
+    #icononly-modal-body { padding: 10px; overflow-y: auto; }
+    #io-modal-tbl-wrap { max-height: 65vh; overflow-y: auto; }
+    #io-modal-tbl { width: 100%; border-collapse: collapse; font-size: 11px; }
+    #io-modal-tbl th, #io-modal-tbl td {
+        border: 1px solid #ddd; padding: 5px; text-align: left;
+    }
+    #io-modal-tbl th { background: #f0f0f0; position: sticky; top: 0; }
+    #io-modal-tbl td:nth-child(n+4) { text-align: right; font-variant-numeric: tabular-nums; }
+    #io-modal-tbl .io-type-3 { color: #008000; } /* Oasis L */
+    #io-modal-tbl .io-type-2 { color: #b00; } /* Oasis O */
+    #io-modal-tbl .io-type-0, #io-modal-tbl .io-type-1 { color: #333; } /* Aldea/Capital */
+    #io-modal-tbl .io-coords a { text-decoration: none; }
+    #io-modal-tbl .io-modal-total-row {
+            font-weight: bold;
+            background: #fdfaea; /* Un color amarillo pálido para destacarlo */
+            position: sticky;
+            z-index: 1; /* Para que quede sobre las filas normales */
+            /* 'top' se establecerá dinámicamente con JS */
+     }
+
   `);
 
   // Expand/Collapse
@@ -2004,7 +2207,129 @@ function statsSummaryHTML(){
   const elCfgOasisMax = document.getElementById('io-cfg-oasis-max');
   // --- FIN: NUEVAS REFERENCIAS OASIS ---
   elReset.onclick = ()=> hardReset();
+  // ... (cerca de las referencias de UI, ej. después de elReset.onclick) ...
 
+  const elModalBG = document.getElementById('icononly-modal-bg');
+  const elModalClose = document.getElementById('icononly-modal-close');
+  const elBtnTargetStats = document.getElementById('io-target-stats');
+  const elModalTbody = document.getElementById('io-modal-tbl').querySelector('tbody');
+
+  function getTargetTypeName(typeInt) {
+      switch(typeInt) {
+          case 0: return 'Aldea';
+          case 1: return 'Capital';
+          case 2: return 'Oasis Ocup';
+          case 3: return 'Oasis Libre';
+          default: return '???';
+      }
+  }
+
+  // Tu lógica de nombre de Oasis
+  function getTargetDisplayName(name, type) {
+      if (type === 2) return 'Oasis O';
+      if (type === 3) return 'Oasis L';
+      return name || '???';
+  }
+
+function renderTargetStatsModal() {
+      const db = getTargetStatsDB();
+      const ths = document.getElementById('io-modal-tbl').querySelectorAll('thead th');
+
+      // 1. Convertir a Array
+      const entries = Object.values(db);
+
+      // 2. Ordenar por Total Global (descendente)
+      entries.sort((a, b) => (b.globalTotal || 0) - (a.globalTotal || 0));
+
+      // 3. Obtener las 4 claves de semana más recientes (si existen)
+      const allWeekKeys = new Set();
+      entries.forEach(entry => {
+ Object.keys(entry.weeks || {}).forEach(k => allWeekKeys.add(k));
+      });
+      // Ordenar y tomar las últimas 4
+      const sortedWeekKeys = [...allWeekKeys].sort().slice(-4);
+
+      // 4. Actualizar los <th> de la tabla
+      for (let i = 1; i <= 4; i++) {
+ const k = sortedWeekKeys[i-1]; // YYYY-MM-DD...
+ const th = ths[3 + i - 1]; // th[3], th[4], th[5], th[6]
+ if (k) {
+     const datePart = k.split('_')[0];
+     th.textContent = `Sem ${i} (${datePart.slice(5)})`; // (MM-DD)
+     th.dataset.wkKey = k;
+ } else {
+     th.textContent = `Sem ${i}`;
+     th.dataset.wkKey = '';
+ }
+      }
+      
+      // --- INICIO: NUEVA LÓGICA DE TOTALES ---
+
+      // 5. Calcular Totales
+      const totals = { w1: 0, w2: 0, w3: 0, w4: 0, global: 0 };
+      const weekKeysFromHeaders = {
+ w1: ths[3].dataset.wkKey, 
+ w2: ths[4].dataset.wkKey,
+ w3: ths[5].dataset.wkKey,
+ w4: ths[6].dataset.wkKey
+      };
+
+      for (const entry of entries) {
+ totals.global += (entry.globalTotal || 0);
+ if (weekKeysFromHeaders.w1 && entry.weeks[weekKeysFromHeaders.w1]) { totals.w1 += entry.weeks[weekKeysFromHeaders.w1]; }
+ if (weekKeysFromHeaders.w2 && entry.weeks[weekKeysFromHeaders.w2]) { totals.w2 += entry.weeks[weekKeysFromHeaders.w2]; }
+ if (weekKeysFromHeaders.w3 && entry.weeks[weekKeysFromHeaders.w3]) { totals.w3 += entry.weeks[weekKeysFromHeaders.w3]; }
+ if (weekKeysFromHeaders.w4 && entry.weeks[weekKeysFromHeaders.w4]) { totals.w4 += entry.weeks[weekKeysFromHeaders.w4]; }
+      }
+
+      // 6. Obtener altura del header para el 'top' del sticky
+      // (offsetHeight nos da la altura real, incluyendo padding y borde)
+      const headerHeight = (ths[0]?.offsetHeight || 25) + 'px';
+
+      // 7. Generar HTML de la fila de Total
+      const totalRowHtml = `<tr class="io-modal-total-row" style="top: ${headerHeight};"><td>TOTALES</td><td>-</td><td>-</td><td>${fmtRes(totals.w1)}</td><td>${fmtRes(totals.w2)}</td><td>${fmtRes(totals.w3)}</td><td>${fmtRes(totals.w4)}</td><td>${fmtRes(totals.global)}</td></tr>`;
+      // --- FIN: NUEVA LÓGICA DE TOTALES ---
+
+
+      // 8. Generar filas de datos
+      const entriesHtml = entries.map(entry => {
+ const { name, type, x, y, weeks, globalTotal } = entry;
+
+ // Reutilizamos las claves de semana que ya buscamos
+ const wVals = {
+     w1: (weekKeysFromHeaders.w1 && weeks[weekKeysFromHeaders.w1]) ? weeks[weekKeysFromHeaders.w1] : 0,
+     w2: (weekKeysFromHeaders.w2 && weeks[weekKeysFromHeaders.w2]) ? weeks[weekKeysFromHeaders.w2] : 0,
+     w3: (weekKeysFromHeaders.w3 && weeks[weekKeysFromHeaders.w3]) ? weeks[weekKeysFromHeaders.w3] : 0,
+     w4: (weekKeysFromHeaders.w4 && weeks[weekKeysFromHeaders.w4]) ? weeks[weekKeysFromHeaders.w4] : 0,
+ };
+
+ const dName = getTargetDisplayName(name, type);
+ const tName = getTargetTypeName(type);
+ const mapLink = `/karte.php?x=${x}&y=${y}`;
+
+ // --- LÍNEA CORREGIDA ---
+ return `<tr><td>${escapeHTML(dName)}</td><td class="io-type-${type}">${tName}</td><td class="io-coords"><a href="${mapLink}" target="_blank">(${x}|${y})</a></td><td>${fmtRes(wVals.w1)}</td><td>${fmtRes(wVals.w2)}</td><td>${fmtRes(wVals.w3)}</td><td>${fmtRes(wVals.w4)}</td><td>${fmtRes(globalTotal)}</td></tr>`;
+ // --- FIN LÍNEA CORREGIDA ---
+      }).join('');
+      
+      // 9. Renderizado final (fila total + filas de datos)
+      const finalHtml = entries.length ? (totalRowHtml + entriesHtml) : '<tr><td colspan="8">Sin datos.</td></tr>';
+      elModalTbody.innerHTML = finalHtml;
+  }
+
+  // --- Eventos del Modal ---
+  elBtnTargetStats.onclick = () => {
+      renderTargetStatsModal();
+      elModalBG.classList.remove('io-modal-hidden');
+  };
+  elModalClose.onclick = () => {
+      elModalBG.classList.add('io-modal-hidden');
+  };
+  elModalBG.onclick = (e) => {
+      if (e.target === elModalBG) { // Cierra solo si se hace clic en el fondo
+          elModalBG.classList.add('io-modal-hidden');
+      }
+  };
 
   const elCfgReserve = document.getElementById('io-cfg-reserve');
   elCfgReserve.value = Math.max(0, Math.min(100, parseInt(LS.get(KEY_CFG_RESERVE_PCT, 0),10)||0));
@@ -2021,7 +2346,7 @@ function statsSummaryHTML(){
       KEY_CFG_OVERLOAD, KEY_CFG_OVER_MAX, KEY_CFG_OVER_WINMIN, KEY_MASTER,
       KEY_VILLAGES, KEY_CFG_RESERVE_PCT, KEY_CFG_RANDOMIZE,KEY_KICK_GUARD,KEY_STATS_SEEN_REPORTS,
       KEY_CFG_PRIO_MODE, // Limpiar nuevas claves
-      KEY_CFG_OASIS_WIN_H, KEY_CFG_OASIS_MIN_CAV, KEY_CFG_OASIS_MIN_INF, KEY_CFG_OASIS_MAX_CYCLE,
+      KEY_CFG_OASIS_WIN_H, KEY_CFG_OASIS_MIN_CAV, KEY_CFG_OASIS_MIN_INF, KEY_CFG_OASIS_MAX_CYCLE,KEY_STATS_TARGET_SEEN,
       "tscm_oasis_cache_v3","tscm_area_scan_v1"
     ].forEach(k=>LS.del(k));
 
@@ -2252,76 +2577,75 @@ function statsSummaryHTML(){
   }
 
     // === START/STOP BUTTON (FINAL) ===
-    elToggle.onclick = async ()=>{
-        // Permitimos togglear UI aunque seamos slave; solo el master envía.
-        if (running){
-            setRunning(false);
-            // detener programaciones
-            runningIds=[];
-            Object.values(state).forEach(st=>{
-                if (st.t) clearTimeout(st.t);
-                if (st.cdt) clearInterval(st.cdt);
-            });
+    elToggle.onclick = async ()=>{
+        // Permitimos togglear UI aunque seamos slave; solo el master envía.
+        if (running){
+   setRunning(false);
+   // detener programaciones
+   runningIds=[];
+   Object.values(state).forEach(st=>{
+       if (st.t) clearTimeout(st.t);
+       if (st.cdt) clearInterval(st.cdt);
+   });
 
+   // detener bursts
+   Object.keys(burstTimers).forEach(k=>clearBurst(k));
+   // detener refresco visual
+   stopUiTick();
+   // opcional: limpiar next-send para que no queden restos
+   const nm = getNextMap();
+   Object.keys(nm||{}).forEach(k=>{ nm[k]=0; });
+   setNextMap(nm);
 
-            // detener bursts
-            Object.keys(burstTimers).forEach(k=>clearBurst(k));
-            // detener refresco visual
-            stopUiTick();
-            // opcional: limpiar next-send para que no queden restos
-            const nm = getNextMap();
-            Object.keys(nm||{}).forEach(k=>{ nm[k]=0; });
-            setNextMap(nm);
+   elCount.innerHTML='Detenido';
+   LS.set(KEY_AUTOSEND,false);
+   hasBootstrapped=false;
+   LOG('log','Auto OFF');
+   return;
+        }
 
-            elCount.innerHTML='Detenido';
-            LS.set(KEY_AUTOSEND,false);
-            hasBootstrapped=false;
-            LOG('log','Auto OFF');
-            return;
-        }
+        // start (UI + persistencia)
+        saveSelection();
+        const mode = LS.get(KEY_SELECTED_MODE,'CUSTOM');
+        let ids = (mode==='ALL') ? getAllFarmlists().map(f=>f.id) : (LS.get(KEY_SELECTED_IDS,[]));
+        if (!ids.length){ LOG('warn','Select at least 1 farmlist'); ui.classList.add('max'); return; }
 
-        // start (UI + persistencia)
-        saveSelection();
-        const mode = LS.get(KEY_SELECTED_MODE,'CUSTOM');
-        let ids = (mode==='ALL') ? getAllFarmlists().map(f=>f.id) : (LS.get(KEY_SELECTED_IDS,[]));
-        if (!ids.length){ LOG('warn','Select at least 1 farmlist'); ui.classList.add('max'); return; }
+        setRunning(true);
+        LS.set(KEY_AUTOSEND,true);
+        if (cfgGetBool(KEY_CFG_RANDOMIZE,false)) ids = shuffle(ids.slice());
 
-        setRunning(true);
-        LS.set(KEY_AUTOSEND,true);
-        if (cfgGetBool(KEY_CFG_RANDOMIZE,false)) ids = shuffle(ids.slice());
+        runningIds = ids.slice();
 
-        runningIds = ids.slice();
+        // interval init: APLICAR A TODAS (override)
+        const map = getIntervals();
+        const sel = elInt.value;
+        const mm = { "20":1_200_000, "30":1_800_000, "60":3_600_000, "120":7_200_000 };
+        const allMs = mm[sel] ?? DEFAULT_INTERVAL_MS;
+        for (const id of ids){ map[id]=allMs; }
+        setIntervals(map);
 
-        // interval init: APLICAR A TODAS (override)
-        const map = getIntervals();
-        const sel = elInt.value;
-        const mm = { "20":1_200_000, "30":1_800_000, "60":3_600_000, "120":7_200_000 };
-        const allMs = mm[sel] ?? DEFAULT_INTERVAL_MS;
-        for (const id of ids){ map[id]=allMs; }
-        setIntervals(map);
+        // --- LÓGICA DE INICIO MODIFICADA ---
+        // 1. Inicia el refresco visual
+        startUiTick();
+        
+        // 2. Pone todas las listas como "pendientes"
+        const nm = getNextMap();
+        for (const flId of ids){
+   nm[flId] = 0; // Poner en 0 para que kickPendingCycle lo tome
+   setKickGuardFor(flId, 500); // Pequeño guard para evitar doble kick
+        }
+        setNextMap(nm);
+        
+        // 3. Marcamos como 'bootstrapped' para la lógica de "convertirse en master"
+        hasBootstrapped = true;
+        
+        // 4. El loop `if (amIMaster())` que ejecutaba processList se elimina.
+        // El kickPendingCycle (que se llama desde startUiTick) se encargará
+        // de lanzar el primer ciclo de forma ordenada.
+        // --- FIN LÓGICA MODIFICADA ---
 
-        // refresco visual siempre
-        startUiTick()
-
-        if (amIMaster()){
-          // Ya no necesitamos 'allMs' aquí
-          for (const flId of ids){
-            try { 
-              await processList(flId);          // todas corren de inmediato
-            } catch (e) { 
-              LOG('error','first pass error', e); 
-            }
-            const next = now() + randDelayWithin(flId);
-            schedule(flId, next);
-            await humanDelayOnce();             // pequeño respiro para no saturar
-          }
-          hasBootstrapped = true;
-
-        }
-
-
-        LOG('log','Auto ON',{lists: ids.length, dry: isDry(), master: amIMaster()});
-    };
+        LOG('log','Auto ON',{lists: ids.length, dry: isDry(), master: amIMaster()});
+    };
 
 
   function initIntervalSelectBySaved(){

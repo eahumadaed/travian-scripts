@@ -826,7 +826,7 @@
         const clamp = (x,a,b)=> Math.max(a, Math.min(b, x));
 
         // ---- entradas ----
-        const lossTarget   = clamp( +smartInput.lossTarget || 0.01, 0.001, 0.5 ); // default 2%, [0.1%..50%]
+        const lossTarget   = clamp( +smartInput.lossTarget || 0.01, 0.001, 0.5 );
         const allowedUnits = (smartInput.allowedUnits && typeof smartInput.allowedUnits==="object") ? smartInput.allowedUnits : null;
 
         // Tribu y tablas
@@ -914,7 +914,9 @@
         let guard = 4000; // tope de iteraciones
         while(guard-- > 0){
             const { p } = estimate(A, Acav);
-            if(p <= lossTarget && A>0) break;
+            // Redondea la pérdida al 2do decimal (porcentaje entero más cercano)
+            const pRounded = Math.round(p * 100) / 100;
+            if(pRounded <= lossTarget && A>0) break;
 
             const choice = chooseUnit();
             if(!choice) break;
@@ -927,7 +929,9 @@
 
         // Verificación final
         const { p: pFinal, cavPct, Deff } = estimate(A, Acav);
-        const ok = (A>0) && (pFinal <= lossTarget);
+        // Redondea la pérdida final al 2do decimal
+        const pFinalRounded = Math.round(pFinal * 100) / 100;
+        const ok = (A>0) && (pFinalRounded <= lossTarget);
 
         // Compacta salida
         const out={};
@@ -1061,7 +1065,7 @@
             // ⬇️ Normaliza SIEMPRE justo antes de llamar al API
             const x = wrapCoord(p.x);
             const y = wrapCoord(p.y);
-            console.log(`[${_ts()}] [OR-core] cluz scan raw (${p.x}|${p.y}) -> wrapped (${x}|${y})`);
+            console.log(` [OR-core] cluz scan raw (${p.x}|${p.y}) -> wrapped (${x}|${y})`);
 
             try{
                 const res = await fetch("/api/v1/map/position", {
@@ -1079,7 +1083,7 @@
                 _mergeTilesIntoGlobal(g, data.tiles || []);
                 _saveGlobal(g);
             }catch(e){
-                console.warn(`[${_ts()}] [OR-core] cluz scan error at (${x}|${y}):`, e);
+                console.warn(` [OR-core] cluz scan error at (${x}|${y}):`, e);
             }
         }
 
@@ -1143,6 +1147,7 @@
      * @param {number} lossTarget - 0..1
      */
     utils.planOasisRaidNoHero = async function(did, vX, vY, oX, oY, available, whitelist, lossTarget){
+        console.log("[planOasisRaidNoHero] start", { did, vX, vY, oX, oY, available, whitelist, lossTarget });
         const tribe = (utils.getCurrentTribe ? utils.getCurrentTribe() : "GAUL").toUpperCase();
         const dist  = _dist(vX, vY, oX, oY);
 
@@ -1153,25 +1158,25 @@
             // 1) Si el área de la aldea está vieja, barrido cluz por aldea
             const area = _loadArea();
             if(!_areaFresh(area, vX, vY)){
-                console.log(`[${_ts()}] [OR-core] Area STALE, cluz @ village (${vX}|${vY})`);
+                console.log(` [OR-core] Area STALE, cluz @ village (${vX}|${vY})`);
                 await _cluzScan(vX, vY, /*cluz*/true, /*step*/30);
                 g = _loadGlobal();
                 rec = _getOasis(g, oX, oY);
-                console.log(`[${_ts()}] [OR-core] After village-cluz, oasis rec?`, !!rec);
+                console.log(` [OR-core] After village-cluz, oasis rec?`, !!rec);
             }
 
             // 2) Si aún no aparece, barrido cluz centrado en el OASIS (fallback previo al fetch)
             if(!rec){
-                console.log(`[${_ts()}] [OR-core] Oasis still unknown, cluz @ oasis (${oX}|${oY})`);
+                console.log(` [OR-core] Oasis still unknown, cluz @ oasis (${oX}|${oY})`);
                 await _cluzScan(oX, oY, /*cluz*/false, /*step*/30);
                 g = _loadGlobal();
                 rec = _getOasis(g, oX, oY);
-                console.log(`[${_ts()}] [OR-core] After oasis-cluz, oasis rec?`, !!rec);
+                console.log(` [OR-core] After oasis-cluz, oasis rec?`, !!rec);
             }
 
             // 3) Último recurso: fetch directo del oasis (título/detalle)
             if(!rec){
-                console.log(`[${_ts()}] [OR-core] Oasis unknown after both cluz, fetching details (${oX}|${oY})...`);
+                console.log(` [OR-core] Oasis unknown after both cluz, fetching details (${oX}|${oY})...`);
                 try{
                     const det = await utils.fetchOasisDetails(oX, oY); // { counts:{u31:n,...} }
                     const counts = det?.counts || {};
@@ -1179,9 +1184,9 @@
                     _putOasis(g, oX, oY, counts);
                     _saveGlobal(g);
                     rec = _getOasis(g, oX, oY);
-                    console.log(`[${_ts()}] [OR-core] Fetched & cached oasis (${oX}|${oY}), total=`,Object.values(counts).reduce((s,v)=>s+(+v||0),0));
+                    console.log(` [OR-core] Fetched & cached oasis (${oX}|${oY}), total=`,Object.values(counts).reduce((s,v)=>s+(+v||0),0));
                 }catch(e){
-                    console.warn(`[${_ts()}] [OR-core] fetchOasisDetails failed @ (${oX}|${oY}):`, e);
+                    console.warn(` [OR-core] fetchOasisDetails failed @ (${oX}|${oY}):`, e);
                     return { ok:false, type:"EMPTY", send:{}, counts:{}, empty:true, reason:"fetch_error" };
                 }
             }
@@ -1193,10 +1198,12 @@
 
         // (A) Vacío → 1 sola unidad, mínimo 5
         if(total === 0){
-        const unit = _pickUnitForEmpty(tribe, (available||{}), (whitelist||{}), dist);
-        if(!unit) return { ok:false, type:"EMPTY", send:{}, counts, empty:true, reason:"no_unit_meets_min", cachedAt };
-        const n = Math.min(available[unit]|0, MIN_WAVE);
-        return { ok:true, type:"EMPTY", send:{ [unit]: n }, counts, empty:true, cachedAt };
+            console.log(`[OR-core] oasis empty (${oX}|${oY})`);
+            const unit = _pickUnitForEmpty(tribe, (available||{}), (whitelist||{}), dist);
+            if(!unit) return { ok:false, type:"EMPTY", send:{}, counts, empty:true, reason:"no_unit_meets_min", cachedAt };
+            const n = Math.min(available[unit]|0, MIN_WAVE);
+            console.log("[OR-core] Empty", { unit, n })
+            return { ok:true, type:"EMPTY", send:{ [unit]: n }, counts, empty:true, cachedAt };
         }
 
         // (B) Con animales → delegar a smartBuildWaveNoHero
@@ -1204,33 +1211,73 @@
         return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"no_smart_fn", cachedAt };
         }
         try{
-        const ret = utils.smartBuildWaveNoHero(counts, (available||{}), {
-            lossTarget: (typeof lossTarget === "number" ? lossTarget : 0.01),
-            allowedUnits: (whitelist || {})
-        });
-        let send=null, ok=false;
-        if(Array.isArray(ret)){ send=ret[0]; ok=!!ret[1]; }
-        else if(ret && typeof ret==="object"){ send=ret.send; ok=!!ret.ok; }
+            const ret = utils.smartBuildWaveNoHero(counts, (available||{}), {
+                lossTarget: (typeof lossTarget === "number" ? lossTarget : 0.01),
+                allowedUnits: (whitelist || {})
+            });
+            let send=null, ok=false;
+            if(Array.isArray(ret)){ send=ret[0]; ok=!!ret[1]; }
+            else if(ret && typeof ret==="object"){ send=ret.send; ok=!!ret.ok; }
+            // (1) Verificar si el smart_builder tuvo éxito
+            if(!ok || !send || !Object.keys(send).some(k => (send[k]|0)>0)){
+                return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"rejected_by_smart", cachedAt };
+            }
 
-        if(!ok || !send || !Object.keys(send).some(k => (send[k]|0)>0)){
-            return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"rejected_by_smart", cachedAt };
-        }
-        const maxCnt = Math.max(...Object.keys(send).map(k => +send[k]||0), 0);
-        if(maxCnt < MIN_WAVE){
-            return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"below_min_wave", cachedAt };
-        }
-        const filtered = {};
-        for(const k of Object.keys(send)){
-            if(whitelist && !whitelist[k]) continue;
-            filtered[k] = send[k]|0;
-        }
-        if(!Object.keys(filtered).length){
-            return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"whitelist_filtered_all", cachedAt };
-        }
-        return { ok:true, type:"ANIMALS", send:filtered, counts, empty:false, cachedAt };
+            // (2) Filtrar por whitelist ANTES de escalar
+            const filteredSend = {};
+            for(const k of Object.keys(send)){
+                if(whitelist && !whitelist[k]) continue; // Ignorar si no está en whitelist
+                if((send[k]|0) > 0){
+                    filteredSend[k] = send[k]|0;
+                }
+            }
+
+            // (3) Verificar si la whitelist eliminó todas las unidades
+            if(Object.keys(filteredSend).length === 0){
+                return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"whitelist_filtered_all", cachedAt };
+            }
+
+            // (4) Lógica de escalado a MIN_WAVE
+            const baseTotalCnt = Object.values(filteredSend).reduce((s, v) => s + v, 0);
+            let finalSend = filteredSend; // Por defecto, usar la oleada calculada
+
+            if (baseTotalCnt < MIN_WAVE) {
+                console.log(`[OR-core] Smart wave total (${baseTotalCnt}) is below MIN_WAVE (${MIN_WAVE}). Attempting to scale up.`);
+                
+                // Calcular factor de escala (ej. MIN_WAVE 10 / baseTotal 5 = 2.0)
+                const scale = MIN_WAVE / baseTotalCnt;
+                
+                const scaledSend = {};
+                let canScale = true;
+                
+                for (const [unit, count] of Object.entries(filteredSend)) {
+                    // Redondear hacia arriba para asegurar que alcanzamos MIN_WAVE
+                    const needed = Math.ceil(count * scale); 
+                    
+                    if ((available[unit] || 0) < needed) {
+                        // No hay suficientes tropas disponibles para escalar
+                        canScale = false;
+                        break; 
+                    }
+                    scaledSend[unit] = needed;
+                }
+
+                if (canScale) {
+                    const scaledTotal = Object.values(scaledSend).reduce((s, v) => s + v, 0);
+                    console.log(`[OR-core] Scaled wave up to ${scaledTotal} total.`, scaledSend);
+                    finalSend = scaledSend; // Usar la nueva oleada escalada
+                } else {
+                    console.warn(`[OR-core] Cannot scale wave to MIN_WAVE. Not enough available units for scaling.`);
+                    // Rechazar, como pediste (similar a "no_unit_meets_min")
+                    return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"no_unit_meets_min", cachedAt };
+                }
+            }
+
+            // (5) Éxito
+            return { ok:true, type:"ANIMALS", send:finalSend, counts, empty:false, cachedAt };
         }catch(e){
-        console.warn(`[${_ts()}] [OR-core] smartBuildWaveNoHero error:`, e);
-        return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"smart_exception", cachedAt };
+            console.warn(` [OR-core] smartBuildWaveNoHero error:`, e);
+            return { ok:false, type:"ANIMALS", send:{}, counts, empty:false, reason:"smart_exception", cachedAt };
         }
     };
 
